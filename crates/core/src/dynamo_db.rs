@@ -1,4 +1,8 @@
-use aws_sdk_dynamodb::{error::SdkError, types::{AttributeValue, ReturnValue}, Client};
+use aws_sdk_dynamodb::{
+    error::SdkError,
+    types::{AttributeValue, ReturnValue},
+    Client,
+};
 use integraal_wrappers::{Item, ItemBackend};
 use tokio::runtime::Handle;
 
@@ -17,7 +21,11 @@ impl DynamoBackend {
     /// Must be called from within a Tokio runtime.
     pub async fn from_env(table: impl Into<String>) -> Self {
         let cfg = aws_config::load_from_env().await;
-        Self { client: Client::new(&cfg), table: table.into(), handle: Handle::current() }
+        Self {
+            client: Client::new(&cfg),
+            table: table.into(),
+            handle: Handle::current(),
+        }
     }
 }
 
@@ -95,7 +103,11 @@ impl ItemBackend for DynamoBackend {
                 .await;
             match res {
                 Ok(_) => Ok(true),
-                Err(SdkError::ServiceError(e)) if e.err().is_conditional_check_failed_exception() => Ok(false),
+                Err(SdkError::ServiceError(e))
+                    if e.err().is_conditional_check_failed_exception() =>
+                {
+                    Ok(false)
+                }
                 Err(e) => Err(e.to_string()),
             }
         })
@@ -119,9 +131,15 @@ impl ItemBackend for DynamoBackend {
 
     fn query(&self, pk: &str, sk_prefix: &str, limit: usize) -> Result<Vec<Item>, String> {
         self.handle.block_on(async {
-            let mut q = self.client.query().table_name(&self.table).consistent_read(true).limit(limit as i32);
+            let mut q = self
+                .client
+                .query()
+                .table_name(&self.table)
+                .consistent_read(true)
+                .limit(limit as i32);
             q = if sk_prefix.is_empty() {
-                q.key_condition_expression("pk = :pk").expression_attribute_values(":pk", s(pk))
+                q.key_condition_expression("pk = :pk")
+                    .expression_attribute_values(":pk", s(pk))
             } else {
                 q.key_condition_expression("pk = :pk AND begins_with(sk, :p)")
                     .expression_attribute_values(":pk", s(pk))

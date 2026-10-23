@@ -45,11 +45,15 @@ pub struct DbScope {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn check(what: &str, v: &str, allow_empty: bool) -> Result<(), String> {
-    let bad = (v.is_empty() && !allow_empty) || v.len() > MAX_KEY_LEN || v.chars().any(char::is_control);
+    let bad =
+        (v.is_empty() && !allow_empty) || v.len() > MAX_KEY_LEN || v.chars().any(char::is_control);
     if bad {
         return Err(format!("invalid {what} {v:?}"));
     }
@@ -59,7 +63,11 @@ fn check(what: &str, v: &str, allow_empty: bool) -> Result<(), String> {
 impl DbScope {
     pub fn new(backend: Arc<dyn ItemBackend>, tenant: impl Into<String>) -> Self {
         let signer = Arc::new(CallbackSigner::new(backend.clone()));
-        Self { backend, tenant: tenant.into(), signer }
+        Self {
+            backend,
+            tenant: tenant.into(),
+            signer,
+        }
     }
 
     fn full_pk(&self, pk: &str) -> Result<String, String> {
@@ -74,7 +82,11 @@ impl DbScope {
 
     pub fn get(&self, pk: &str, sk: &str) -> Result<Option<String>, String> {
         check("sk", sk, true)?;
-        Ok(self.backend.get(&self.full_pk(pk)?, sk)?.and_then(Self::live).map(|i| i.value))
+        Ok(self
+            .backend
+            .get(&self.full_pk(pk)?, sk)?
+            .and_then(Self::live)
+            .map(|i| i.value))
     }
 
     pub fn put(&self, pk: &str, sk: &str, value: String) -> Result<(), String> {
@@ -87,7 +99,11 @@ impl DbScope {
         if value.len() > MAX_ITEM_BYTES {
             return Err(format!("item exceeds {MAX_ITEM_BYTES} bytes"));
         }
-        let item = Item { sk: sk.to_string(), value, ttl: now_secs() + ttl.min(DB_TTL).as_secs() };
+        let item = Item {
+            sk: sk.to_string(),
+            value,
+            ttl: now_secs() + ttl.min(DB_TTL).as_secs(),
+        };
         self.backend.put(&self.full_pk(pk)?, item)
     }
 
@@ -97,11 +113,20 @@ impl DbScope {
     }
 
     /// Live items in the partition, as `(sk, value)` pairs.
-    pub fn query(&self, pk: &str, sk_prefix: &str, limit: Option<usize>) -> Result<Vec<(String, String)>, String> {
+    pub fn query(
+        &self,
+        pk: &str,
+        sk_prefix: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<(String, String)>, String> {
         check("sk_prefix", sk_prefix, true)?;
         let limit = limit.unwrap_or(MAX_QUERY_ITEMS).clamp(1, MAX_QUERY_ITEMS);
         let items = self.backend.query(&self.full_pk(pk)?, sk_prefix, limit)?;
-        Ok(items.into_iter().filter_map(Self::live).map(|i| (i.sk, i.value)).collect())
+        Ok(items
+            .into_iter()
+            .filter_map(Self::live)
+            .map(|i| (i.sk, i.value))
+            .collect())
     }
 }
 
@@ -145,26 +170,32 @@ pub struct CallbackSigner {
     key: OnceLock<[u8; 32]>,
 }
 
-fn random<const N: usize>() -> Result<[u8; N], String> {
+pub(crate) fn random<const N: usize>() -> Result<[u8; N], String> {
     let mut b = [0u8; N];
     getrandom::fill(&mut b).map_err(|e| format!("no randomness available: {e}"))?;
     Ok(b)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
     if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 impl CallbackSigner {
     pub fn new(backend: Arc<dyn ItemBackend>) -> Self {
-        Self { backend, key: OnceLock::new() }
+        Self {
+            backend,
+            key: OnceLock::new(),
+        }
     }
 
     fn key(&self) -> Result<[u8; 32], String> {
@@ -183,7 +214,11 @@ impl CallbackSigner {
         let key = match read()? {
             Some(k) => k,
             None => {
-                let fresh = Item { sk: String::new(), value: hex(&random::<32>()?), ttl: KEY_TTL };
+                let fresh = Item {
+                    sk: String::new(),
+                    value: hex(&random::<32>()?),
+                    ttl: KEY_TTL,
+                };
                 self.backend.put_if_absent(KEY_PK, fresh)?; // losing a race is fine: we re-read the winner's key
                 read()?.ok_or("callback signing key missing after create")?
             }
@@ -210,12 +245,18 @@ impl CallbackSigner {
         }
         let (id, rest) = token.split_at(32);
         let (exp, tag) = rest.split_at(16);
-        let (Ok(exp), Some(tag)) = (u64::from_str_radix(exp, 16), unhex(tag)) else { return Ok(None) };
+        let (Ok(exp), Some(tag)) = (u64::from_str_radix(exp, 16), unhex(tag)) else {
+            return Ok(None);
+        };
         if unhex(id).is_none() {
             return Ok(None);
         }
         // constant-time comparison of the truncated tag
-        Ok(self.tag(tenant, id, exp)?.verify_truncated_left(&tag).is_ok().then(|| (id.to_string(), exp)))
+        Ok(self
+            .tag(tenant, id, exp)?
+            .verify_truncated_left(&tag)
+            .is_ok()
+            .then(|| (id.to_string(), exp)))
     }
 }
 
@@ -232,7 +273,12 @@ impl DbScope {
 
     /// Stores a single-use callback and returns its signed token. The row lives in the
     /// tenant's own partition namespace as `cb#<id>`, with a random 128-bit id.
-    pub fn create_callback(&self, script: Option<String>, state: serde_json::Value, ttl: Duration) -> Result<String, String> {
+    pub fn create_callback(
+        &self,
+        script: Option<String>,
+        state: serde_json::Value,
+        ttl: Duration,
+    ) -> Result<String, String> {
         let id = hex(&random::<16>()?);
         let value = serde_json::json!({ "script": script, "state": state }).to_string();
         self.put_for(&callback_pk(&id), "", value, ttl)?;
@@ -243,21 +289,32 @@ impl DbScope {
     /// Consumes the callback: the first presentation of a valid token gets it, every later one gets `Gone`.
     /// Forged, mistenanted and expired tokens are rejected before the table is read.
     pub fn take_callback(&self, token: &str) -> Result<Take, String> {
-        let Some((id, exp)) = self.signer.verify(&self.tenant, token)? else { return Ok(Take::Invalid) };
+        let Some((id, exp)) = self.signer.verify(&self.tenant, token)? else {
+            return Ok(Take::Invalid);
+        };
         if exp <= now_secs() {
             return Ok(Take::Expired);
         }
-        let Some(item) = self.backend.take(&self.full_pk(&callback_pk(&id))?, "")?.and_then(Self::live) else {
+        let Some(item) = self
+            .backend
+            .take(&self.full_pk(&callback_pk(&id))?, "")?
+            .and_then(Self::live)
+        else {
             return Ok(Take::Gone);
         };
-        let v: serde_json::Value = serde_json::from_str(&item.value).map_err(|e| format!("corrupt callback: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&item.value).map_err(|e| format!("corrupt callback: {e}"))?;
         let script = v.get("script").and_then(|s| s.as_str()).map(str::to_string);
-        let callback = Callback { script, state: v.get("state").cloned().unwrap_or(serde_json::Value::Null) };
+        let callback = Callback {
+            script,
+            state: v.get("state").cloned().unwrap_or(serde_json::Value::Null),
+        };
         Ok(Take::Found(Taken { callback, id, item }))
     }
 
     /// Puts a taken callback back (delivery failed), keeping its original expiry.
     pub fn restore_callback(&self, taken: Taken) -> Result<(), String> {
-        self.backend.put(&self.full_pk(&callback_pk(&taken.id))?, taken.item)
+        self.backend
+            .put(&self.full_pk(&callback_pk(&taken.id))?, taken.item)
     }
 }

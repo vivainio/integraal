@@ -1,0 +1,7 @@
+{
+  "scripts": { "bucket": "scripts" },
+  "data": { "prefix": "tenants/", "buckets": { "In": "data-in", "Out": "data-out", "Temp": "data-temp" } },
+  "db": { "table": "integraal" },
+  "server": { "port": 8080 },
+  "log": "info"
+}

@@ -74,12 +74,32 @@ pub fn api(lua: &Lua, max_stream_bytes: u64, deadline: Instant) -> mlua::Result<
             let reader: Box<dyn Read + Send> = match source {
                 Value::String(s) => Box::new(io::Cursor::new(s.as_bytes().to_vec())),
                 Value::UserData(ud) => take_stream(&ud)?,
-                _ => return Err(mlua::Error::runtime("native.xml.events expects a string or a stream")),
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "native.xml.events expects a string or a stream",
+                    ))
+                }
             };
-            let trim = opts.map(|o| o.get::<Option<bool>>("trim")).transpose()?.flatten().unwrap_or(false);
-            let mut r = Reader::from_reader(BufReader::new(Limited { inner: reader, left: max_stream_bytes, deadline }));
+            let trim = opts
+                .map(|o| o.get::<Option<bool>>("trim"))
+                .transpose()?
+                .flatten()
+                .unwrap_or(false);
+            let mut r = Reader::from_reader(BufReader::new(Limited {
+                inner: reader,
+                left: max_stream_bytes,
+                deadline,
+            }));
             r.config_mut().check_end_names = true;
-            let state = Mutex::new(State { reader: r, buf: Vec::new(), depth: 0, trim, pending_end: None, queued: None, done: false });
+            let state = Mutex::new(State {
+                reader: r,
+                buf: Vec::new(),
+                depth: 0,
+                trim,
+                pending_end: None,
+                queued: None,
+                done: false,
+            });
             lua.create_function(move |lua, ()| next_event(lua, &mut state.lock().unwrap()))
         })?,
     )?;
@@ -87,7 +107,9 @@ pub fn api(lua: &Lua, max_stream_bytes: u64, deadline: Instant) -> mlua::Result<
 }
 
 fn take_stream(ud: &AnyUserData) -> mlua::Result<Box<dyn Read + Send>> {
-    let stream = ud.borrow::<ByteStream>().map_err(|_| mlua::Error::runtime("not a stream"))?;
+    let stream = ud
+        .borrow::<ByteStream>()
+        .map_err(|_| mlua::Error::runtime("not a stream"))?;
     let taken = stream.0.lock().unwrap().take();
     taken.ok_or_else(|| mlua::Error::runtime("stream already consumed or closed"))
 }
@@ -98,7 +120,11 @@ fn xml_err(e: impl std::fmt::Display) -> mlua::Error {
 
 /// Owned, Lua-free form of a parser event so text runs can be coalesced.
 enum Ev {
-    Start { tag: String, attrs: Vec<(String, String)>, empty: bool },
+    Start {
+        tag: String,
+        attrs: Vec<(String, String)>,
+        empty: bool,
+    },
     End(String),
     Text(String),
     CData(String),
@@ -120,9 +146,18 @@ fn read_raw(st: &mut State) -> mlua::Result<Ev> {
                 for a in e.attributes() {
                     let a = a.map_err(xml_err)?;
                     let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-                    attrs.push((key, a.decode_and_unescape_value(decoder).map_err(xml_err)?.into_owned()));
+                    attrs.push((
+                        key,
+                        a.decode_and_unescape_value(decoder)
+                            .map_err(xml_err)?
+                            .into_owned(),
+                    ));
                 }
-                Ev::Start { tag: String::from_utf8_lossy(e.name().as_ref()).into_owned(), attrs, empty }
+                Ev::Start {
+                    tag: String::from_utf8_lossy(e.name().as_ref()).into_owned(),
+                    attrs,
+                    empty,
+                }
             }
             Event::End(e) => Ev::End(String::from_utf8_lossy(e.name().as_ref()).into_owned()),
             Event::Text(t) => {
@@ -160,7 +195,11 @@ fn read_logical(st: &mut State) -> mlua::Result<Ev> {
         match read_raw(st)? {
             Ev::Text(t) => text.push_str(&t),
             other => {
-                let text = if st.trim { text.trim().to_string() } else { text };
+                let text = if st.trim {
+                    text.trim().to_string()
+                } else {
+                    text
+                };
                 if text.is_empty() {
                     return Ok(other);
                 }

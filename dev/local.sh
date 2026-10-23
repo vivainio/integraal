@@ -3,8 +3,9 @@
 # Prereq: `uv tool install roto-aws` and `roto-server --port 5070` running.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Only the AWS SDK variables are environment; everything else is in dev/local.json.
 export AWS_ENDPOINT_URL=http://localhost:5070 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
-export SCRIPT_BUCKET=scripts DATA_BUCKETS=In=data-in,Out=data-out,Temp=data-temp DATA_PREFIX=tenants/ DB_TABLE=integraal PORT=8080
+DB_TABLE=integraal
 
 uvx --from awscli aws s3 mb s3://scripts
 uvx --from awscli aws s3 mb s3://data-in
@@ -23,4 +24,4 @@ uvx --from awscli aws s3 cp examples/acme/config.json s3://scripts/acme/config.j
 
 echo "routed: curl -XPOST localhost:8080/v1/acme -d '{\"kind\":\"x\"}' -H 'content-type: application/json'"
 echo "try: curl -XPOST localhost:8080/v1/acme/hello -d '{\"x\":1}' -H 'content-type: application/json'"
-exec cargo run -p integraal-server
+exec cargo run -p integraal-server -- --config dev/local.json

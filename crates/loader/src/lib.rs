@@ -49,7 +49,10 @@ pub struct MemoryStore(pub std::sync::Mutex<HashMap<String, String>>);
 
 impl MemoryStore {
     pub fn put(&self, key: &ScriptKey, source: &str) {
-        self.0.lock().unwrap().insert(key.object_key(), source.to_string());
+        self.0
+            .lock()
+            .unwrap()
+            .insert(key.object_key(), source.to_string());
     }
 }
 
@@ -57,12 +60,17 @@ impl MemoryStore {
 impl ScriptStore for MemoryStore {
     async fn fetch(&self, key: &ScriptKey, etag: Option<&str>) -> Result<Fetched, LoadError> {
         let map = self.0.lock().unwrap();
-        let src = map.get(&key.object_key()).ok_or_else(|| LoadError::NotFound(key.object_key()))?;
+        let src = map
+            .get(&key.object_key())
+            .ok_or_else(|| LoadError::NotFound(key.object_key()))?;
         let tag = format!("{:x}", src.len());
         if etag == Some(tag.as_str()) {
             return Ok(Fetched::NotModified);
         }
-        Ok(Fetched::Fresh(Script { source: src.clone(), etag: Some(tag) }))
+        Ok(Fetched::Fresh(Script {
+            source: src.clone(),
+            etag: Some(tag),
+        }))
     }
 }
 

@@ -6,7 +6,8 @@ use std::{
 
 use integraal_loader::{CachedLoader, LoadError, ScriptKey};
 use integraal_wrappers::{
-    install, parse_runtime_version, Access, DataScope, DataScopes, DbScope, Throttle, HostContext, HostLimits, HttpPolicy, ItemBackend, ObjectBackend, ScriptName,
+    install, parse_runtime_version, Access, DataScope, DataScopes, DbScope, HostContext,
+    HostLimits, HttpPolicy, ItemBackend, MasterKeys, ObjectBackend, ScriptName, Throttle,
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
@@ -44,9 +45,12 @@ impl Default for Limits {
 
 impl Limits {
     /// Operator ceiling: the most any tenant config may request.
-    /// `MAX_TIMEOUT_MS` and `MAX_MEMORY_MB` override the corresponding values.
-    pub fn ceiling_from_env() -> Self {
-        let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
+    pub fn ceiling() -> Self {
+        Self::ceiling_with(None, None)
+    }
+
+    /// The ceiling with the timeout and heap limit replaced where given (the global config's `ceiling`).
+    pub fn ceiling_with(timeout_ms: Option<u64>, memory_mb: Option<u64>) -> Self {
         let mut c = Self {
             timeout: Duration::from_secs(60),
             memory_bytes: (256 * MB) as usize,
@@ -57,10 +61,10 @@ impl Limits {
             max_data_ops: 10_000,
             max_http_timeout: Duration::from_secs(30),
         };
-        if let Some(ms) = env("MAX_TIMEOUT_MS") {
+        if let Some(ms) = timeout_ms {
             c.timeout = Duration::from_millis(ms);
         }
-        if let Some(mb) = env("MAX_MEMORY_MB") {
+        if let Some(mb) = memory_mb {
             c.memory_bytes = (mb * MB) as usize;
         }
         c
@@ -69,16 +73,28 @@ impl Limits {
     /// Tenant request over defaults, clamped to the ceiling.
     fn resolve(&self, ceiling: &Limits, t: &TenantLimits) -> Limits {
         let mb = |v: Option<u64>, d: u64| v.map(|v| v.max(1) * MB).unwrap_or(d);
-        let ms = |v: Option<u64>, d: Duration| v.map(|v| Duration::from_millis(v.max(1))).unwrap_or(d);
+        let ms =
+            |v: Option<u64>, d: Duration| v.map(|v| Duration::from_millis(v.max(1))).unwrap_or(d);
         Limits {
             timeout: ms(t.timeout_ms, self.timeout).min(ceiling.timeout),
-            memory_bytes: (mb(t.memory_mb, self.memory_bytes as u64) as usize).min(ceiling.memory_bytes),
-            max_http_response_bytes: mb(t.max_http_response_mb, self.max_http_response_bytes).min(ceiling.max_http_response_bytes),
-            max_object_bytes: (mb(t.max_object_mb, self.max_object_bytes as u64) as usize).min(ceiling.max_object_bytes),
-            max_stream_bytes: mb(t.max_stream_mb, self.max_stream_bytes).min(ceiling.max_stream_bytes),
-            max_http_requests: t.max_http_requests.unwrap_or(self.max_http_requests).min(ceiling.max_http_requests),
-            max_data_ops: t.max_data_ops.unwrap_or(self.max_data_ops).min(ceiling.max_data_ops),
-            max_http_timeout: ms(t.max_http_timeout_ms, self.max_http_timeout).min(ceiling.max_http_timeout),
+            memory_bytes: (mb(t.memory_mb, self.memory_bytes as u64) as usize)
+                .min(ceiling.memory_bytes),
+            max_http_response_bytes: mb(t.max_http_response_mb, self.max_http_response_bytes)
+                .min(ceiling.max_http_response_bytes),
+            max_object_bytes: (mb(t.max_object_mb, self.max_object_bytes as u64) as usize)
+                .min(ceiling.max_object_bytes),
+            max_stream_bytes: mb(t.max_stream_mb, self.max_stream_bytes)
+                .min(ceiling.max_stream_bytes),
+            max_http_requests: t
+                .max_http_requests
+                .unwrap_or(self.max_http_requests)
+                .min(ceiling.max_http_requests),
+            max_data_ops: t
+                .max_data_ops
+                .unwrap_or(self.max_data_ops)
+                .min(ceiling.max_data_ops),
+            max_http_timeout: ms(t.max_http_timeout_ms, self.max_http_timeout)
+                .min(ceiling.max_http_timeout),
         }
     }
 }
@@ -112,28 +128,12 @@ pub struct TenantConfig {
     pub limits: TenantLimits,
     /// Buckets this tenant may use as `native.data.<name>`, and how: a grant or list of grants from
     /// `read`, `write` (put), `delete`, `readwrite` (all three), `upload` (presigned PUT) and `download` (presigned GET).
-    /// Absent = no access. Names must match the deployment's `DATA_BUCKETS`.
+    /// Absent = no access. Names must match the deployment's `data.buckets`.
     #[serde(default)]
     pub data: HashMap<String, Access>,
     /// Script whose `on_route`/`route` handler picks the script for messages that don't name one.
     #[serde(default)]
     pub router: Option<String>,
-}
-
-/// Parses `DATA_BUCKETS` (`name=bucket,name=bucket`) into `(name, bucket)` pairs.
-pub(crate) fn parse_data_buckets(spec: &str) -> Result<Vec<(String, String)>, String> {
-    spec.split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|pair| {
-            let (name, bucket) = pair.split_once('=').ok_or_else(|| format!("DATA_BUCKETS entry {pair:?} is not name=bucket"))?;
-            let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-            if !ok || bucket.is_empty() {
-                return Err(format!("DATA_BUCKETS entry {pair:?} is invalid (names are letters, digits and _)"));
-            }
-            Ok((name.to_string(), bucket.to_string()))
-        })
-        .collect()
 }
 
 /// A fully resolved unit of work: which script runs, with which event.
@@ -151,9 +151,13 @@ pub struct Engine {
     ceiling: Limits,
     /// Named buckets with the base key prefix each tenant's directory sits under.
     data: HashMap<String, (Arc<dyn ObjectBackend>, String)>,
-    db: Option<(Arc<dyn ItemBackend>, Arc<integraal_wrappers::CallbackSigner>)>,
+    db: Option<(
+        Arc<dyn ItemBackend>,
+        Arc<integraal_wrappers::CallbackSigner>,
+    )>,
     callback_base_url: Option<String>,
     throttle: Option<Arc<Throttle>>,
+    master_keys: Option<MasterKeys>,
 }
 
 /// Everything besides limits and config that one invocation's native API is wired to.
@@ -163,14 +167,24 @@ struct Services {
     db: Option<DbScope>,
     cb_url: Option<String>,
     throttle: Option<Arc<Throttle>>,
+    master_keys: Option<MasterKeys>,
 }
 
 impl Engine {
     pub fn new(loader: Arc<CachedLoader>, limits: Limits) -> Self {
-        Self { loader, limits, ceiling: Limits::ceiling_from_env(), data: HashMap::new(), db: None, callback_base_url: None, throttle: None }
+        Self {
+            loader,
+            limits,
+            ceiling: Limits::ceiling(),
+            data: HashMap::new(),
+            db: None,
+            callback_base_url: None,
+            throttle: None,
+            master_keys: None,
+        }
     }
 
-    /// Overrides the operator ceiling (default: `Limits::ceiling_from_env()`).
+    /// Overrides the operator ceiling (default: `Limits::ceiling()`).
     pub fn with_ceiling(mut self, ceiling: Limits) -> Self {
         self.ceiling = ceiling;
         self
@@ -178,19 +192,14 @@ impl Engine {
 
     /// Registers a named bucket for `native.data.<name>`. Each tenant is confined to
     /// `<base_prefix><tenant>/` in it, and only reaches it if its config grants access.
-    pub fn with_data(mut self, name: impl Into<String>, backend: Arc<dyn ObjectBackend>, base_prefix: impl Into<String>) -> Self {
+    pub fn with_data(
+        mut self,
+        name: impl Into<String>,
+        backend: Arc<dyn ObjectBackend>,
+        base_prefix: impl Into<String>,
+    ) -> Self {
         self.data.insert(name.into(), (backend, base_prefix.into()));
         self
-    }
-
-    /// Registers every bucket in `DATA_BUCKETS` (`name=bucket,name=bucket`) under `DATA_PREFIX`.
-    /// Must be called from within a Tokio runtime. No `DATA_BUCKETS` means no buckets.
-    pub async fn with_data_from_env(mut self) -> Result<Self, String> {
-        let prefix = std::env::var("DATA_PREFIX").unwrap_or_default();
-        for (name, bucket) in parse_data_buckets(&std::env::var("DATA_BUCKETS").unwrap_or_default())? {
-            self = self.with_data(name, Arc::new(crate::S3Backend::from_env(bucket).await), prefix.clone());
-        }
-        Ok(self)
     }
 
     /// Enables `native.db`. Each tenant is confined to partition keys starting `TEN#<tenant>#`.
@@ -206,6 +215,12 @@ impl Engine {
         self
     }
 
+    /// Enables `native.crypto`. Each tenant's keys are derived from these and the tenant name.
+    pub fn with_master_keys(mut self, keys: MasterKeys) -> Self {
+        self.master_keys = Some(keys);
+        self
+    }
+
     /// Limits outbound HTTP per URL prefix, across all tenants in this process (Fargate; not used on Lambda).
     pub fn with_throttle(mut self, throttle: Throttle) -> Self {
         self.throttle = Some(Arc::new(throttle));
@@ -217,9 +232,14 @@ impl Engine {
     }
 
     /// Like `invoke`, additionally capping the timeout (e.g. to the time a Lambda has left).
-    pub async fn invoke_within(&self, inv: Invocation, max_time: Option<Duration>) -> Result<serde_json::Value, Error> {
+    pub async fn invoke_within(
+        &self,
+        inv: Invocation,
+        max_time: Option<Duration>,
+    ) -> Result<serde_json::Value, Error> {
         let config = match self.loader.load(&ScriptKey::config(&inv.tenant)?).await {
-            Ok(c) => serde_json::from_str::<TenantConfig>(&c.source).map_err(|e| Error::Config(e.to_string()))?,
+            Ok(c) => serde_json::from_str::<TenantConfig>(&c.source)
+                .map_err(|e| Error::Config(e.to_string()))?,
             Err(LoadError::NotFound(_)) => TenantConfig::default(),
             Err(e) => return Err(e.into()),
         };
@@ -230,33 +250,63 @@ impl Engine {
         }
         let mut data = DataScopes::new();
         for (name, access) in &config.data {
-            let (backend, base) = self
-                .data
-                .get(name)
-                .ok_or_else(|| Error::Config(format!("data bucket {name:?} is not configured on this deployment")))?;
+            let (backend, base) = self.data.get(name).ok_or_else(|| {
+                Error::Config(format!(
+                    "data bucket {name:?} is not configured on this deployment"
+                ))
+            })?;
             let scope = DataScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
                 .with_max_object_bytes(limits.max_object_bytes)
                 .with_access(*access);
             data.insert(name.clone(), scope);
         }
-        let db = self.db.as_ref().map(|(b, s)| DbScope::new(b.clone(), inv.tenant.as_str()).with_signer(s.clone()));
-        let svc = Services { data, db, cb_url: self.callback_base_url.clone(), throttle: self.throttle.clone() };
+        let db = self
+            .db
+            .as_ref()
+            .map(|(b, s)| DbScope::new(b.clone(), inv.tenant.as_str()).with_signer(s.clone()));
+        let svc = Services {
+            data,
+            db,
+            cb_url: self.callback_base_url.clone(),
+            throttle: self.throttle.clone(),
+            master_keys: self.master_keys.clone(),
+        };
 
         // Luau states are not Send-safe to hold across awaits; run on a blocking thread.
         match inv.script.clone() {
             Some(script) => {
                 let key = ScriptKey::new(&inv.tenant, &script, inv.version.as_deref())?;
                 let source = self.loader.load(&key).await?;
-                let call = Call { tenant: inv.tenant, script, trigger: inv.trigger, event: inv.event };
-                tokio::task::spawn_blocking(move || run(&source.source, &call, &limits, &svc, &config)).await
+                let call = Call {
+                    tenant: inv.tenant,
+                    script,
+                    trigger: inv.trigger,
+                    event: inv.event,
+                };
+                tokio::task::spawn_blocking(move || {
+                    run(&source.source, &call, &limits, &svc, &config)
+                })
+                .await
             }
             None => {
                 // No script named: the tenant's router picks one, and the chosen script runs in the same VM.
                 let router = config.router.clone().ok_or(Error::NoRoute)?;
-                let source = self.loader.load(&ScriptKey::new(&inv.tenant, &router, None)?).await?;
+                let source = self
+                    .loader
+                    .load(&ScriptKey::new(&inv.tenant, &router, None)?)
+                    .await?;
                 let (loader, handle) = (self.loader.clone(), tokio::runtime::Handle::current());
                 tokio::task::spawn_blocking(move || {
-                    run_routed(&source.source, router, &inv, &limits, &svc, &config, &loader, &handle)
+                    run_routed(
+                        &source.source,
+                        router,
+                        &inv,
+                        &limits,
+                        &svc,
+                        &config,
+                        &loader,
+                        &handle,
+                    )
                 })
                 .await
             }
@@ -274,11 +324,19 @@ struct Vm {
     data: DataScopes,
 }
 
-fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, svc: &Services, config: &TenantConfig) -> Result<Vm, Error> {
+fn new_vm(
+    version: u32,
+    tenant: &str,
+    script: &str,
+    limits: &Limits,
+    svc: &Services,
+    config: &TenantConfig,
+) -> Result<Vm, Error> {
     let http = config.http.expand(&config.vars).map_err(Error::Config)?;
     let lua = Lua::new();
     let deadline = Instant::now() + limits.timeout;
-    lua.set_memory_limit(limits.memory_bytes).map_err(internal)?;
+    lua.set_memory_limit(limits.memory_bytes)
+        .map_err(internal)?;
     let script = Arc::new(Mutex::new(script.to_string()));
     let vm_data = svc.data.clone();
     install(
@@ -291,6 +349,7 @@ fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, svc: &Servi
             db: svc.db.clone(),
             callback_base_url: svc.cb_url.clone(),
             throttle: svc.throttle.clone(),
+            master_keys: svc.master_keys.clone(),
             http,
             vars: config.vars.clone(),
             limits: HostLimits {
@@ -312,7 +371,13 @@ fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, svc: &Servi
             Ok(VmState::Continue)
         }
     });
-    Ok(Vm { lua, version, deadline, script, data: vm_data })
+    Ok(Vm {
+        lua,
+        version,
+        deadline,
+        script,
+        data: vm_data,
+    })
 }
 
 /// Loads `source` in the VM and calls the handler matching `call.trigger`.
@@ -321,7 +386,11 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
     *vm.script.lock().unwrap() = call.script.clone();
 
     let chunk_name = format!("={}/{}", call.tenant, call.script);
-    let module: Table = lua.load(source).set_name(chunk_name).eval().map_err(|e| script_err(e, deadline))?;
+    let module: Table = lua
+        .load(source)
+        .set_name(chunk_name)
+        .eval()
+        .map_err(|e| script_err(e, deadline))?;
 
     let handler: Function = call
         .trigger
@@ -333,13 +402,17 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
     let ctx = lua.create_table().map_err(internal)?;
     ctx.set("tenant", call.tenant.as_str()).map_err(internal)?;
     ctx.set("script", call.script.as_str()).map_err(internal)?;
-    ctx.set("trigger", format!("{:?}", call.trigger).to_lowercase()).map_err(internal)?;
+    ctx.set("trigger", format!("{:?}", call.trigger).to_lowercase())
+        .map_err(internal)?;
     ctx.set("runtime", vm.version).map_err(internal)?;
 
     let event = lua.to_value(&call.event).map_err(internal)?;
-    let out: mlua::Value = handler.call((ctx, event)).map_err(|e| script_err(e, deadline))?;
-    let result: serde_json::Value =
-        lua.from_value(out).map_err(|e| Error::Script(format!("handler result is not JSON-serializable: {e}")))?;
+    let out: mlua::Value = handler
+        .call((ctx, event))
+        .map_err(|e| script_err(e, deadline))?;
+    let result: serde_json::Value = lua
+        .from_value(out)
+        .map_err(|e| Error::Script(format!("handler result is not JSON-serializable: {e}")))?;
     if call.trigger == Trigger::Queue {
         apply_deletes(&result, &call.event, &vm.data)?;
     }
@@ -352,7 +425,11 @@ const MAX_RESULT_DELETES: usize = 100;
 /// Queue handlers can return `delete = true` (the object named by the event's `bucket` and `key`) or
 /// `delete = { { bucket = "In", key = "a.xml" }, ... }`. The engine deletes them only after the handler
 /// returned without error, through the tenant's own grants (so it still needs the `delete` grant).
-fn apply_deletes(result: &serde_json::Value, event: &serde_json::Value, data: &DataScopes) -> Result<(), Error> {
+fn apply_deletes(
+    result: &serde_json::Value,
+    event: &serde_json::Value,
+    data: &DataScopes,
+) -> Result<(), Error> {
     use serde_json::Value;
     let bad = |m: &str| Error::Script(format!("invalid delete in handler result: {m}"));
     let str_of = |v: &Value, field: &str| v.get(field).and_then(Value::as_str).map(str::to_string);
@@ -369,19 +446,40 @@ fn apply_deletes(result: &serde_json::Value, event: &serde_json::Value, data: &D
                 _ => Err(bad("each entry needs `bucket` and `key`")),
             })
             .collect::<Result<_, _>>()?,
-        Some(Value::Array(_)) => return Err(bad(&format!("more than {MAX_RESULT_DELETES} entries"))),
+        Some(Value::Array(_)) => {
+            return Err(bad(&format!("more than {MAX_RESULT_DELETES} entries")))
+        }
         Some(Value::Object(o)) if o.is_empty() => return Ok(()), // an empty Lua table
         Some(_) => return Err(bad("expected true or a list of { bucket, key }")),
     };
     for (bucket, key) in targets {
-        let scope = data.get(&bucket).ok_or_else(|| Error::Script(format!("delete: bucket {bucket:?} is not available to this tenant")))?;
-        scope.delete(&key).map_err(|e| Error::Script(format!("delete {bucket}/{key}: {e}")))?;
+        let scope = data.get(&bucket).ok_or_else(|| {
+            Error::Script(format!(
+                "delete: bucket {bucket:?} is not available to this tenant"
+            ))
+        })?;
+        scope
+            .delete(&key)
+            .map_err(|e| Error::Script(format!("delete {bucket}/{key}: {e}")))?;
     }
     Ok(())
 }
 
-fn run(source: &str, call: &Call, limits: &Limits, svc: &Services, config: &TenantConfig) -> Result<serde_json::Value, Error> {
-    let vm = new_vm(parse_runtime_version(source)?, &call.tenant, &call.script, limits, svc, config)?;
+fn run(
+    source: &str,
+    call: &Call,
+    limits: &Limits,
+    svc: &Services,
+    config: &TenantConfig,
+) -> Result<serde_json::Value, Error> {
+    let vm = new_vm(
+        parse_runtime_version(source)?,
+        &call.tenant,
+        &call.script,
+        limits,
+        svc,
+        config,
+    )?;
     call_in_vm(&vm, source, call)
 }
 
@@ -399,29 +497,61 @@ fn run_routed(
     loader: &CachedLoader,
     handle: &tokio::runtime::Handle,
 ) -> Result<serde_json::Value, Error> {
-    let vm = new_vm(parse_runtime_version(router_src)?, &inv.tenant, &router, limits, svc, config)?;
-    let route_call = Call { tenant: inv.tenant.clone(), script: router, trigger: Trigger::Route, event: inv.event.clone() };
+    let vm = new_vm(
+        parse_runtime_version(router_src)?,
+        &inv.tenant,
+        &router,
+        limits,
+        svc,
+        config,
+    )?;
+    let route_call = Call {
+        tenant: inv.tenant.clone(),
+        script: router,
+        trigger: Trigger::Route,
+        event: inv.event.clone(),
+    };
     let decision = call_in_vm(&vm, router_src, &route_call)?;
 
     // The router returns a script name, or `{ script, version?, event? }` to also rewrite the event.
     let (script, version, event) = match decision {
         serde_json::Value::String(s) => (s, inv.version.clone(), inv.event.clone()),
         serde_json::Value::Object(mut o) => {
-            let script = o.get("script").and_then(|s| s.as_str()).map(str::to_string).ok_or(Error::NoRoute)?;
-            let version = o.get("version").and_then(|v| v.as_str()).map(str::to_string).or_else(|| inv.version.clone());
-            (script, version, o.remove("event").unwrap_or_else(|| inv.event.clone()))
+            let script = o
+                .get("script")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+                .ok_or(Error::NoRoute)?;
+            let version = o
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| inv.version.clone());
+            (
+                script,
+                version,
+                o.remove("event").unwrap_or_else(|| inv.event.clone()),
+            )
         }
         _ => return Err(Error::NoRoute),
     };
 
     let key = ScriptKey::new(&inv.tenant, &script, version.as_deref())?;
     let target = handle.block_on(loader.load(&key))?;
-    let call = Call { tenant: inv.tenant.clone(), script, trigger: inv.trigger, event };
+    let call = Call {
+        tenant: inv.tenant.clone(),
+        script,
+        trigger: inv.trigger,
+        event,
+    };
 
     if parse_runtime_version(&target.source)? == vm.version {
         call_in_vm(&vm, &target.source, &call)
     } else {
-        let remaining = Limits { timeout: vm.deadline.saturating_duration_since(Instant::now()), ..limits.clone() };
+        let remaining = Limits {
+            timeout: vm.deadline.saturating_duration_since(Instant::now()),
+            ..limits.clone()
+        };
         run(&target.source, &call, &remaining, svc, config)
     }
 }
@@ -466,11 +596,20 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         store.put(&ScriptKey::new("acme", "s", None).unwrap(), src);
         store.put(&ScriptKey::config("acme").unwrap(), config);
-        Engine::new(Arc::new(CachedLoader::new(Shared(store), Duration::from_secs(60))), limits)
+        Engine::new(
+            Arc::new(CachedLoader::new(Shared(store), Duration::from_secs(60))),
+            limits,
+        )
     }
 
     fn inv(trigger: Trigger, event: serde_json::Value) -> Invocation {
-        Invocation { tenant: "acme".into(), script: Some("s".into()), version: None, trigger, event }
+        Invocation {
+            tenant: "acme".into(),
+            script: Some("s".into()),
+            version: None,
+            trigger,
+            event,
+        }
     }
 
     #[tokio::test]
@@ -483,7 +622,12 @@ mod tests {
             }"#,
             Limits::default(),
         );
-        assert_eq!(e.invoke(inv(Trigger::Queue, json!({"n": 7}))).await.unwrap(), json!({"via":"queue","n":7}));
+        assert_eq!(
+            e.invoke(inv(Trigger::Queue, json!({"n": 7})))
+                .await
+                .unwrap(),
+            json!({"via":"queue","n":7})
+        );
         assert_eq!(
             e.invoke(inv(Trigger::Http, json!({}))).await.unwrap(),
             json!({"via":"http","v":"{\"a\":1}"})
@@ -492,14 +636,26 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_blocks_os_and_enforces_timeout() {
-        let e = engine("return { handle = function() return os.execute ~= nil end }", Limits::default());
-        assert_eq!(e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(), json!(false));
+        let e = engine(
+            "return { handle = function() return os.execute ~= nil end }",
+            Limits::default(),
+        );
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!(false)
+        );
 
         let e = engine(
             "return { handle = function() while true do end end }",
-            Limits { timeout: Duration::from_millis(100), ..Limits::default() },
+            Limits {
+                timeout: Duration::from_millis(100),
+                ..Limits::default()
+            },
         );
-        assert!(matches!(e.invoke(inv(Trigger::Invoke, json!(null))).await, Err(Error::Timeout)));
+        assert!(matches!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await,
+            Err(Error::Timeout)
+        ));
     }
 
     #[derive(Default)]
@@ -513,23 +669,45 @@ mod tests {
             Ok(())
         }
         fn open(&self, k: &str) -> Result<Option<Box<dyn std::io::Read + Send>>, String> {
-            Ok(self.0.lock().unwrap().get(k).cloned().map(|v| Box::new(std::io::Cursor::new(v)) as Box<dyn std::io::Read + Send>))
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .get(k)
+                .cloned()
+                .map(|v| Box::new(std::io::Cursor::new(v)) as Box<dyn std::io::Read + Send>))
         }
         fn delete(&self, k: &str) -> Result<(), String> {
             self.0.lock().unwrap().remove(k);
             Ok(())
         }
         fn list(&self, p: &str, limit: usize) -> Result<Vec<String>, String> {
-            Ok(self.0.lock().unwrap().keys().filter(|k| k.starts_with(p)).take(limit).cloned().collect())
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|k| k.starts_with(p))
+                .take(limit)
+                .cloned()
+                .collect())
         }
-        fn presign(&self, m: integraal_wrappers::PresignMethod, key: &str, ttl: Duration) -> Result<String, String> {
+        fn presign(
+            &self,
+            m: integraal_wrappers::PresignMethod,
+            key: &str,
+            ttl: Duration,
+        ) -> Result<String, String> {
             Ok(format!("mem://{key}?{m:?}&ttl={}", ttl.as_secs()))
         }
     }
 
     #[tokio::test]
     async fn data_buckets_are_confined_and_access_controlled() {
-        let (inbox, outbox) = (Arc::new(MemBackend::default()), Arc::new(MemBackend::default()));
+        let (inbox, outbox) = (
+            Arc::new(MemBackend::default()),
+            Arc::new(MemBackend::default()),
+        );
         inbox.put("data/other/secret", b"x".to_vec()).unwrap();
         inbox.put("data/acme/drop.csv", b"a,b".to_vec()).unwrap();
         let e = engine_cfg(
@@ -560,8 +738,14 @@ mod tests {
                    "get_url_in":false,"put_url_out":false})
         );
         assert!(outbox.get("data/acme/notes/a").unwrap().is_some());
-        assert!(inbox.get("data/acme/drop.csv").unwrap().is_none(), "delete grant must delete");
-        assert!(inbox.get("data/acme/x").unwrap().is_none(), "put without write grant must fail");
+        assert!(
+            inbox.get("data/acme/drop.csv").unwrap().is_none(),
+            "delete grant must delete"
+        );
+        assert!(
+            inbox.get("data/acme/x").unwrap().is_none(),
+            "put without write grant must fail"
+        );
     }
 
     fn delete_engine(src: &str, grants: &str) -> (Engine, Arc<MemBackend>) {
@@ -569,7 +753,10 @@ mod tests {
         backend.put("data/acme/a.csv", b"1".to_vec()).unwrap();
         backend.put("data/acme/b.csv", b"2".to_vec()).unwrap();
         let cfg = format!(r#"{{"data":{{"In":{grants}}}}}"#);
-        (engine_cfg(src, Limits::default(), &cfg).with_data("In", backend.clone(), "data/"), backend)
+        (
+            engine_cfg(src, Limits::default(), &cfg).with_data("In", backend.clone(), "data/"),
+            backend,
+        )
     }
 
     #[tokio::test]
@@ -578,7 +765,10 @@ mod tests {
         let ev = json!({"bucket": "In", "key": "a.csv"});
 
         // `delete = true` removes the event's own object, and nothing else
-        let (e, b) = delete_engine("return { on_queue = function() return { ok = true, delete = true } end }", r#"["read","delete"]"#);
+        let (e, b) = delete_engine(
+            "return { on_queue = function() return { ok = true, delete = true } end }",
+            r#"["read","delete"]"#,
+        );
         e.invoke(inv(Trigger::Queue, ev.clone())).await.unwrap();
         assert!(!present(&b, "a.csv") && present(&b, "b.csv"));
 
@@ -591,12 +781,18 @@ mod tests {
         assert!(!present(&b, "a.csv") && !present(&b, "b.csv"));
 
         // a failing handler deletes nothing
-        let (e, b) = delete_engine(r#"return { on_queue = function() error("boom") end }"#, r#"["delete"]"#);
+        let (e, b) = delete_engine(
+            r#"return { on_queue = function() error("boom") end }"#,
+            r#"["delete"]"#,
+        );
         assert!(e.invoke(inv(Trigger::Queue, ev.clone())).await.is_err());
         assert!(present(&b, "a.csv"));
 
         // other triggers ignore `delete`
-        let (e, b) = delete_engine("return { handle = function() return { delete = true } end }", r#"["delete"]"#);
+        let (e, b) = delete_engine(
+            "return { handle = function() return { delete = true } end }",
+            r#"["delete"]"#,
+        );
         e.invoke(inv(Trigger::Http, ev.clone())).await.unwrap();
         assert!(present(&b, "a.csv"));
     }
@@ -606,18 +802,42 @@ mod tests {
         let present = |b: &MemBackend| b.get("data/acme/a.csv").unwrap().is_some();
         let ev = json!({"bucket": "In", "key": "a.csv"});
         // no delete grant: the invocation fails and the object stays
-        let (e, b) = delete_engine("return { on_queue = function() return { delete = true } end }", r#""read""#);
-        assert!(matches!(e.invoke(inv(Trigger::Queue, ev.clone())).await, Err(Error::Script(_))));
+        let (e, b) = delete_engine(
+            "return { on_queue = function() return { delete = true } end }",
+            r#""read""#,
+        );
+        assert!(matches!(
+            e.invoke(inv(Trigger::Queue, ev.clone())).await,
+            Err(Error::Script(_))
+        ));
         assert!(present(&b));
         // a bucket the tenant was not granted
-        let (e, b) = delete_engine(r#"return { on_queue = function() return { delete = { { bucket = "Out", key = "a.csv" } } } end }"#, r#""delete""#);
-        assert!(matches!(e.invoke(inv(Trigger::Queue, ev.clone())).await, Err(Error::Script(_))));
+        let (e, b) = delete_engine(
+            r#"return { on_queue = function() return { delete = { { bucket = "Out", key = "a.csv" } } } end }"#,
+            r#""delete""#,
+        );
+        assert!(matches!(
+            e.invoke(inv(Trigger::Queue, ev.clone())).await,
+            Err(Error::Script(_))
+        ));
         assert!(present(&b));
         // `true` without bucket and key in the event, and malformed entries
-        let (e, _) = delete_engine("return { on_queue = function() return { delete = true } end }", r#""delete""#);
-        assert!(matches!(e.invoke(inv(Trigger::Queue, json!({}))).await, Err(Error::Script(_))));
-        let (e, _) = delete_engine(r#"return { on_queue = function() return { delete = "a.csv" } end }"#, r#""delete""#);
-        assert!(matches!(e.invoke(inv(Trigger::Queue, ev)).await, Err(Error::Script(_))));
+        let (e, _) = delete_engine(
+            "return { on_queue = function() return { delete = true } end }",
+            r#""delete""#,
+        );
+        assert!(matches!(
+            e.invoke(inv(Trigger::Queue, json!({}))).await,
+            Err(Error::Script(_))
+        ));
+        let (e, _) = delete_engine(
+            r#"return { on_queue = function() return { delete = "a.csv" } end }"#,
+            r#""delete""#,
+        );
+        assert!(matches!(
+            e.invoke(inv(Trigger::Queue, ev)).await,
+            Err(Error::Script(_))
+        ));
     }
 
     #[test]
@@ -632,18 +852,30 @@ mod tests {
 
     #[tokio::test]
     async fn granting_an_unconfigured_bucket_fails_the_invocation() {
-        let e = engine_cfg("return { handle = function() return 1 end }", Limits::default(), r#"{"data":{"nope":"read"}}"#);
-        assert!(matches!(e.invoke(inv(Trigger::Invoke, json!(null))).await, Err(Error::Config(_))));
+        let e = engine_cfg(
+            "return { handle = function() return 1 end }",
+            Limits::default(),
+            r#"{"data":{"nope":"read"}}"#,
+        );
+        assert!(matches!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await,
+            Err(Error::Config(_))
+        ));
     }
 
     #[derive(Default)]
-    struct MemItems(std::sync::Mutex<std::collections::BTreeMap<(String, String), integraal_wrappers::Item>>);
+    struct MemItems(
+        std::sync::Mutex<std::collections::BTreeMap<(String, String), integraal_wrappers::Item>>,
+    );
     impl ItemBackend for MemItems {
         fn get(&self, pk: &str, sk: &str) -> Result<Option<integraal_wrappers::Item>, String> {
             Ok(self.0.lock().unwrap().get(&(pk.into(), sk.into())).cloned())
         }
         fn put(&self, pk: &str, item: integraal_wrappers::Item) -> Result<(), String> {
-            self.0.lock().unwrap().insert((pk.into(), item.sk.clone()), item);
+            self.0
+                .lock()
+                .unwrap()
+                .insert((pk.into(), item.sk.clone()), item);
             Ok(())
         }
         fn delete(&self, pk: &str, sk: &str) -> Result<(), String> {
@@ -662,19 +894,49 @@ mod tests {
             }
             Ok(absent)
         }
-        fn query(&self, pk: &str, p: &str, limit: usize) -> Result<Vec<integraal_wrappers::Item>, String> {
+        fn query(
+            &self,
+            pk: &str,
+            p: &str,
+            limit: usize,
+        ) -> Result<Vec<integraal_wrappers::Item>, String> {
             let m = self.0.lock().unwrap();
-            Ok(m.iter().filter(|((k, sk), _)| k == pk && sk.starts_with(p)).take(limit).map(|(_, i)| i.clone()).collect())
+            Ok(m.iter()
+                .filter(|((k, sk), _)| k == pk && sk.starts_with(p))
+                .take(limit)
+                .map(|(_, i)| i.clone())
+                .collect())
         }
     }
 
     #[tokio::test]
     async fn db_is_confined_to_tenant_and_expires_in_24h() {
         let backend = Arc::new(MemItems::default());
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         // another tenant's row, and an already-expired row of ours
-        backend.put("TEN#other#cart", integraal_wrappers::Item { sk: "".into(), value: "\"secret\"".into(), ttl: now + 1000 }).unwrap();
-        backend.put("TEN#acme#cart", integraal_wrappers::Item { sk: "old".into(), value: "1".into(), ttl: now - 1 }).unwrap();
+        backend
+            .put(
+                "TEN#other#cart",
+                integraal_wrappers::Item {
+                    sk: "".into(),
+                    value: "\"secret\"".into(),
+                    ttl: now + 1000,
+                },
+            )
+            .unwrap();
+        backend
+            .put(
+                "TEN#acme#cart",
+                integraal_wrappers::Item {
+                    sk: "old".into(),
+                    value: "1".into(),
+                    ttl: now - 1,
+                },
+            )
+            .unwrap();
         let e = engine(
             r#"return { handle = function()
                 native.db.put("cart", "a", { n = 1 })
@@ -712,33 +974,65 @@ mod tests {
         .with_callback_base_url("https://hooks.example.com/");
         let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         assert_eq!(out["bad_script"], json!(false));
-        let token = out["url"].as_str().unwrap().strip_prefix("https://hooks.example.com/cb/acme/").expect("url shape").to_string();
+        let token = out["url"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("https://hooks.example.com/cb/acme/")
+            .expect("url shape")
+            .to_string();
         assert_eq!(token.len(), 80);
 
         // the verifier (a different process, here a fresh scope) reads the same stored key
         let acme = DbScope::new(backend.clone(), "acme");
         let other = DbScope::new(backend.clone(), "other");
-        assert!(matches!(other.take_callback(&token).unwrap(), Take::Invalid), "wrong tenant");
+        assert!(
+            matches!(other.take_callback(&token).unwrap(), Take::Invalid),
+            "wrong tenant"
+        );
         let mut forged = token.clone().into_bytes();
         forged[0] = if forged[0] == b'0' { b'1' } else { b'0' }; // different id, same tag
-        assert!(matches!(acme.take_callback(&String::from_utf8(forged).unwrap()).unwrap(), Take::Invalid));
+        assert!(matches!(
+            acme.take_callback(&String::from_utf8(forged).unwrap())
+                .unwrap(),
+            Take::Invalid
+        ));
         let mut bad_exp = token.clone();
         bad_exp.replace_range(32..48, "ffffffffffffffff");
-        assert!(matches!(acme.take_callback(&bad_exp).unwrap(), Take::Invalid), "expiry is signed");
+        assert!(
+            matches!(acme.take_callback(&bad_exp).unwrap(), Take::Invalid),
+            "expiry is signed"
+        );
         assert!(matches!(acme.take_callback("nope").unwrap(), Take::Invalid));
 
-        let Take::Found(taken) = acme.take_callback(&token).unwrap() else { panic!("first take must succeed") };
+        let Take::Found(taken) = acme.take_callback(&token).unwrap() else {
+            panic!("first take must succeed")
+        };
         assert_eq!(taken.callback.script.as_deref(), Some("on-pay"));
         assert_eq!(taken.callback.state, json!({"order": 7}));
-        assert!(matches!(acme.take_callback(&token).unwrap(), Take::Gone), "second take must fail");
+        assert!(
+            matches!(acme.take_callback(&token).unwrap(), Take::Gone),
+            "second take must fail"
+        );
 
         // a failed delivery can put it back with its original expiry, and it is single-use again
         acme.restore_callback(taken).unwrap();
-        assert!(matches!(acme.take_callback(&token).unwrap(), Take::Found(_)));
+        assert!(matches!(
+            acme.take_callback(&token).unwrap(),
+            Take::Found(_)
+        ));
         assert!(matches!(acme.take_callback(&token).unwrap(), Take::Gone));
 
         // the signing key exists once, outside every tenant partition
-        assert_eq!(backend.0.lock().unwrap().keys().filter(|(pk, _)| pk.starts_with("SYS#")).count(), 1);
+        assert_eq!(
+            backend
+                .0
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(pk, _)| pk.starts_with("SYS#"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -746,19 +1040,35 @@ mod tests {
         use integraal_wrappers::Take;
         let backend = Arc::new(MemItems::default());
         let scope = DbScope::new(backend.clone(), "acme");
-        let token = scope.create_callback(None, json!(null), Duration::from_secs(5)).unwrap();
-        assert!(matches!(scope.take_callback(&token).unwrap(), Take::Found(_)));
-        let token = scope.create_callback(None, json!(null), Duration::from_secs(5)).unwrap();
+        let token = scope
+            .create_callback(None, json!(null), Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(
+            scope.take_callback(&token).unwrap(),
+            Take::Found(_)
+        ));
+        let token = scope
+            .create_callback(None, json!(null), Duration::from_secs(5))
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(6100)).await;
         backend.0.lock().unwrap().clear(); // even the rows and key are gone: only the signed expiry can answer
-        assert!(matches!(scope.take_callback(&token).unwrap(), Take::Expired));
+        assert!(matches!(
+            scope.take_callback(&token).unwrap(),
+            Take::Expired
+        ));
     }
 
     #[tokio::test]
     async fn callback_requires_configuration() {
-        let e = engine(r#"return { handle = function() return (pcall(native.callback.create)) end }"#, Limits::default())
-            .with_db(Arc::new(MemItems::default()));
-        assert_eq!(e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(), json!(false));
+        let e = engine(
+            r#"return { handle = function() return (pcall(native.callback.create)) end }"#,
+            Limits::default(),
+        )
+        .with_db(Arc::new(MemItems::default()));
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!(false)
+        );
     }
 
     #[tokio::test]
@@ -775,7 +1085,10 @@ mod tests {
         assert_eq!(denied["ok"], json!(false));
         assert!(denied["err"].as_str().unwrap().contains("allowlist"));
 
-        store.put(&ScriptKey::config("acme").unwrap(), r#"{"http":{"allow":["https://evil.example.org/"]}}"#);
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"http":{"allow":["https://evil.example.org/"]}}"#,
+        );
         let allowed = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         assert!(!allowed["err"].as_str().unwrap().contains("allowlist"));
     }
@@ -792,14 +1105,19 @@ mod tests {
         end }"#;
         let config = r#"{"http":{"allow":["https://api.partner.invalid/"]}}"#;
         // one start per 100 s: the first call goes out, the second could only start after the deadline
-        let rules = Throttle::from_json(r#"[{"url":"https://api.partner.invalid/v1/","per_second":0.01}]"#).unwrap();
+        let rules =
+            Throttle::from_json(r#"[{"url":"https://api.partner.invalid/v1/","per_second":0.01}]"#)
+                .unwrap();
         let e = engine_cfg(script, Limits::default(), config).with_throttle(rules);
         let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         assert!(!out[0].as_str().unwrap().contains("throttled"), "{out}");
         assert!(out[1].as_str().unwrap().contains("throttled"), "{out}");
 
         // without a throttle, neither call is held back
-        let out = engine_cfg(script, Limits::default(), config).invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        let out = engine_cfg(script, Limits::default(), config)
+            .invoke(inv(Trigger::Invoke, json!(null)))
+            .await
+            .unwrap();
         assert!(!out[1].as_str().unwrap().contains("throttled"), "{out}");
     }
 
@@ -852,16 +1170,24 @@ mod tests {
             r#"{"vars":{"api_base":"https://127.0.0.1.invalid/v1/","opts":{"region":"eu"}},
                 "http":{"allow":["${api_base}"]}}"#,
         );
-        let e = Engine::new(Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)), Limits::default());
+        let e = Engine::new(
+            Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)),
+            Limits::default(),
+        );
         let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         // the url matched the interpolated allowlist, so any failure is a network error, not a policy denial
-        assert_eq!(out, json!({"base":"https://127.0.0.1.invalid/v1/","region":"eu","blocked":false}));
+        assert_eq!(
+            out,
+            json!({"base":"https://127.0.0.1.invalid/v1/","region":"eu","blocked":false})
+        );
     }
 
     #[test]
     fn tenant_limits_are_clamped_to_ceiling() {
-        let (defaults, ceiling) = (Limits::default(), Limits::ceiling_from_env());
-        let t: TenantLimits = serde_json::from_str(r#"{"timeout_ms": 30000, "memory_mb": 99999, "max_data_ops": 5}"#).unwrap();
+        let (defaults, ceiling) = (Limits::default(), Limits::ceiling());
+        let t: TenantLimits =
+            serde_json::from_str(r#"{"timeout_ms": 30000, "memory_mb": 99999, "max_data_ops": 5}"#)
+                .unwrap();
         let l = defaults.resolve(&ceiling, &t);
         assert_eq!(l.timeout, Duration::from_secs(30)); // raised within ceiling
         assert_eq!(l.memory_bytes, ceiling.memory_bytes); // clamped
@@ -881,11 +1207,20 @@ mod tests {
                 return n
             end }"#,
         );
-        store.put(&ScriptKey::config("acme").unwrap(), r#"{"data":{"Out":"read"},"limits":{"max_data_ops":3}}"#);
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"data":{"Out":"read"},"limits":{"max_data_ops":3}}"#,
+        );
         let backend = Arc::new(MemBackend::default());
-        let e = Engine::new(Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)), Limits::default())
-            .with_data("Out", backend, "data/");
-        assert_eq!(e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(), json!(3));
+        let e = Engine::new(
+            Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)),
+            Limits::default(),
+        )
+        .with_data("Out", backend, "data/");
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!(3)
+        );
     }
 
     /// The shipped, type-checked examples must also run on the real VM
@@ -894,22 +1229,44 @@ mod tests {
     async fn typed_example_scripts_run() {
         let config = include_str!("../../../examples/acme/config.json");
         let backend = Arc::new(MemBackend::default());
-        backend.put("data/acme/in.xml", b"<feed><entry/><entry/><entry/></feed>".to_vec()).unwrap();
-        let e = engine_cfg(include_str!("../../../examples/acme/feed/latest.luau"), Limits::default(), config)
-            .with_data("In", backend, "data/")
-            .with_data("Out", Arc::new(MemBackend::default()), "data/");
-        let out = e.invoke(inv(Trigger::Queue, json!({"key": "in.xml"}))).await.unwrap();
+        backend
+            .put(
+                "data/acme/in.xml",
+                b"<feed><entry/><entry/><entry/></feed>".to_vec(),
+            )
+            .unwrap();
+        let e = engine_cfg(
+            include_str!("../../../examples/acme/feed/latest.luau"),
+            Limits::default(),
+            config,
+        )
+        .with_data("In", backend, "data/")
+        .with_data("Out", Arc::new(MemBackend::default()), "data/");
+        let out = e
+            .invoke(inv(Trigger::Queue, json!({"key": "in.xml"})))
+            .await
+            .unwrap();
         assert_eq!(out, json!({"entries": 3, "found": true}));
 
-        let e = engine_cfg(include_str!("../../../examples/acme/hello/latest.luau"), Limits::default(), config)
-            .with_data("In", Arc::new(MemBackend::default()), "data/")
-            .with_data("Out", Arc::new(MemBackend::default()), "data/");
+        let e = engine_cfg(
+            include_str!("../../../examples/acme/hello/latest.luau"),
+            Limits::default(),
+            config,
+        )
+        .with_data("In", Arc::new(MemBackend::default()), "data/")
+        .with_data("Out", Arc::new(MemBackend::default()), "data/");
         let out = e.invoke(inv(Trigger::Http, json!({"x": 1}))).await.unwrap();
-        assert_eq!(out, json!({"trigger": "http", "count": 1, "event": {"x": 1}}));
+        assert_eq!(
+            out,
+            json!({"trigger": "http", "count": 1, "event": {"x": 1}})
+        );
     }
 
     fn routed(store: &Arc<MemoryStore>) -> Engine {
-        Engine::new(Arc::new(CachedLoader::new(Shared(store.clone()), Duration::ZERO)), Limits::default())
+        Engine::new(
+            Arc::new(CachedLoader::new(Shared(store.clone()), Duration::ZERO)),
+            Limits::default(),
+        )
     }
 
     fn put(store: &MemoryStore, script: &str, src: &str) {
@@ -917,14 +1274,24 @@ mod tests {
     }
 
     fn msg(event: serde_json::Value) -> Invocation {
-        Invocation { tenant: "acme".into(), script: None, version: None, trigger: Trigger::Queue, event }
+        Invocation {
+            tenant: "acme".into(),
+            script: None,
+            version: None,
+            trigger: Trigger::Queue,
+            event,
+        }
     }
 
     #[tokio::test]
     async fn router_picks_script_and_can_rewrite_event() {
         let store = Arc::new(MemoryStore::default());
         put(&store, "parse-order", "return { on_queue = function(ctx, ev) return { by = 'parse-order', key = ev.key, trigger = ctx.trigger } end }");
-        put(&store, "audit", "return { on_queue = function(_, ev) return { by = 'audit', kind = ev.kind } end }");
+        put(
+            &store,
+            "audit",
+            "return { on_queue = function(_, ev) return { by = 'audit', kind = ev.kind } end }",
+        );
         put(
             &store,
             "router",
@@ -935,19 +1302,38 @@ mod tests {
                 return { script = "audit", event = { kind = "rewritten" } }
             end }"#,
         );
-        store.put(&ScriptKey::config("acme").unwrap(), r#"{"router":"router"}"#);
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"router":"router"}"#,
+        );
         let e = routed(&store);
         // target sees the original trigger, not "route"
-        let out = e.invoke(msg(json!({"key": "incoming/orders/1.xml"}))).await.unwrap();
-        assert_eq!(out, json!({"by": "parse-order", "key": "incoming/orders/1.xml", "trigger": "queue"}));
-        assert_eq!(e.invoke(msg(json!({"kind": "audit"}))).await.unwrap(), json!({"by": "audit", "kind": "audit"}));
-        assert_eq!(e.invoke(msg(json!({"kind": "other"}))).await.unwrap(), json!({"by": "audit", "kind": "rewritten"}));
+        let out = e
+            .invoke(msg(json!({"key": "incoming/orders/1.xml"})))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({"by": "parse-order", "key": "incoming/orders/1.xml", "trigger": "queue"})
+        );
+        assert_eq!(
+            e.invoke(msg(json!({"kind": "audit"}))).await.unwrap(),
+            json!({"by": "audit", "kind": "audit"})
+        );
+        assert_eq!(
+            e.invoke(msg(json!({"kind": "other"}))).await.unwrap(),
+            json!({"by": "audit", "kind": "rewritten"})
+        );
     }
 
     #[tokio::test]
     async fn router_and_target_share_one_budget() {
         let store = Arc::new(MemoryStore::default());
-        put(&store, "router", r#"return { on_route = function() native.data.Out.get("a"); native.data.Out.get("b"); return "t" end }"#);
+        put(
+            &store,
+            "router",
+            r#"return { on_route = function() native.data.Out.get("a"); native.data.Out.get("b"); return "t" end }"#,
+        );
         put(
             &store,
             "t",
@@ -957,7 +1343,10 @@ mod tests {
                 return ok
             end }"#,
         );
-        store.put(&ScriptKey::config("acme").unwrap(), r#"{"router":"router","data":{"Out":"read"},"limits":{"max_data_ops":3}}"#);
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"router":"router","data":{"Out":"read"},"limits":{"max_data_ops":3}}"#,
+        );
         let e = routed(&store).with_data("Out", Arc::new(MemBackend::default()), "data/");
         // 3 allowed in total; the router used 2, so the target gets exactly 1
         assert_eq!(e.invoke(msg(json!({}))).await.unwrap(), json!(1));
@@ -967,12 +1356,18 @@ mod tests {
     async fn unroutable_message_is_an_error() {
         let store = Arc::new(MemoryStore::default());
         let e = routed(&store);
-        assert!(matches!(e.invoke(msg(json!({"key": "x"}))).await, Err(Error::NoRoute)));
+        assert!(matches!(
+            e.invoke(msg(json!({"key": "x"}))).await,
+            Err(Error::NoRoute)
+        ));
     }
 
     #[tokio::test]
     async fn rejects_unknown_runtime() {
         let e = engine("--!runtime 99\nreturn {}", Limits::default());
-        assert!(matches!(e.invoke(inv(Trigger::Invoke, json!(null))).await, Err(Error::Wrappers(_))));
+        assert!(matches!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await,
+            Err(Error::Wrappers(_))
+        ));
     }
 }

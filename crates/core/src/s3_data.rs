@@ -20,7 +20,11 @@ impl S3Backend {
         let conf = aws_sdk_s3::config::Builder::from(&cfg)
             .force_path_style(std::env::var("AWS_ENDPOINT_URL").is_ok())
             .build();
-        Self { client: Client::from_conf(conf), bucket: bucket.into(), handle: Handle::current() }
+        Self {
+            client: Client::from_conf(conf),
+            bucket: bucket.into(),
+            handle: Handle::current(),
+        }
     }
 }
 
@@ -35,7 +39,11 @@ struct S3Reader {
 impl Read for S3Reader {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         while self.pos >= self.chunk.len() {
-            match self.handle.block_on(self.body.try_next()).map_err(std::io::Error::other)? {
+            match self
+                .handle
+                .block_on(self.body.try_next())
+                .map_err(std::io::Error::other)?
+            {
                 Some(b) => {
                     self.chunk = b.to_vec();
                     self.pos = 0;
@@ -53,10 +61,25 @@ impl Read for S3Reader {
 impl ObjectBackend for S3Backend {
     fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String> {
         self.handle.block_on(async {
-            match self.client.get_object().bucket(&self.bucket).key(key).send().await {
-                Ok(out) => Ok(Some(Box::new(S3Reader { body: out.body, handle: self.handle.clone(), chunk: Vec::new(), pos: 0 })
-                    as Box<dyn Read + Send>)),
-                Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => Ok(None),
+            match self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+            {
+                Ok(out) => Ok(Some(Box::new(S3Reader {
+                    body: out.body,
+                    handle: self.handle.clone(),
+                    chunk: Vec::new(),
+                    pos: 0,
+                }) as Box<dyn Read + Send>)),
+                Err(SdkError::ServiceError(e))
+                    if matches!(e.err(), GetObjectError::NoSuchKey(_)) =>
+                {
+                    Ok(None)
+                }
                 Err(e) => Err(e.to_string()),
             }
         })
@@ -64,9 +87,26 @@ impl ObjectBackend for S3Backend {
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.handle.block_on(async {
-            match self.client.get_object().bucket(&self.bucket).key(key).send().await {
-                Ok(out) => Ok(Some(out.body.collect().await.map_err(|e| e.to_string())?.to_vec())),
-                Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => Ok(None),
+            match self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+            {
+                Ok(out) => Ok(Some(
+                    out.body
+                        .collect()
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .to_vec(),
+                )),
+                Err(SdkError::ServiceError(e))
+                    if matches!(e.err(), GetObjectError::NoSuchKey(_)) =>
+                {
+                    Ok(None)
+                }
                 Err(e) => Err(e.to_string()),
             }
         })
@@ -88,16 +128,44 @@ impl ObjectBackend for S3Backend {
 
     fn delete(&self, key: &str) -> Result<(), String> {
         self.handle.block_on(async {
-            self.client.delete_object().bucket(&self.bucket).key(key).send().await.map(|_| ()).map_err(|e| e.to_string())
+            self.client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
     }
 
-    fn presign(&self, method: PresignMethod, key: &str, ttl: std::time::Duration) -> Result<String, String> {
+    fn presign(
+        &self,
+        method: PresignMethod,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> Result<String, String> {
         self.handle.block_on(async {
             let cfg = PresigningConfig::expires_in(ttl).map_err(|e| e.to_string())?;
             match method {
-                PresignMethod::Get => self.client.get_object().bucket(&self.bucket).key(key).presigned(cfg).await.map(|r| r.uri().to_string()).map_err(|e| e.to_string()),
-                PresignMethod::Put => self.client.put_object().bucket(&self.bucket).key(key).presigned(cfg).await.map(|r| r.uri().to_string()).map_err(|e| e.to_string()),
+                PresignMethod::Get => self
+                    .client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .presigned(cfg)
+                    .await
+                    .map(|r| r.uri().to_string())
+                    .map_err(|e| e.to_string()),
+                PresignMethod::Put => self
+                    .client
+                    .put_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .presigned(cfg)
+                    .await
+                    .map(|r| r.uri().to_string())
+                    .map_err(|e| e.to_string()),
             }
         })
     }
@@ -113,7 +181,11 @@ impl ObjectBackend for S3Backend {
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(out.contents().iter().filter_map(|o| o.key().map(str::to_string)).collect())
+            Ok(out
+                .contents()
+                .iter()
+                .filter_map(|o| o.key().map(str::to_string))
+                .collect())
         })
     }
 }

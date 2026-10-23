@@ -36,9 +36,14 @@ pub fn classify(body: &str) -> Result<Message, String> {
     }
     if let Some(records) = v.get("Records").and_then(Value::as_array) {
         let attempt = v.get(ATTEMPT_FIELD).and_then(Value::as_u64).unwrap_or(0) as u32;
-        return Ok(Message::S3 { records: records.clone(), attempt });
+        return Ok(Message::S3 {
+            records: records.clone(),
+            attempt,
+        });
     }
-    serde_json::from_value(v).map(Message::Envelope).map_err(|e| format!("not an invocation envelope: {e}"))
+    serde_json::from_value(v)
+        .map(Message::Envelope)
+        .map_err(|e| format!("not an invocation envelope: {e}"))
 }
 
 /// What to do with the queue message after running its records.
@@ -59,7 +64,10 @@ pub fn disposition(failed: Vec<Value>, attempt: u32) -> Disposition {
         Disposition::Retry
     } else {
         let body = json!({ "Records": failed, ATTEMPT_FIELD: attempt + 1 }).to_string();
-        Disposition::Requeue { body, delay_secs: (30 * (attempt as i32 + 1)).min(900) }
+        Disposition::Requeue {
+            body,
+            delay_secs: (30 * (attempt as i32 + 1)).min(900),
+        }
     }
 }
 
@@ -72,14 +80,28 @@ pub struct S3Events {
 }
 
 impl S3Events {
-    pub fn new(buckets: impl IntoIterator<Item = (String, String)>, prefix: impl Into<String>) -> Self {
-        Self { buckets: buckets.into_iter().map(|(logical, physical)| (physical, logical)).collect(), prefix: prefix.into() }
+    pub fn new(
+        buckets: impl IntoIterator<Item = (String, String)>,
+        prefix: impl Into<String>,
+    ) -> Self {
+        Self {
+            buckets: buckets
+                .into_iter()
+                .map(|(logical, physical)| (physical, logical))
+                .collect(),
+            prefix: prefix.into(),
+        }
     }
 
-    /// From `DATA_BUCKETS` and `DATA_PREFIX`.
-    pub fn from_env() -> Result<Self, String> {
-        let buckets = crate::engine::parse_data_buckets(&std::env::var("DATA_BUCKETS").unwrap_or_default())?;
-        Ok(Self::new(buckets, std::env::var("DATA_PREFIX").unwrap_or_default()))
+    /// From the global config's `data` section.
+    pub fn from_config(cfg: &crate::GlobalConfig) -> Self {
+        Self::new(
+            cfg.data
+                .buckets
+                .iter()
+                .map(|(name, bucket)| (name.clone(), bucket.clone())),
+            cfg.data.prefix.clone(),
+        )
     }
 
     /// One record -> one invocation (no script, so the tenant's router picks one) with
@@ -87,18 +109,34 @@ impl S3Events {
     /// to the tenant's prefix, so both can be passed straight to `native.data` or `delete`.
     /// `Ok(None)` means the record needs no processing (not a creation event, or a folder marker).
     pub fn invocation(&self, record: &Value) -> Result<Option<Invocation>, String> {
-        let name = record.get("eventName").and_then(Value::as_str).unwrap_or_default();
+        let name = record
+            .get("eventName")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if !name.starts_with("ObjectCreated") {
             return Ok(None);
         }
         let s3 = record.get("s3").ok_or("record has no s3 section")?;
-        let physical = s3.pointer("/bucket/name").and_then(Value::as_str).ok_or("record has no bucket name")?;
-        let raw_key = s3.pointer("/object/key").and_then(Value::as_str).ok_or("record has no object key")?;
-        let bucket = self.buckets.get(physical).ok_or_else(|| format!("bucket {physical:?} is not in DATA_BUCKETS"))?;
+        let physical = s3
+            .pointer("/bucket/name")
+            .and_then(Value::as_str)
+            .ok_or("record has no bucket name")?;
+        let raw_key = s3
+            .pointer("/object/key")
+            .and_then(Value::as_str)
+            .ok_or("record has no object key")?;
+        let bucket = self
+            .buckets
+            .get(physical)
+            .ok_or_else(|| format!("bucket {physical:?} is not in data.buckets"))?;
 
         let key = percent_decode(raw_key)?;
-        let rest = key.strip_prefix(&self.prefix).ok_or_else(|| format!("key {key:?} is outside DATA_PREFIX"))?;
-        let (tenant, relative) = rest.split_once('/').ok_or_else(|| format!("key {key:?} has no tenant directory"))?;
+        let rest = key
+            .strip_prefix(&self.prefix)
+            .ok_or_else(|| format!("key {key:?} is outside data.prefix"))?;
+        let (tenant, relative) = rest
+            .split_once('/')
+            .ok_or_else(|| format!("key {key:?} has no tenant directory"))?;
         ScriptKey::config(tenant).map_err(|e| e.to_string())?;
         if relative.is_empty() {
             return Ok(None);
@@ -128,7 +166,10 @@ fn percent_decode(s: &str) -> Result<String, String> {
         match b[i] {
             b'+' => out.push(b' '),
             b'%' => {
-                let hex = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()).ok_or_else(|| format!("bad escape in key {s:?}"))?;
+                let hex = s
+                    .get(i + 1..i + 3)
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                    .ok_or_else(|| format!("bad escape in key {s:?}"))?;
                 out.push(hex);
                 i += 2;
             }
@@ -153,22 +194,50 @@ mod tests {
 
     #[test]
     fn record_becomes_tenant_invocation_with_logical_bucket() {
-        let inv = events().invocation(&record("acme-in", "tenants/acme/incoming/my+file%2B1.xml")).unwrap().unwrap();
+        let inv = events()
+            .invocation(&record("acme-in", "tenants/acme/incoming/my+file%2B1.xml"))
+            .unwrap()
+            .unwrap();
         assert_eq!(inv.tenant, "acme");
         assert!(inv.script.is_none());
         assert_eq!(inv.trigger, Trigger::Queue);
-        assert_eq!(inv.event, json!({"bucket":"In","key":"incoming/my file+1.xml","size":12,"etag":"abc","event":"ObjectCreated:Put"}));
+        assert_eq!(
+            inv.event,
+            json!({"bucket":"In","key":"incoming/my file+1.xml","size":12,"etag":"abc","event":"ObjectCreated:Put"})
+        );
     }
 
     #[test]
     fn unusable_records_are_errors_or_skips() {
         let e = events();
-        assert!(e.invocation(&record("other", "tenants/acme/x")).is_err(), "unknown bucket");
-        assert!(e.invocation(&record("acme-in", "elsewhere/acme/x")).is_err(), "outside prefix");
-        assert!(e.invocation(&record("acme-in", "tenants/acme")).is_err(), "no tenant directory");
-        assert!(e.invocation(&record("acme-in", "tenants/../x/y")).is_err(), "bad tenant");
-        assert!(e.invocation(&record("acme-in", "tenants/acme/%zz")).is_err(), "bad escape");
-        assert!(e.invocation(&record("acme-in", "tenants/acme/")).unwrap().is_none(), "folder marker");
+        assert!(
+            e.invocation(&record("other", "tenants/acme/x")).is_err(),
+            "unknown bucket"
+        );
+        assert!(
+            e.invocation(&record("acme-in", "elsewhere/acme/x"))
+                .is_err(),
+            "outside prefix"
+        );
+        assert!(
+            e.invocation(&record("acme-in", "tenants/acme")).is_err(),
+            "no tenant directory"
+        );
+        assert!(
+            e.invocation(&record("acme-in", "tenants/../x/y")).is_err(),
+            "bad tenant"
+        );
+        assert!(
+            e.invocation(&record("acme-in", "tenants/acme/%zz"))
+                .is_err(),
+            "bad escape"
+        );
+        assert!(
+            e.invocation(&record("acme-in", "tenants/acme/"))
+                .unwrap()
+                .is_none(),
+            "folder marker"
+        );
         let mut removed = record("acme-in", "tenants/acme/x");
         removed["eventName"] = json!("ObjectRemoved:Delete");
         assert!(e.invocation(&removed).unwrap().is_none());
@@ -176,24 +245,42 @@ mod tests {
 
     #[test]
     fn classifies_messages() {
-        assert!(matches!(classify(r#"{"Service":"Amazon S3","Event":"s3:TestEvent"}"#), Ok(Message::Ignored)));
-        assert!(matches!(classify(r#"{"tenant":"acme","event":{}}"#), Ok(Message::Envelope(_))));
+        assert!(matches!(
+            classify(r#"{"Service":"Amazon S3","Event":"s3:TestEvent"}"#),
+            Ok(Message::Ignored)
+        ));
+        assert!(matches!(
+            classify(r#"{"tenant":"acme","event":{}}"#),
+            Ok(Message::Envelope(_))
+        ));
         assert!(classify("nope").is_err());
         assert!(classify(r#"{"hello":1}"#).is_err());
         let body = json!({"Records": [record("acme-in", "tenants/acme/a")]}).to_string();
-        assert!(matches!(classify(&body), Ok(Message::S3 { ref records, attempt: 0 }) if records.len() == 1));
+        assert!(
+            matches!(classify(&body), Ok(Message::S3 { ref records, attempt: 0 }) if records.len() == 1)
+        );
     }
 
     #[test]
     fn only_failed_records_are_requeued_with_a_counter() {
         assert_eq!(disposition(vec![], 3), Disposition::Done);
         let failed = vec![record("acme-in", "tenants/acme/b")];
-        let Disposition::Requeue { body, delay_secs } = disposition(failed.clone(), 0) else { panic!("expected requeue") };
+        let Disposition::Requeue { body, delay_secs } = disposition(failed.clone(), 0) else {
+            panic!("expected requeue")
+        };
         assert_eq!(delay_secs, 30);
-        let Ok(Message::S3 { records, attempt }) = classify(&body) else { panic!("requeued body must parse") };
+        let Ok(Message::S3 { records, attempt }) = classify(&body) else {
+            panic!("requeued body must parse")
+        };
         assert_eq!((records, attempt), (failed.clone(), 1));
         // backoff grows and is capped, then the queue's redrive policy takes over
-        assert!(matches!(disposition(failed.clone(), 4), Disposition::Requeue { delay_secs: 150, .. }));
+        assert!(matches!(
+            disposition(failed.clone(), 4),
+            Disposition::Requeue {
+                delay_secs: 150,
+                ..
+            }
+        ));
         assert_eq!(disposition(failed, MAX_REQUEUES), Disposition::Retry);
     }
 }

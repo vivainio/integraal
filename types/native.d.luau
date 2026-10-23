@@ -75,6 +75,18 @@ declare native: {
     callback: {
         create: (opts: { script: string?, state: any, ttl_s: number? }?) -> string,
     },
+    crypto: {
+        encrypt: (key: string, plaintext: string, aad: string?) -> string,
+        decrypt: (key: string, ciphertext: string, aad: string?) -> string,
+        is_current: (ciphertext: string) -> boolean,
+        hmac_sha256: (key: string, data: string, key_id: number?) -> string,
+        sha256: (data: string) -> string,
+        random: (n: number) -> string,
+        hex_encode: (data: string) -> string,
+        hex_decode: (hex: string) -> string,
+        base64_encode: (data: string) -> string,
+        base64_decode: (text: string) -> string,
+    },
     http: {
         request: ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, stream: true }) -> HttpStreamResponse)
             & ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, stream: false? }) -> HttpResponse),

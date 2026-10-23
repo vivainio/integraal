@@ -19,7 +19,7 @@ The tenant's `vars` from [`config.json`](tenant-config.md#vars), as a table.
 
 ## `native.data.<bucket>`
 Object storage, one table per bucket the tenant's [`data`](tenant-config.md#data) block grants.
-Everything is confined to `DATA_PREFIX<tenant>/` in that bucket and keys are **relative** to it.
+Everything is confined to `<data.prefix><tenant>/` in that bucket and keys are **relative** to it.
 Bucket names are case-sensitive and operator-defined; the conventional ones are `In`, `Out`, `Backup` and `Temp`.
 (Avoid lowercase `in`: it is a Luau keyword, so `native.data.in` does not parse.)
 Using a bucket you were not granted raises an error.
@@ -49,7 +49,7 @@ deletes those objects after the handler succeeds; see [Triggers](triggers.md#del
 
 ## `native.callback`
 Single-use callback URLs: hand one to a third party, and when they call it, a script runs with the
-state you saved. Needs `native.db` (`DB_TABLE`) and `CALLBACK_BASE_URL`.
+state you saved. Needs the `db` and `callbacks` sections of the [global config](deployment.md#configuration).
 
 ```lua
 local url = native.callback.create({ script = "on-payment", state = { order = 7 }, ttl_s = 3600 })
@@ -65,6 +65,35 @@ The token is HMAC-signed (tenant, id and expiry), so forged, wrong-tenant and ex
 rejected without reading the table. The signing key is generated automatically on first use and
 kept in the table outside every tenant partition; to rotate it, delete the `SYS#callback-key` row
 (outstanding callbacks stop working). Calls count against `max_data_ops`.
+
+## `native.crypto`
+Authenticated encryption without handling key material. Scripts name a key (`"invoices"`: 1-64
+characters of letters, digits, `-`, `_`, `.`); the host derives it from the operator's master key
+and your tenant name (HKDF-SHA256), so tenants cannot read each other's data even with the same
+key name. Needs [`crypto`](deployment.md#crypto) in the deployment config.
+
+| Function | Result |
+| --- | --- |
+| `encrypt(key, plaintext, aad?)` | binary string: XChaCha20-Poly1305 with a random nonce. 42 bytes larger than the input. |
+| `decrypt(key, ciphertext, aad?)` | plaintext; raises if the key or `aad` differs or the data was modified. |
+| `is_current(ciphertext)` | `true` if it was sealed with the operator's active master key. |
+| `hmac_sha256(key, data, key_id?)` | 32-byte tag; `key_id` selects an older master key to verify old tags. |
+| `sha256(data)`, `random(n)` | digest; `n` random bytes (1-1024). Work without `crypto` configured. |
+| `hex_encode/decode`, `base64_encode/decode` | conversions between binary strings and text. |
+
+`aad` is optional context that must match on decrypt (for example the object key, which stops a
+ciphertext being moved to another key). Inputs are capped at `max_object_mb`.
+
+```lua
+local b = native.data.Out
+b.put("invoices/7.json", native.crypto.encrypt("invoices", body, "invoices/7.json"))
+local plain = native.crypto.decrypt("invoices", b.get("invoices/7.json"), "invoices/7.json")
+```
+
+**Rotation.** Ciphertext records the number of the master key that sealed it, so after the
+operator adds key 2 and makes it active, old data still decrypts and new data uses key 2. To
+migrate lazily, re-encrypt whatever `is_current` reports as `false`. Changing the *key name* is a
+tenant-side rotation and needs the script to read with the old name and write with the new one.
 
 ## `native.http`
 Outbound HTTP, restricted to the tenant's [`http.allow`](tenant-config.md#httpallow) list.

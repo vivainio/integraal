@@ -69,24 +69,43 @@ impl Throttle {
             .into_iter()
             .map(|r| {
                 if r.max_concurrent.is_none() && r.per_second.is_none() {
-                    return Err(format!("throttle rule {:?} sets neither max_concurrent nor per_second", r.url));
+                    return Err(format!(
+                        "throttle rule {:?} sets neither max_concurrent nor per_second",
+                        r.url
+                    ));
                 }
                 if r.max_concurrent == Some(0) {
-                    return Err(format!("throttle rule {:?}: max_concurrent must be at least 1", r.url));
+                    return Err(format!(
+                        "throttle rule {:?}: max_concurrent must be at least 1",
+                        r.url
+                    ));
                 }
                 let interval = match r.per_second {
                     None => None,
-                    Some(p) if p.is_finite() && p > 0.0 && p <= 1_000_000.0 => Some(Duration::from_secs_f64(1.0 / p)),
-                    Some(p) => return Err(format!("throttle rule {:?}: per_second {p} is not a positive number", r.url)),
+                    Some(p) if p.is_finite() && p > 0.0 && p <= 1_000_000.0 => {
+                        Some(Duration::from_secs_f64(1.0 / p))
+                    }
+                    Some(p) => {
+                        return Err(format!(
+                            "throttle rule {:?}: per_second {p} is not a positive number",
+                            r.url
+                        ))
+                    }
                 };
                 if !crate::http::pattern_is_valid(&r.url) {
-                    return Err(format!("throttle rule url {:?} is not a valid pattern", r.url));
+                    return Err(format!(
+                        "throttle rule url {:?} is not a valid pattern",
+                        r.url
+                    ));
                 }
                 Ok(Arc::new(Rule {
                     pattern: r.url,
                     max_concurrent: r.max_concurrent.map(|n| n as usize),
                     interval,
-                    state: Mutex::new(State { in_flight: 0, next_start: Instant::now() }),
+                    state: Mutex::new(State {
+                        in_flight: 0,
+                        next_start: Instant::now(),
+                    }),
                     freed: Condvar::new(),
                 }))
             })
@@ -104,12 +123,23 @@ impl Throttle {
     pub fn acquire(&self, url: &Url, deadline: Instant) -> Result<Slot, String> {
         let mut slot = Slot { held: Vec::new() };
         // Rules are always taken in the same order, so two callers cannot wait on each other.
-        for rule in self.rules.iter().filter(|r| crate::http::matches_rule(&r.pattern, url)) {
-            let too_late = || format!("throttled: no free slot for {} before the deadline", rule.pattern);
+        for rule in self
+            .rules
+            .iter()
+            .filter(|r| crate::http::matches_rule(&r.pattern, url))
+        {
+            let too_late = || {
+                format!(
+                    "throttled: no free slot for {} before the deadline",
+                    rule.pattern
+                )
+            };
             let mut st = rule.state.lock().unwrap();
             if let Some(max) = rule.max_concurrent {
                 while st.in_flight >= max {
-                    let left = deadline.checked_duration_since(Instant::now()).ok_or_else(too_late)?;
+                    let left = deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(too_late)?;
                     st = rule.freed.wait_timeout(st, left).unwrap().0;
                 }
                 st.in_flight += 1;
@@ -148,29 +178,41 @@ mod tests {
 
     #[test]
     fn rules_are_validated() {
-        assert!(Throttle::from_json(r#"[{"url":"https://a.com/"}]"#).is_err(), "no limit");
+        assert!(
+            Throttle::from_json(r#"[{"url":"https://a.com/"}]"#).is_err(),
+            "no limit"
+        );
         assert!(Throttle::from_json(r#"[{"url":"https://a.com/","max_concurrent":0}]"#).is_err());
         assert!(Throttle::from_json(r#"[{"url":"https://a.com/","per_second":-1}]"#).is_err());
         assert!(Throttle::from_json(r#"[{"url":"not a url","per_second":1}]"#).is_err());
-        assert!(Throttle::from_json(r#"[{"url":"https://a.com/","per_second":1,"burst":2}]"#).is_err(), "unknown field");
+        assert!(
+            Throttle::from_json(r#"[{"url":"https://a.com/","per_second":1,"burst":2}]"#).is_err(),
+            "unknown field"
+        );
         assert!(Throttle::from_json("[]").is_ok());
     }
 
     #[test]
     fn unmatched_urls_are_not_limited() {
         let t = throttle(r#"[{"url":"https://api.partner.com/v1/","max_concurrent":1}]"#);
-        let _held = t.acquire(&url("https://api.partner.com/v1/x"), later(50)).unwrap();
+        let _held = t
+            .acquire(&url("https://api.partner.com/v1/x"), later(50))
+            .unwrap();
         let start = Instant::now();
         for _ in 0..5 {
-            t.acquire(&url("https://other.example.com/"), later(50)).unwrap();
-            t.acquire(&url("https://api.partner.com/v2/x"), later(50)).unwrap();
+            t.acquire(&url("https://other.example.com/"), later(50))
+                .unwrap();
+            t.acquire(&url("https://api.partner.com/v2/x"), later(50))
+                .unwrap();
         }
         assert!(start.elapsed() < Duration::from_millis(40));
     }
 
     #[test]
     fn concurrency_waits_for_a_free_slot_then_gives_up_at_the_deadline() {
-        let t = Arc::new(throttle(r#"[{"url":"https://api.partner.com/","max_concurrent":1}]"#));
+        let t = Arc::new(throttle(
+            r#"[{"url":"https://api.partner.com/","max_concurrent":1}]"#,
+        ));
         let u = url("https://api.partner.com/x");
         let first = t.acquire(&u, later(1000)).unwrap();
         // while the slot is held, a second caller times out
@@ -186,7 +228,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(80));
         drop(first);
         let waited = waiter.join().unwrap().expect("should get the freed slot");
-        assert!(waited >= Duration::from_millis(70) && waited < Duration::from_millis(1000), "{waited:?}");
+        assert!(
+            waited >= Duration::from_millis(70) && waited < Duration::from_millis(1000),
+            "{waited:?}"
+        );
         // and the timed-out attempt did not leak a slot
         t.acquire(&u, later(50)).unwrap();
     }
@@ -200,8 +245,11 @@ mod tests {
             t.acquire(&u, later(2000)).unwrap();
         }
         let took = began.elapsed();
-        assert!(took >= Duration::from_millis(140) && took < Duration::from_millis(600), "{took:?}"); // 3 gaps of 50 ms
-                                                                                                      // a wait that would pass the deadline fails immediately instead of sleeping
+        assert!(
+            took >= Duration::from_millis(140) && took < Duration::from_millis(600),
+            "{took:?}"
+        ); // 3 gaps of 50 ms
+           // a wait that would pass the deadline fails immediately instead of sleeping
         let t0 = Instant::now();
         assert!(t.acquire(&u, later(10)).is_err());
         assert!(t0.elapsed() < Duration::from_millis(40));
@@ -218,6 +266,9 @@ mod tests {
         // the failed attempt must have released the host-wide slot it took first
         let fast = url("https://api.partner.com/fast");
         let _b = t.acquire(&fast, later(50)).unwrap();
-        assert!(t.acquire(&fast, later(50)).is_err(), "host rule allows two in total");
+        assert!(
+            t.acquire(&fast, later(50)).is_err(),
+            "host rule allows two in total"
+        );
     }
 }

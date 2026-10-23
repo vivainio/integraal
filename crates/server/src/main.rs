@@ -4,9 +4,9 @@
 //!        POST /v1/{tenant}            (script chosen by the tenant's routes / router)
 //! Queue: SQS message body is `{tenant, script?, version?, event}`; no `script` means routed
 //!
-//! Env: SCRIPT_BUCKET, [SCRIPT_PREFIX], [DATA_BUCKET, DATA_PREFIX], [DB_TABLE, CALLBACK_BASE_URL], [THROTTLE], [SQS_QUEUE_URL], [PORT=8080], [AWS_ENDPOINT_URL]
+//! Config: `--config <path>` or `./integraal.json` (see `GlobalConfig`); AWS credentials/region come from the usual AWS variables.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use axum::{
     extract::{Path, State},
@@ -16,34 +16,29 @@ use axum::{
 };
 use integraal_core::{
     s3_events::{classify, disposition, Disposition, Message},
-    Engine, Error, Invocation, Limits, S3Events, Trigger,
+    Engine, Error, GlobalConfig, Invocation, S3Events, Trigger,
 };
-use integraal_loader::{CachedLoader, S3Store};
 use serde_json::{json, Value};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().json().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
+    let cfg = GlobalConfig::load().map_err(anyhow::Error::msg)?;
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new(cfg.log_filter())?)
+        .init();
 
-    let store = S3Store::from_env(std::env::var("SCRIPT_BUCKET")?, std::env::var("SCRIPT_PREFIX").unwrap_or_default()).await;
-    let engine = Engine::new(Arc::new(CachedLoader::new(store, Duration::from_secs(30))), Limits::default());
-    let engine = engine.with_data_from_env().await.map_err(anyhow::Error::msg)?;
+    let mut engine = cfg.engine().await.map_err(anyhow::Error::msg)?;
+    if let Some(throttle) = cfg.throttle().map_err(anyhow::Error::msg)? {
+        engine = engine.with_throttle(throttle);
+    }
 
-    let engine = match std::env::var("DB_TABLE") {
-        Ok(table) => engine.with_db(Arc::new(integraal_core::DynamoBackend::from_env(table).await)),
-        Err(_) => engine,
-    };
-    let engine = match std::env::var("THROTTLE") {
-        Ok(rules) => engine.with_throttle(integraal_wrappers::Throttle::from_json(&rules).map_err(anyhow::Error::msg)?),
-        Err(_) => engine,
-    };
-    let engine = match std::env::var("CALLBACK_BASE_URL") {
-        Ok(url) => engine.with_callback_base_url(url),
-        Err(_) => engine,
-    };
-
-    if let Ok(queue_url) = std::env::var("SQS_QUEUE_URL") {
-        tokio::spawn(poll_queue(engine.clone(), queue_url, S3Events::from_env().map_err(anyhow::Error::msg)?));
+    if let Some(queue) = &cfg.queue {
+        tokio::spawn(poll_queue(
+            engine.clone(),
+            queue.url.clone(),
+            S3Events::from_config(&cfg),
+        ));
     }
 
     let app = Router::new()
@@ -51,10 +46,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/{tenant}/{script}", post(http_invoke))
         .route("/v1/{tenant}", post(http_routed))
         .with_state(engine);
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+    let port = cfg.server.port;
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!(%port, "listening");
-    axum::serve(listener, app).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }
 
@@ -84,8 +83,17 @@ async fn run_http(
     headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
-    let version = headers.get("x-script-version").and_then(|v| v.to_str().ok()).map(str::to_string);
-    let inv = Invocation { tenant, script, version, trigger: Trigger::Http, event: body.map(|b| b.0).unwrap_or(Value::Null) };
+    let version = headers
+        .get("x-script-version")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let inv = Invocation {
+        tenant,
+        script,
+        version,
+        trigger: Trigger::Http,
+        event: body.map(|b| b.0).unwrap_or(Value::Null),
+    };
     match engine.invoke(inv).await {
         Ok(result) => (StatusCode::OK, Json(result)),
         Err(e) => (status_for(&e), Json(json!({ "error": e.to_string() }))),
@@ -97,7 +105,12 @@ fn status_for(e: &Error) -> StatusCode {
         Error::Load(integraal_loader::LoadError::NotFound(_)) => StatusCode::NOT_FOUND,
         Error::Load(integraal_loader::LoadError::InvalidName(..)) => StatusCode::BAD_REQUEST,
         Error::Timeout => StatusCode::GATEWAY_TIMEOUT,
-        Error::NoRoute | Error::Config(_) | Error::Script(_) | Error::NoHandler(..) | Error::BadModule | Error::Wrappers(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        Error::NoRoute
+        | Error::Config(_)
+        | Error::Script(_)
+        | Error::NoHandler(..)
+        | Error::BadModule
+        | Error::Wrappers(_) => StatusCode::UNPROCESSABLE_ENTITY,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -125,12 +138,29 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
         };
         let mut tasks = Vec::new();
         for msg in messages {
-            let (engine, client, queue_url, s3) = (engine.clone(), client.clone(), queue_url.clone(), s3.clone());
+            let (engine, client, queue_url, s3) = (
+                engine.clone(),
+                client.clone(),
+                queue_url.clone(),
+                s3.clone(),
+            );
             tasks.push(tokio::spawn(async move {
-                let acked = handle_message(&engine, &client, &queue_url, &s3, msg.body().unwrap_or_default()).await;
+                let acked = handle_message(
+                    &engine,
+                    &client,
+                    &queue_url,
+                    &s3,
+                    msg.body().unwrap_or_default(),
+                )
+                .await;
                 if acked {
                     if let Some(handle) = msg.receipt_handle() {
-                        let _ = client.delete_message().queue_url(&queue_url).receipt_handle(handle).send().await;
+                        let _ = client
+                            .delete_message()
+                            .queue_url(&queue_url)
+                            .receipt_handle(handle)
+                            .send()
+                            .await;
                     }
                 }
             }));
@@ -142,7 +172,13 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
 }
 
 /// Runs one queue message; returns whether it may be deleted.
-async fn handle_message(engine: &Engine, client: &aws_sdk_sqs::Client, queue_url: &str, s3: &S3Events, body: &str) -> bool {
+async fn handle_message(
+    engine: &Engine,
+    client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+    s3: &S3Events,
+    body: &str,
+) -> bool {
     match classify(body) {
         Err(e) => {
             tracing::error!(error = %e, "unparseable queue message");
@@ -164,7 +200,11 @@ async fn handle_message(engine: &Engine, client: &aws_sdk_sqs::Client, queue_url
             for record in records {
                 let outcome = match s3.invocation(&record) {
                     Ok(None) => Ok(()),
-                    Ok(Some(inv)) => engine.invoke(inv).await.map(|_| ()).map_err(|e| e.to_string()),
+                    Ok(Some(inv)) => engine
+                        .invoke(inv)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
                     Err(e) => Err(e),
                 };
                 if let Err(e) = outcome {
@@ -176,7 +216,13 @@ async fn handle_message(engine: &Engine, client: &aws_sdk_sqs::Client, queue_url
                 Disposition::Done => true,
                 Disposition::Retry => false,
                 Disposition::Requeue { body, delay_secs } => {
-                    let sent = client.send_message().queue_url(queue_url).message_body(body).delay_seconds(delay_secs).send().await;
+                    let sent = client
+                        .send_message()
+                        .queue_url(queue_url)
+                        .message_body(body)
+                        .delay_seconds(delay_secs)
+                        .send()
+                        .await;
                     if let Err(e) = &sent {
                         tracing::error!(error = %e, "could not requeue failed records; retrying the whole message");
                     }

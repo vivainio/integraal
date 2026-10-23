@@ -7,11 +7,11 @@
 //! Replies: 202 enqueued, 404 invalid / unknown / already used, 410 expired, 413 body too large, 500 enqueue failed
 //! (the callback is restored, so the sender's retry can succeed).
 //!
-//! Env: DB_TABLE, SQS_QUEUE_URL
+//! Config: `integraal.json` bundled next to `bootstrap`; uses its `db` and `queue` sections.
 
 use std::sync::Arc;
 
-use integraal_core::DynamoBackend;
+use integraal_core::{DynamoBackend, GlobalConfig};
 use integraal_loader::ScriptKey;
 use integraal_wrappers::{CallbackSigner, DbScope, Take};
 use lambda_runtime::{service_fn, Error, LambdaEvent};
@@ -26,16 +26,28 @@ fn reply(status: u16, body: Value) -> Value {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    let cfg = GlobalConfig::load()?;
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new(cfg.log_filter())?)
         .init();
 
+    let table = cfg
+        .db
+        .as_ref()
+        .ok_or("config needs a db section")?
+        .table
+        .clone();
+    let queue_url = cfg
+        .queue
+        .as_ref()
+        .ok_or("config needs a queue section")?
+        .url
+        .clone();
     let db: Arc<dyn integraal_wrappers::ItemBackend> =
-        Arc::new(DynamoBackend::from_env(std::env::var("DB_TABLE")?).await);
+        Arc::new(DynamoBackend::from_env(table).await);
     let signer = Arc::new(CallbackSigner::new(db.clone()));
     let sqs = aws_sdk_sqs::Client::new(&aws_config::load_from_env().await);
-    let queue_url = std::env::var("SQS_QUEUE_URL")?;
 
     lambda_runtime::run(service_fn(|ev: LambdaEvent<Value>| {
         let (db, signer, sqs, queue_url) =

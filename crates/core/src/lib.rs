@@ -1,6 +1,7 @@
 //! Luau execution engine: loads a tenant script, sandboxes it, and dispatches
 //! an invocation to the handler matching the trigger.
 
+mod config;
 mod dynamo_db;
 mod engine;
 mod s3_data;
@@ -8,8 +9,9 @@ pub mod s3_events;
 
 pub use engine::{TenantConfig, TenantLimits};
 
-pub use engine::{Engine, Limits};
+pub use config::GlobalConfig;
 pub use dynamo_db::DynamoBackend;
+pub use engine::{Engine, Limits};
 pub use s3_data::S3Backend;
 pub use s3_events::S3Events;
 

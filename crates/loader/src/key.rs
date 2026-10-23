@@ -23,7 +23,8 @@ fn valid(s: &str) -> bool {
         && s.len() <= 128
         && s != "."
         && s != ".."
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 impl ScriptKey {
@@ -34,7 +35,12 @@ impl ScriptKey {
                 return Err(LoadError::InvalidName(what, v.to_string()));
             }
         }
-        Ok(Self { tenant: tenant.into(), script: script.into(), version: version.into(), kind: Kind::Script })
+        Ok(Self {
+            tenant: tenant.into(),
+            script: script.into(),
+            version: version.into(),
+            kind: Kind::Script,
+        })
     }
 
     /// Key of the tenant's access-policy file in the script bucket.
@@ -42,7 +48,12 @@ impl ScriptKey {
         if !valid(tenant) {
             return Err(LoadError::InvalidName("tenant", tenant.to_string()));
         }
-        Ok(Self { tenant: tenant.into(), script: String::new(), version: String::new(), kind: Kind::Config })
+        Ok(Self {
+            tenant: tenant.into(),
+            script: String::new(),
+            version: String::new(),
+            kind: Kind::Config,
+        })
     }
 
     pub fn object_key(&self) -> String {

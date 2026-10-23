@@ -22,7 +22,11 @@ pub struct CachedLoader {
 
 impl CachedLoader {
     pub fn new(store: impl ScriptStore + 'static, revalidate_after: Duration) -> Self {
-        Self { store: Box::new(store), revalidate_after, entries: RwLock::default() }
+        Self {
+            store: Box::new(store),
+            revalidate_after,
+            entries: RwLock::default(),
+        }
     }
 
     pub async fn load(&self, key: &ScriptKey) -> Result<Arc<Script>, LoadError> {
@@ -40,7 +44,8 @@ impl CachedLoader {
         let etag = stale_etag.as_ref().and_then(|(_, t)| t.as_deref());
         match self.store.fetch(key, etag).await? {
             Fetched::NotModified => {
-                let (script, _) = stale_etag.ok_or_else(|| LoadError::Storage("304 without cached copy".into()))?;
+                let (script, _) = stale_etag
+                    .ok_or_else(|| LoadError::Storage("304 without cached copy".into()))?;
                 self.put(key, script.clone());
                 Ok(script)
             }
@@ -54,7 +59,13 @@ impl CachedLoader {
     }
 
     fn put(&self, key: &ScriptKey, script: Arc<Script>) {
-        self.entries.write().unwrap().insert(key.clone(), Entry { script, checked_at: Instant::now() });
+        self.entries.write().unwrap().insert(
+            key.clone(),
+            Entry {
+                script,
+                checked_at: Instant::now(),
+            },
+        );
     }
 }
 

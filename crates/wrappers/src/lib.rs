@@ -8,8 +8,10 @@
 //! (`get`/`put`/`delete`/`list`/`open` on the tenant's own prefix of each bucket its config grants), and
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
-//! under the tenant's own partition keys, each expiring after 24 hours).
+//! under the tenant's own partition keys, each expiring after 24 hours), and `native.crypto`
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64).
 
+mod crypto;
 mod data;
 mod db;
 mod http;
@@ -17,11 +19,18 @@ mod throttle;
 mod v1;
 mod xml;
 
-pub use xml::{ByteStream, MAX_STREAM_BYTES};
+pub use crypto::{MasterKey, MasterKeys};
+pub use data::{
+    Access, DataScope, DataScopes, ObjectBackend, PresignMethod, MAX_LIST_KEYS, MAX_OBJECT_BYTES,
+    MAX_PRESIGN_TTL,
+};
+pub use db::{
+    Callback, CallbackSigner, DbScope, Item, ItemBackend, Take, Taken, DB_TTL, MAX_ITEM_BYTES,
+    MAX_QUERY_ITEMS,
+};
 pub use http::{AllowRule, HttpPolicy};
 pub use throttle::{Slot, Throttle, ThrottleRule};
-pub use data::{Access, DataScope, DataScopes, PresignMethod, MAX_PRESIGN_TTL, ObjectBackend, MAX_LIST_KEYS, MAX_OBJECT_BYTES};
-pub use db::{Callback, CallbackSigner, DbScope, Take, Taken, Item, ItemBackend, DB_TTL, MAX_ITEM_BYTES, MAX_QUERY_ITEMS};
+pub use xml::{ByteStream, MAX_STREAM_BYTES};
 
 use std::{
     sync::atomic::{AtomicU32, Ordering},
@@ -64,7 +73,11 @@ pub(crate) struct Budget {
 
 impl Budget {
     fn new(l: &HostLimits) -> Self {
-        Self { deadline: l.deadline, http_left: l.max_http_requests.into(), data_left: l.max_data_ops.into() }
+        Self {
+            deadline: l.deadline,
+            http_left: l.max_http_requests.into(),
+            data_left: l.max_data_ops.into(),
+        }
     }
 
     fn take(counter: &AtomicU32, what: &str, deadline: Instant) -> Result<(), String> {
@@ -105,6 +118,8 @@ pub struct HostContext {
     pub throttle: Option<std::sync::Arc<Throttle>>,
     /// Outbound HTTP allowlist from the tenant config (empty denies all).
     pub http: HttpPolicy,
+    /// Operator master keys behind `native.crypto.encrypt`/`decrypt`/`hmac_sha256`; those error when absent.
+    pub master_keys: Option<MasterKeys>,
     /// Tenant `vars` from config.json, exposed read-only as `native.config`.
     pub vars: serde_json::Map<String, serde_json::Value>,
     pub limits: HostLimits,
@@ -117,10 +132,14 @@ pub fn parse_runtime_version(source: &str) -> Result<u32, WrapperError> {
         if line.is_empty() {
             continue;
         }
-        let Some(rest) = line.strip_prefix("--!") else { break };
+        let Some(rest) = line.strip_prefix("--!") else {
+            break;
+        };
         if let Some(v) = rest.trim().strip_prefix("runtime") {
             let v = v.trim();
-            return v.parse().map_err(|_| WrapperError::BadDirective(line.to_string()));
+            return v
+                .parse()
+                .map_err(|_| WrapperError::BadDirective(line.to_string()));
         }
     }
     Ok(DEFAULT_VERSION)
@@ -142,7 +161,10 @@ mod tests {
     #[test]
     fn parses_directive() {
         assert_eq!(parse_runtime_version("--!runtime 1\nreturn {}").unwrap(), 1);
-        assert_eq!(parse_runtime_version("--!strict\n--!runtime 2\n").unwrap(), 2);
+        assert_eq!(
+            parse_runtime_version("--!strict\n--!runtime 2\n").unwrap(),
+            2
+        );
         assert_eq!(parse_runtime_version("return {}").unwrap(), DEFAULT_VERSION);
         assert!(parse_runtime_version("--!runtime x").is_err());
     }

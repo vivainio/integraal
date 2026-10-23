@@ -90,7 +90,7 @@ The request body is the `event`; the response body is the script's return value.
 
 ## SQS → Fargate
 
-Set `SQS_QUEUE_URL`. The message body is the envelope; omit `script` to have it routed. The worker long-polls in batches of 10 and
+Set `queue.url` in the config. The message body is the envelope; omit `script` to have it routed. The worker long-polls in batches of 10 and
 **deletes a message only on success**; failures return to the queue after the visibility timeout
 and eventually land in the queue's dead-letter queue.
 
@@ -99,7 +99,7 @@ and eventually land in the queue's dead-letter queue.
 Point an S3 event notification (`s3:ObjectCreated:*`) from each data bucket at the queue. The
 server recognises the notification and splits it into **one invocation per object record**:
 
-- the tenant is the first path segment after `DATA_PREFIX`, so one notification serves all tenants;
+- the tenant is the first path segment after `data.prefix`, so one notification serves all tenants;
 - no script is named, so the tenant's [router](#routing) picks one;
 - the event is `{ bucket, key, size, etag, event }`, where `bucket` is the logical name (`In`) and
   `key` is relative to the tenant's prefix, so both can go straight to `native.data`;
@@ -109,7 +109,7 @@ If every record succeeds the message is deleted. If only some fail, **just those
 back** as a new message (with a growing delay and an attempt counter) and the original is deleted,
 so successful records are not run again. After 5 rounds the narrowed message is left alone and the
 queue's redrive policy moves it to the DLQ. A record that cannot be mapped (unknown bucket, key
-outside `DATA_PREFIX`) counts as failed, so it ends up in the DLQ instead of vanishing.
+outside `data.prefix`) counts as failed, so it ends up in the DLQ instead of vanishing.
 
 Delivery is at-least-once, so handlers must treat a missing object (`get` returns `nil`) as already
 handled.

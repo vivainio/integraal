@@ -57,7 +57,19 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     native.set("db", db_api(lua, host, budget.clone())?)?;
     native.set("callback", callback_api(lua, host, budget.clone())?)?;
     native.set("http", http_api(lua, host, budget)?)?;
-    native.set("xml", crate::xml::api(lua, host.limits.max_stream_bytes, host.limits.deadline)?)?;
+    native.set(
+        "xml",
+        crate::xml::api(lua, host.limits.max_stream_bytes, host.limits.deadline)?,
+    )?;
+    native.set(
+        "crypto",
+        crate::crypto::api(
+            lua,
+            host.master_keys.clone(),
+            &host.tenant,
+            host.limits.max_object_bytes,
+        )?,
+    )?;
     native.set("config", lua.to_value(&host.vars)?)?;
 
     let native: Table = native;
@@ -69,14 +81,18 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
 fn data_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     let data = lua.create_table()?;
     for (name, scope) in &host.data {
-        let scope = scope.clone().with_max_object_bytes(host.limits.max_object_bytes);
+        let scope = scope
+            .clone()
+            .with_max_object_bytes(host.limits.max_object_bytes);
         data.set(name.as_str(), bucket_api(lua, scope, budget.clone())?)?;
     }
     let mt = lua.create_table()?;
     mt.set(
         "__index",
         lua.create_function(|_, (_, name): (Table, String)| -> mlua::Result<Value> {
-            Err(mlua::Error::runtime(format!("data bucket {name:?} is not available to this tenant")))
+            Err(mlua::Error::runtime(format!(
+                "data bucket {name:?} is not available to this tenant"
+            )))
         })?,
     )?;
     data.set_metatable(Some(mt))?;
@@ -94,21 +110,23 @@ fn bucket_api(lua: &Lua, scope: crate::DataScope, budget: Arc<Budget>) -> mlua::
     let n = need.clone();
     bucket.set(
         "get",
-        lua.create_function(move |lua, key: String| {
-            match n()?.get(&key).map_err(err)? {
-                Some(bytes) => Ok(Value::String(lua.create_string(bytes)?)),
-                None => Ok(Value::Nil),
-            }
+        lua.create_function(move |lua, key: String| match n()?.get(&key).map_err(err)? {
+            Some(bytes) => Ok(Value::String(lua.create_string(bytes)?)),
+            None => Ok(Value::Nil),
         })?,
     )?;
 
     let n = need.clone();
     bucket.set(
         "open",
-        lua.create_function(move |lua, key: String| match n()?.open(&key).map_err(err)? {
-            Some(r) => Ok(Value::UserData(lua.create_userdata(crate::xml::ByteStream::new(r))?)),
-            None => Ok(Value::Nil),
-        })?,
+        lua.create_function(
+            move |lua, key: String| match n()?.open(&key).map_err(err)? {
+                Some(r) => Ok(Value::UserData(
+                    lua.create_userdata(crate::xml::ByteStream::new(r))?,
+                )),
+                None => Ok(Value::Nil),
+            },
+        )?,
     )?;
 
     let n = need.clone();
@@ -119,18 +137,25 @@ fn bucket_api(lua: &Lua, scope: crate::DataScope, budget: Arc<Budget>) -> mlua::
         })?,
     )?;
 
-    for (name, method) in [("presign_get", crate::PresignMethod::Get), ("presign_put", crate::PresignMethod::Put)] {
+    for (name, method) in [
+        ("presign_get", crate::PresignMethod::Get),
+        ("presign_put", crate::PresignMethod::Put),
+    ] {
         let n = need.clone();
         bucket.set(
             name,
             lua.create_function(move |_, (key, ttl_s): (String, Option<u64>)| {
-                n()?.presign(method, &key, ttl_s.map(std::time::Duration::from_secs)).map_err(err)
+                n()?.presign(method, &key, ttl_s.map(std::time::Duration::from_secs))
+                    .map_err(err)
             })?,
         )?;
     }
 
     let n = need.clone();
-    bucket.set("delete", lua.create_function(move |_, key: String| n()?.delete(&key).map_err(err))?)?;
+    bucket.set(
+        "delete",
+        lua.create_function(move |_, key: String| n()?.delete(&key).map_err(err))?,
+    )?;
 
     let n = need;
     bucket.set(
@@ -148,7 +173,9 @@ fn db_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Ta
     let scope = host.db.clone();
     let need = move || {
         budget.take_data().map_err(mlua::Error::runtime)?;
-        scope.clone().ok_or_else(|| mlua::Error::runtime("native.db is not configured for this runtime"))
+        scope
+            .clone()
+            .ok_or_else(|| mlua::Error::runtime("native.db is not configured for this runtime"))
     };
     let err = |e: String| mlua::Error::runtime(e);
 
@@ -157,7 +184,10 @@ fn db_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Ta
         "get",
         lua.create_function(move |lua, (pk, sk): (String, Option<String>)| {
             match n()?.get(&pk, sk.as_deref().unwrap_or("")).map_err(err)? {
-                Some(json) => lua.to_value(&serde_json::from_str::<serde_json::Value>(&json).map_err(mlua::Error::external)?),
+                Some(json) => lua.to_value(
+                    &serde_json::from_str::<serde_json::Value>(&json)
+                        .map_err(mlua::Error::external)?,
+                ),
                 None => Ok(Value::Nil),
             }
         })?,
@@ -166,10 +196,14 @@ fn db_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Ta
     let n = need.clone();
     db.set(
         "put",
-        lua.create_function(move |lua, (pk, sk, value): (String, Option<String>, Value)| {
-            let json = serde_json::to_string(&lua.from_value::<serde_json::Value>(value)?).map_err(mlua::Error::external)?;
-            n()?.put(&pk, sk.as_deref().unwrap_or(""), json).map_err(err)
-        })?,
+        lua.create_function(
+            move |lua, (pk, sk, value): (String, Option<String>, Value)| {
+                let json = serde_json::to_string(&lua.from_value::<serde_json::Value>(value)?)
+                    .map_err(mlua::Error::external)?;
+                n()?.put(&pk, sk.as_deref().unwrap_or(""), json)
+                    .map_err(err)
+            },
+        )?,
     )?;
 
     let n = need.clone();
@@ -185,15 +219,26 @@ fn db_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Ta
         "query",
         lua.create_function(move |lua, (pk, opts): (String, Option<Table>)| {
             let (prefix, limit) = match opts {
-                Some(o) => (o.get::<Option<String>>("sk_prefix")?, o.get::<Option<usize>>("limit")?),
+                Some(o) => (
+                    o.get::<Option<String>>("sk_prefix")?,
+                    o.get::<Option<usize>>("limit")?,
+                ),
                 None => (None, None),
             };
-            let rows = n()?.query(&pk, prefix.as_deref().unwrap_or(""), limit).map_err(err)?;
+            let rows = n()?
+                .query(&pk, prefix.as_deref().unwrap_or(""), limit)
+                .map_err(err)?;
             let out = lua.create_table()?;
             for (sk, json) in rows {
                 let row = lua.create_table()?;
                 row.set("sk", sk)?;
-                row.set("value", lua.to_value(&serde_json::from_str::<serde_json::Value>(&json).map_err(mlua::Error::external)?)?)?;
+                row.set(
+                    "value",
+                    lua.to_value(
+                        &serde_json::from_str::<serde_json::Value>(&json)
+                            .map_err(mlua::Error::external)?,
+                    )?,
+                )?;
                 out.push(row)?;
             }
             Ok(out)
@@ -205,26 +250,50 @@ fn db_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Ta
 /// Single-use callback URLs that route a later inbound request to a script, carrying saved state.
 fn callback_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     let cb = lua.create_table()?;
-    let (scope, base, tenant) = (host.db.clone(), host.callback_base_url.clone(), host.tenant.clone());
+    let (scope, base, tenant) = (
+        host.db.clone(),
+        host.callback_base_url.clone(),
+        host.tenant.clone(),
+    );
     cb.set(
         "create",
         lua.create_function(move |lua, opts: Option<Table>| {
             budget.take_data().map_err(mlua::Error::runtime)?;
-            let scope = scope.clone().ok_or_else(|| mlua::Error::runtime("native.callback needs native.db (DB_TABLE) to be configured"))?;
-            let base = base.clone().ok_or_else(|| mlua::Error::runtime("native.callback is not configured (CALLBACK_BASE_URL)"))?;
+            let scope = scope.clone().ok_or_else(|| {
+                mlua::Error::runtime("native.callback needs native.db (the config's db section)")
+            })?;
+            let base = base.clone().ok_or_else(|| {
+                mlua::Error::runtime(
+                    "native.callback is not configured (the config's callbacks section)",
+                )
+            })?;
             let (script, state, ttl_s) = match &opts {
-                Some(o) => (o.get::<Option<String>>("script")?, o.get::<Value>("state")?, o.get::<Option<u64>>("ttl_s")?),
+                Some(o) => (
+                    o.get::<Option<String>>("script")?,
+                    o.get::<Value>("state")?,
+                    o.get::<Option<u64>>("ttl_s")?,
+                ),
                 None => (None, Value::Nil, None),
             };
             if let Some(s) = &script {
-                let ok = !s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+                let ok = !s.is_empty()
+                    && s.len() <= 128
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
                 if !ok || s == "." || s == ".." {
                     return Err(mlua::Error::runtime(format!("invalid script name {s:?}")));
                 }
             }
-            let state: serde_json::Value = if state.is_nil() { serde_json::Value::Null } else { lua.from_value(state)? };
-            let ttl = std::time::Duration::from_secs(ttl_s.unwrap_or(crate::DB_TTL.as_secs()).max(1));
-            let id = scope.create_callback(script, state, ttl).map_err(mlua::Error::runtime)?;
+            let state: serde_json::Value = if state.is_nil() {
+                serde_json::Value::Null
+            } else {
+                lua.from_value(state)?
+            };
+            let ttl =
+                std::time::Duration::from_secs(ttl_s.unwrap_or(crate::DB_TTL.as_secs()).max(1));
+            let id = scope
+                .create_callback(script, state, ttl)
+                .map_err(mlua::Error::runtime)?;
             Ok(format!("{}/cb/{tenant}/{id}", base.trim_end_matches('/')))
         })?,
     )?;
@@ -248,10 +317,20 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
 
     let policy = host.http.clone();
     let throttle = host.throttle.clone();
-    let (max_timeout, max_body) = (host.limits.max_http_timeout, host.limits.max_http_response_bytes);
-    let do_request = move |lua: &Lua, method: String, url: String, headers: HashMap<String, String>, body: Option<mlua::LuaString>, stream: bool| {
+    let (max_timeout, max_body) = (
+        host.limits.max_http_timeout,
+        host.limits.max_http_response_bytes,
+    );
+    let do_request = move |lua: &Lua,
+                           method: String,
+                           url: String,
+                           headers: HashMap<String, String>,
+                           body: Option<mlua::LuaString>,
+                           stream: bool| {
         budget.take_http().map_err(mlua::Error::runtime)?;
-        let remaining = budget.deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = budget
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .max_redirects(0) // a redirect could leave the allowlist; scripts follow explicitly
             .http_status_as_error(false)
@@ -261,8 +340,14 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
         let method = method.to_ascii_uppercase();
         let url = policy.check(&method, &url).map_err(mlua::Error::runtime)?;
         // Held until the response is fully read (or, when streaming, until the stream is dropped).
-        let slot = throttle.as_ref().map(|t| t.acquire(&url, budget.deadline)).transpose().map_err(mlua::Error::runtime)?;
-        let mut req = ureq::http::Request::builder().method(method.as_str()).uri(url.as_str());
+        let slot = throttle
+            .as_ref()
+            .map(|t| t.acquire(&url, budget.deadline))
+            .transpose()
+            .map_err(mlua::Error::runtime)?;
+        let mut req = ureq::http::Request::builder()
+            .method(method.as_str())
+            .uri(url.as_str());
         for (k, v) in &headers {
             req = req.header(k, v);
         }
@@ -281,8 +366,14 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
         }
         out.set("headers", hdrs)?;
         if stream {
-            let reader: Box<dyn Read + Send> = Box::new(SlotReader { inner: resp.into_body().into_reader(), _slot: slot });
-            out.set("body", lua.create_userdata(crate::xml::ByteStream::new(reader))?)?;
+            let reader: Box<dyn Read + Send> = Box::new(SlotReader {
+                inner: resp.into_body().into_reader(),
+                _slot: slot,
+            });
+            out.set(
+                "body",
+                lua.create_userdata(crate::xml::ByteStream::new(reader))?,
+            )?;
             return Ok(out);
         }
         let mut buf = Vec::new();
@@ -303,9 +394,11 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
         lua.create_function(move |lua, opts: Table| {
             r(
                 lua,
-                opts.get::<Option<String>>("method")?.unwrap_or_else(|| "GET".into()),
+                opts.get::<Option<String>>("method")?
+                    .unwrap_or_else(|| "GET".into()),
                 opts.get("url")?,
-                opts.get::<Option<HashMap<String, String>>>("headers")?.unwrap_or_default(),
+                opts.get::<Option<HashMap<String, String>>>("headers")?
+                    .unwrap_or_default(),
                 opts.get("body")?,
                 opts.get::<Option<bool>>("stream")?.unwrap_or(false),
             )
@@ -314,9 +407,18 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
     let r = do_request;
     http.set(
         "get",
-        lua.create_function(move |lua, (url, headers): (String, Option<HashMap<String, String>>)| {
-            r(lua, "GET".into(), url, headers.unwrap_or_default(), None, false)
-        })?,
+        lua.create_function(
+            move |lua, (url, headers): (String, Option<HashMap<String, String>>)| {
+                r(
+                    lua,
+                    "GET".into(),
+                    url,
+                    headers.unwrap_or_default(),
+                    None,
+                    false,
+                )
+            },
+        )?,
     )?;
     Ok(http)
 }

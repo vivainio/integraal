@@ -14,7 +14,12 @@ pub trait ObjectBackend: Send + Sync {
     /// Keys starting with `prefix`, at most `limit`.
     fn list(&self, prefix: &str, limit: usize) -> Result<Vec<String>, String>;
     /// A time-limited URL that lets a third party GET or PUT exactly this key.
-    fn presign(&self, _method: PresignMethod, _key: &str, _ttl: std::time::Duration) -> Result<String, String> {
+    fn presign(
+        &self,
+        _method: PresignMethod,
+        _key: &str,
+        _ttl: std::time::Duration,
+    ) -> Result<String, String> {
         Err("presigned URLs are not supported by this backend".into())
     }
 }
@@ -47,7 +52,13 @@ pub struct Access {
 }
 
 impl Access {
-    pub const READ_WRITE: Access = Access { read: true, write: true, delete: true, upload: false, download: false };
+    pub const READ_WRITE: Access = Access {
+        read: true,
+        write: true,
+        delete: true,
+        upload: false,
+        download: false,
+    };
 
     fn grant(&mut self, name: &str) -> Result<(), String> {
         match name {
@@ -105,7 +116,12 @@ impl DataScope {
     pub fn new(backend: Arc<dyn ObjectBackend>, prefix: impl Into<String>) -> Self {
         let prefix = prefix.into();
         debug_assert!(prefix.is_empty() || prefix.ends_with('/'));
-        Self { backend, prefix, max_object_bytes: MAX_OBJECT_BYTES, access: Access::READ_WRITE }
+        Self {
+            backend,
+            prefix,
+            max_object_bytes: MAX_OBJECT_BYTES,
+            access: Access::READ_WRITE,
+        }
     }
 
     pub fn with_access(mut self, access: Access) -> Self {
@@ -114,11 +130,19 @@ impl DataScope {
     }
 
     fn need_read(&self) -> Result<(), String> {
-        if self.access.read { Ok(()) } else { Err("this bucket is not readable for this tenant".into()) }
+        if self.access.read {
+            Ok(())
+        } else {
+            Err("this bucket is not readable for this tenant".into())
+        }
     }
 
     fn need_write(&self) -> Result<(), String> {
-        if self.access.write { Ok(()) } else { Err("this bucket is not writable for this tenant".into()) }
+        if self.access.write {
+            Ok(())
+        } else {
+            Err("this bucket is not writable for this tenant".into())
+        }
     }
 
     pub fn with_max_object_bytes(mut self, n: usize) -> Self {
@@ -157,13 +181,24 @@ impl DataScope {
     }
 
     /// A presigned URL for one key of this scope. GET needs the `download` grant, PUT needs `upload`.
-    pub fn presign(&self, method: PresignMethod, key: &str, ttl: Option<std::time::Duration>) -> Result<String, String> {
+    pub fn presign(
+        &self,
+        method: PresignMethod,
+        key: &str,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<String, String> {
         match method {
-            PresignMethod::Get if !self.access.download => return Err("presigned downloads are not granted for this bucket".into()),
-            PresignMethod::Put if !self.access.upload => return Err("presigned uploads are not granted for this bucket".into()),
+            PresignMethod::Get if !self.access.download => {
+                return Err("presigned downloads are not granted for this bucket".into())
+            }
+            PresignMethod::Put if !self.access.upload => {
+                return Err("presigned uploads are not granted for this bucket".into())
+            }
             _ => {}
         }
-        let ttl = ttl.unwrap_or(std::time::Duration::from_secs(15 * 60)).clamp(std::time::Duration::from_secs(1), MAX_PRESIGN_TTL);
+        let ttl = ttl
+            .unwrap_or(std::time::Duration::from_secs(15 * 60))
+            .clamp(std::time::Duration::from_secs(1), MAX_PRESIGN_TTL);
         self.backend.presign(method, &self.full(key)?, ttl)
     }
 
@@ -180,7 +215,12 @@ impl DataScope {
         if prefix.starts_with('/') || prefix.split('/').any(|s| s == "..") {
             return Err(format!("invalid prefix {prefix:?}"));
         }
-        let keys = self.backend.list(&format!("{}{}", self.prefix, prefix), MAX_LIST_KEYS)?;
-        Ok(keys.into_iter().filter_map(|k| k.strip_prefix(&self.prefix).map(str::to_string)).collect())
+        let keys = self
+            .backend
+            .list(&format!("{}{}", self.prefix, prefix), MAX_LIST_KEYS)?;
+        Ok(keys
+            .into_iter()
+            .filter_map(|k| k.strip_prefix(&self.prefix).map(str::to_string))
+            .collect())
     }
 }

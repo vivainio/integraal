@@ -11,7 +11,11 @@ pub struct S3Store {
 
 impl S3Store {
     pub fn new(client: Client, bucket: impl Into<String>, prefix: impl Into<String>) -> Self {
-        Self { client, bucket: bucket.into(), prefix: prefix.into() }
+        Self {
+            client,
+            bucket: bucket.into(),
+            prefix: prefix.into(),
+        }
     }
 
     pub async fn from_env(bucket: impl Into<String>, prefix: impl Into<String>) -> Self {
@@ -29,21 +33,31 @@ impl S3Store {
 impl ScriptStore for S3Store {
     async fn fetch(&self, key: &ScriptKey, etag: Option<&str>) -> Result<Fetched, LoadError> {
         let object_key = format!("{}{}", self.prefix, key.object_key());
-        let mut req = self.client.get_object().bucket(&self.bucket).key(&object_key);
+        let mut req = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&object_key);
         if let Some(etag) = etag {
             req = req.if_none_match(etag);
         }
         match req.send().await {
             Ok(out) => {
                 let etag = out.e_tag().map(str::to_string);
-                let bytes = out.body.collect().await.map_err(|e| LoadError::Storage(e.to_string()))?;
+                let bytes = out
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| LoadError::Storage(e.to_string()))?;
                 let source = String::from_utf8(bytes.to_vec()).map_err(|_| LoadError::NotUtf8)?;
                 Ok(Fetched::Fresh(Script { source, etag }))
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
                 Err(LoadError::NotFound(object_key))
             }
-            Err(SdkError::ServiceError(e)) if e.raw().status().as_u16() == 304 => Ok(Fetched::NotModified),
+            Err(SdkError::ServiceError(e)) if e.raw().status().as_u16() == 304 => {
+                Ok(Fetched::NotModified)
+            }
             Err(e) => Err(LoadError::Storage(e.to_string())),
         }
     }

@@ -31,7 +31,7 @@ Name of the script whose `on_route` handler chooses a script for messages that d
 see [Routing](triggers.md#routing).
 
 ## `data`
-Which data buckets the tenant may use, and how. Names refer to the deployment's `DATA_BUCKETS`;
+Which data buckets the tenant may use, and how. Names refer to the deployment's `data.buckets`;
 a tenant gets nothing it isn't listed for, and naming a bucket the deployment doesn't have fails
 the invocation.
 
@@ -89,7 +89,7 @@ Every field is optional and unknown keys are rejected (so typos can't silently l
 | `max_http_timeout_ms` | 10 000 | 30 000 | Per HTTP request timeout. |
 
 Requested values are **clamped to the operator ceiling**; a tenant can never exceed it. The
-ceiling's timeout and memory come from `MAX_TIMEOUT_MS` and `MAX_MEMORY_MB`. Under Lambda the
+ceiling's timeout and memory come from the `ceiling` section of the [global config](deployment.md#configuration). Under Lambda the
 timeout is additionally capped to the time the function has left (minus 500 ms) so scripts fail
 cleanly instead of being killed.
 
