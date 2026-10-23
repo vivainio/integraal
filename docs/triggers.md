@@ -94,6 +94,39 @@ Set `SQS_QUEUE_URL`. The message body is the envelope; omit `script` to have it 
 **deletes a message only on success**; failures return to the queue after the visibility timeout
 and eventually land in the queue's dead-letter queue.
 
+## S3 notifications
+
+Point an S3 event notification (`s3:ObjectCreated:*`) from each data bucket at the queue. The
+server recognises the notification and splits it into **one invocation per object record**:
+
+- the tenant is the first path segment after `DATA_PREFIX`, so one notification serves all tenants;
+- no script is named, so the tenant's [router](#routing) picks one;
+- the event is `{ bucket, key, size, etag, event }`, where `bucket` is the logical name (`In`) and
+  `key` is relative to the tenant's prefix, so both can go straight to `native.data`;
+- other event types, folder markers and S3's test event are acknowledged and skipped.
+
+If every record succeeds the message is deleted. If only some fail, **just those records are sent
+back** as a new message (with a growing delay and an attempt counter) and the original is deleted,
+so successful records are not run again. After 5 rounds the narrowed message is left alone and the
+queue's redrive policy moves it to the DLQ. A record that cannot be mapped (unknown bucket, key
+outside `DATA_PREFIX`) counts as failed, so it ends up in the DLQ instead of vanishing.
+
+Delivery is at-least-once, so handlers must treat a missing object (`get` returns `nil`) as already
+handled.
+
+### Deleting the object when done
+
+A `queue` handler can ask the engine to delete objects **after it returns successfully**:
+
+```lua
+return { ok = true, delete = true }  -- the event's own bucket + key
+return { delete = { { bucket = "In", key = "a.xml" }, { bucket = "In", key = "b.xml" } } }
+```
+
+If the handler errors, nothing is deleted and the message is retried with the object still there.
+Deletes go through the tenant's own grants, so the bucket needs the `delete` grant. At most 100
+entries; `delete` is ignored for other triggers; a failed delete fails the invocation.
+
 ## Choosing where to run
 
 | | Lambda | Fargate |

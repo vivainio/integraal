@@ -64,7 +64,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     lua.globals().set("native", native)
 }
 
-/// One table of object functions per bucket the tenant was granted: `native.data.inbound.get(key)`.
+/// One table of object functions per bucket the tenant was granted: `native.data.In.get(key)`.
 /// Naming any other bucket raises a clear error instead of indexing nil.
 fn data_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     let data = lua.create_table()?;

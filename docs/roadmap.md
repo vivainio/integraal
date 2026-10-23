@@ -3,11 +3,9 @@
 Planned but **not implemented**:
 
 ## S3 object pipeline
-Routing (per-tenant router scripts) is implemented; the rest of the pipeline is not.
-Objects arriving under a tenant's data prefix trigger scripts.
+Routing, S3 notification handling ([Triggers](triggers.md#s3-notifications)) and result-driven
+deletes are implemented; the rest of the pipeline is not.
 
-- S3 → SQS notification on the data bucket; the tenant and relative key are parsed from the object
-  key, so one notification serves all tenants.
 - In-process chaining: a script returns `{ next = "...", event = ... }` and the engine continues
   within one invocation, sharing the deadline and call budgets.
 - Message dispositions from the return value: success acks; `native.retry(delay, reason)`,

@@ -6,11 +6,11 @@
 | --- | --- | --- |
 | `SCRIPT_BUCKET` | both | bucket holding scripts and `config.json` (required) |
 | `SCRIPT_PREFIX` | both | optional key prefix, concatenated as-is (end it with `/`) |
-| `DATA_BUCKETS` | both | named data buckets, `name=bucket,name=bucket` (e.g. `in=acme-in,out=acme-out,backup=acme-bak,temp=acme-tmp`); names are letters, digits and `_`. Enables `native.data.<name>` |
+| `DATA_BUCKETS` | both | named data buckets, `name=bucket,name=bucket` (e.g. `In=acme-in,Out=acme-out,Backup=acme-bak,Temp=acme-tmp`); names are case-sensitive letters, digits and `_`. Enables `native.data.<name>` |
 | `DATA_PREFIX` | both | base prefix applied in every data bucket; must end with `/`. Tenant data lives at `<DATA_PREFIX><tenant>/` |
 | `DB_TABLE` | both | enables `native.db` (DynamoDB table, see below) |
 | `CALLBACK_BASE_URL` | both | public base URL of the webhook Lambda; enables `native.callback` |
-| `SQS_QUEUE_URL` | server | enables the SQS poller |
+| `SQS_QUEUE_URL` | server | enables the SQS poller, which also splits [S3 event notifications](triggers.md#s3-notifications) from the `DATA_BUCKETS` buckets; it needs `sqs:SendMessage` too, to re-send failed records |
 | `PORT` | server | HTTP port (default `8080`) |
 | `MAX_TIMEOUT_MS` / `MAX_MEMORY_MB` | both | operator ceilings for tenant limits |
 | `AWS_ENDPOINT_URL` | both | point the SDK at a simulator such as roto |

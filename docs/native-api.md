@@ -20,14 +20,15 @@ The tenant's `vars` from [`config.json`](tenant-config.md#vars), as a table.
 ## `native.data.<bucket>`
 Object storage, one table per bucket the tenant's [`data`](tenant-config.md#data) block grants.
 Everything is confined to `DATA_PREFIX<tenant>/` in that bucket and keys are **relative** to it.
-`in` is a Luau keyword, so write `native.data["in"].get(key)`; `native.data.out.get(key)` is fine.
+Bucket names are case-sensitive and operator-defined; the conventional ones are `In`, `Out`, `Backup` and `Temp`.
+(Avoid lowercase `in`: it is a Luau keyword, so `native.data.in` does not parse.)
 Using a bucket you were not granted raises an error.
 
 | Function | Needs | Result |
 | --- | --- | --- |
 | `get(key)` | read | string, or `nil` if missing. Capped at `max_object_mb`. |
 | `put(key, body)` | write | writes an object. Capped at `max_object_mb`. |
-| `delete(key)` | write | deletes an object. |
+| `delete(key)` | delete | deletes an object. |
 | `list(prefix?)` | read | array of relative keys, at most 1000. |
 | `open(key)` | read | a **stream** (see below), or `nil` if missing. Not subject to the object cap. |
 | `presign_get(key, ttl_s?)` | download | URL that lets a third party download exactly that key. |
@@ -40,6 +41,11 @@ upload size.
 
 Keys may not be empty, start with `/`, contain `.` or `..` segments, backslashes or control
 characters, or exceed 512 bytes. Calls count against `max_data_ops`.
+
+### Deleting after a queue handler
+
+`queue` handlers may return `delete = true` or `delete = { { bucket, key }, ... }` and the engine
+deletes those objects after the handler succeeds; see [Triggers](triggers.md#deleting-the-object-when-done).
 
 ## `native.callback`
 Single-use callback URLs: hand one to a third party, and when they call it, a script runs with the

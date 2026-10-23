@@ -36,8 +36,10 @@ pub const MAX_PRESIGN_TTL: std::time::Duration = std::time::Duration::from_secs(
 pub struct Access {
     /// `get`, `open`, `list`.
     pub read: bool,
-    /// `put`, `delete`.
+    /// `put`.
     pub write: bool,
+    /// `delete`.
+    pub delete: bool,
     /// `presign_put`.
     pub upload: bool,
     /// `presign_get`.
@@ -45,16 +47,17 @@ pub struct Access {
 }
 
 impl Access {
-    pub const READ_WRITE: Access = Access { read: true, write: true, upload: false, download: false };
+    pub const READ_WRITE: Access = Access { read: true, write: true, delete: true, upload: false, download: false };
 
     fn grant(&mut self, name: &str) -> Result<(), String> {
         match name {
             "read" => self.read = true,
             "write" => self.write = true,
-            "readwrite" => (self.read, self.write) = (true, true),
+            "delete" => self.delete = true,
+            "readwrite" => (self.read, self.write, self.delete) = (true, true, true),
             "upload" => self.upload = true,
             "download" => self.download = true,
-            other => return Err(format!("unknown data grant {other:?} (expected read, write, readwrite, upload or download)")),
+            other => return Err(format!("unknown data grant {other:?} (expected read, write, delete, readwrite, upload or download)")),
         }
         Ok(())
     }
@@ -165,7 +168,9 @@ impl DataScope {
     }
 
     pub fn delete(&self, key: &str) -> Result<(), String> {
-        self.need_write()?;
+        if !self.access.delete {
+            return Err("deleting is not granted for this bucket".into());
+        }
         self.backend.delete(&self.full(key)?)
     }
 

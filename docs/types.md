@@ -8,7 +8,7 @@ unhandled `nil`s are caught **before** you upload.
 --!strict
 --!runtime 1
 local function handle(ctx: Context, event: { key: string })
-  local body = native.data["in"].get(event.key)   -- string?
+  local body = native.data.In.get(event.key)   -- string?
   native.log("info", body)                  -- error: string? is not string
   return {}
 end

@@ -4,11 +4,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export AWS_ENDPOINT_URL=http://localhost:5070 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
-export SCRIPT_BUCKET=scripts DATA_BUCKETS=in=data-in,out=data-out DATA_PREFIX=tenants/ DB_TABLE=integraal PORT=8080
+export SCRIPT_BUCKET=scripts DATA_BUCKETS=In=data-in,Out=data-out,Temp=data-temp DATA_PREFIX=tenants/ DB_TABLE=integraal PORT=8080
 
 uvx --from awscli aws s3 mb s3://scripts
 uvx --from awscli aws s3 mb s3://data-in
 uvx --from awscli aws s3 mb s3://data-out
+uvx --from awscli aws s3 mb s3://data-temp
 aws() { uvx --from awscli aws "$@"; }
 aws dynamodb create-table --table-name "$DB_TABLE" --billing-mode PAY_PER_REQUEST \
   --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \

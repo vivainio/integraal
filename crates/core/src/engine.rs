@@ -111,13 +111,29 @@ pub struct TenantConfig {
     #[serde(default)]
     pub limits: TenantLimits,
     /// Buckets this tenant may use as `native.data.<name>`, and how: a grant or list of grants from
-    /// `read`, `write`, `readwrite`, `upload` (presigned PUT) and `download` (presigned GET).
+    /// `read`, `write` (put), `delete`, `readwrite` (all three), `upload` (presigned PUT) and `download` (presigned GET).
     /// Absent = no access. Names must match the deployment's `DATA_BUCKETS`.
     #[serde(default)]
     pub data: HashMap<String, Access>,
     /// Script whose `on_route`/`route` handler picks the script for messages that don't name one.
     #[serde(default)]
     pub router: Option<String>,
+}
+
+/// Parses `DATA_BUCKETS` (`name=bucket,name=bucket`) into `(name, bucket)` pairs.
+pub(crate) fn parse_data_buckets(spec: &str) -> Result<Vec<(String, String)>, String> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|pair| {
+            let (name, bucket) = pair.split_once('=').ok_or_else(|| format!("DATA_BUCKETS entry {pair:?} is not name=bucket"))?;
+            let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !ok || bucket.is_empty() {
+                return Err(format!("DATA_BUCKETS entry {pair:?} is invalid (names are letters, digits and _)"));
+            }
+            Ok((name.to_string(), bucket.to_string()))
+        })
+        .collect()
 }
 
 /// A fully resolved unit of work: which script runs, with which event.
@@ -160,14 +176,8 @@ impl Engine {
     /// Registers every bucket in `DATA_BUCKETS` (`name=bucket,name=bucket`) under `DATA_PREFIX`.
     /// Must be called from within a Tokio runtime. No `DATA_BUCKETS` means no buckets.
     pub async fn with_data_from_env(mut self) -> Result<Self, String> {
-        let Ok(spec) = std::env::var("DATA_BUCKETS") else { return Ok(self) };
         let prefix = std::env::var("DATA_PREFIX").unwrap_or_default();
-        for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            let (name, bucket) = pair.split_once('=').ok_or_else(|| format!("DATA_BUCKETS entry {pair:?} is not name=bucket"))?;
-            let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-            if !ok || bucket.is_empty() {
-                return Err(format!("DATA_BUCKETS entry {pair:?} is invalid (names are letters, digits and _)"));
-            }
+        for (name, bucket) in parse_data_buckets(&std::env::var("DATA_BUCKETS").unwrap_or_default())? {
             self = self.with_data(name, Arc::new(crate::S3Backend::from_env(bucket).await), prefix.clone());
         }
         Ok(self)
@@ -245,6 +255,7 @@ struct Vm {
     version: u32,
     deadline: Instant,
     script: ScriptName,
+    data: DataScopes,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -254,6 +265,7 @@ fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, data: DataS
     let deadline = Instant::now() + limits.timeout;
     lua.set_memory_limit(limits.memory_bytes).map_err(internal)?;
     let script = Arc::new(Mutex::new(script.to_string()));
+    let vm_data = data.clone();
     install(
         &lua,
         version,
@@ -284,7 +296,7 @@ fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, data: DataS
             Ok(VmState::Continue)
         }
     });
-    Ok(Vm { lua, version, deadline, script })
+    Ok(Vm { lua, version, deadline, script, data: vm_data })
 }
 
 /// Loads `source` in the VM and calls the handler matching `call.trigger`.
@@ -310,7 +322,46 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
 
     let event = lua.to_value(&call.event).map_err(internal)?;
     let out: mlua::Value = handler.call((ctx, event)).map_err(|e| script_err(e, deadline))?;
-    lua.from_value(out).map_err(|e| Error::Script(format!("handler result is not JSON-serializable: {e}")))
+    let result: serde_json::Value =
+        lua.from_value(out).map_err(|e| Error::Script(format!("handler result is not JSON-serializable: {e}")))?;
+    if call.trigger == Trigger::Queue {
+        apply_deletes(&result, &call.event, &vm.data)?;
+    }
+    Ok(result)
+}
+
+/// Most objects one handler result may ask the engine to delete.
+const MAX_RESULT_DELETES: usize = 100;
+
+/// Queue handlers can return `delete = true` (the object named by the event's `bucket` and `key`) or
+/// `delete = { { bucket = "In", key = "a.xml" }, ... }`. The engine deletes them only after the handler
+/// returned without error, through the tenant's own grants (so it still needs the `delete` grant).
+fn apply_deletes(result: &serde_json::Value, event: &serde_json::Value, data: &DataScopes) -> Result<(), Error> {
+    use serde_json::Value;
+    let bad = |m: &str| Error::Script(format!("invalid delete in handler result: {m}"));
+    let str_of = |v: &Value, field: &str| v.get(field).and_then(Value::as_str).map(str::to_string);
+    let targets: Vec<(String, String)> = match result.get("delete") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => return Ok(()),
+        Some(Value::Bool(true)) => match (str_of(event, "bucket"), str_of(event, "key")) {
+            (Some(b), Some(k)) => vec![(b, k)],
+            _ => return Err(bad("`true` needs an event with `bucket` and `key`")),
+        },
+        Some(Value::Array(items)) if items.len() <= MAX_RESULT_DELETES => items
+            .iter()
+            .map(|i| match (str_of(i, "bucket"), str_of(i, "key")) {
+                (Some(b), Some(k)) => Ok((b, k)),
+                _ => Err(bad("each entry needs `bucket` and `key`")),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(Value::Array(_)) => return Err(bad(&format!("more than {MAX_RESULT_DELETES} entries"))),
+        Some(Value::Object(o)) if o.is_empty() => return Ok(()), // an empty Lua table
+        Some(_) => return Err(bad("expected true or a list of { bucket, key }")),
+    };
+    for (bucket, key) in targets {
+        let scope = data.get(&bucket).ok_or_else(|| Error::Script(format!("delete: bucket {bucket:?} is not available to this tenant")))?;
+        scope.delete(&key).map_err(|e| Error::Script(format!("delete {bucket}/{key}: {e}")))?;
+    }
+    Ok(())
 }
 
 fn run(source: &str, call: &Call, limits: &Limits, data: DataScopes, db: Option<DbScope>, cb_url: Option<String>, config: &TenantConfig) -> Result<serde_json::Value, Error> {
@@ -469,41 +520,98 @@ mod tests {
         inbox.put("data/acme/drop.csv", b"a,b".to_vec()).unwrap();
         let e = engine_cfg(
             r#"return { handle = function()
-                local out, inn = native.data.out, native.data["in"]
+                local out, inn = native.data.Out, native.data.In
                 out.put("notes/a", "hello")
                 return {
                     got = out.get("notes/a"), keys = out.list("notes/"), missing = out.get("nope") == nil,
                     escaped = pcall(out.get, "../other/secret"),
                     read_in = inn.get("drop.csv"), listed_in = inn.list(),
-                    put_in = pcall(inn.put, "x", "y"), delete_in = pcall(inn.delete, "drop.csv"),
-                    ungranted = pcall(function() return native.data.backup.get("x") end),
+                    put_in = pcall(inn.put, "x", "y"), delete_in = pcall(inn.delete, "drop.csv"), gone = inn.get("drop.csv") == nil,
+                    ungranted = pcall(function() return native.data.Backup.get("x") end),
                     put_url = inn.presign_put("up/new.csv", 60), get_url = out.presign_get("res.csv"),
                     get_url_in = pcall(inn.presign_get, "drop.csv"), put_url_out = pcall(out.presign_put, "res.csv"),
                 }
             end }"#,
             Limits::default(),
-            r#"{"data":{"in":["read","upload"],"out":["readwrite","download"]}}"#,
+            r#"{"data":{"In":["read","delete","upload"],"Out":["readwrite","download"]}}"#,
         )
-        .with_data("in", inbox.clone(), "data/")
-        .with_data("out", outbox.clone(), "data/")
-        .with_data("backup", Arc::new(MemBackend::default()), "data/");
+        .with_data("In", inbox.clone(), "data/")
+        .with_data("Out", outbox.clone(), "data/")
+        .with_data("Backup", Arc::new(MemBackend::default()), "data/");
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!({"got":"hello","keys":["notes/a"],"missing":true,"escaped":false,
-                   "read_in":"a,b","listed_in":["drop.csv"],"put_in":false,"delete_in":false,"ungranted":false,
+                   "read_in":"a,b","listed_in":["drop.csv"],"put_in":false,"delete_in":true,"gone":true,"ungranted":false,
                    "put_url":"mem://data/acme/up/new.csv?Put&ttl=60","get_url":"mem://data/acme/res.csv?Get&ttl=900",
                    "get_url_in":false,"put_url_out":false})
         );
         assert!(outbox.get("data/acme/notes/a").unwrap().is_some());
-        assert!(inbox.get("data/acme/drop.csv").unwrap().is_some(), "read-only bucket was modified");
+        assert!(inbox.get("data/acme/drop.csv").unwrap().is_none(), "delete grant must delete");
+        assert!(inbox.get("data/acme/x").unwrap().is_none(), "put without write grant must fail");
+    }
+
+    fn delete_engine(src: &str, grants: &str) -> (Engine, Arc<MemBackend>) {
+        let backend = Arc::new(MemBackend::default());
+        backend.put("data/acme/a.csv", b"1".to_vec()).unwrap();
+        backend.put("data/acme/b.csv", b"2".to_vec()).unwrap();
+        let cfg = format!(r#"{{"data":{{"In":{grants}}}}}"#);
+        (engine_cfg(src, Limits::default(), &cfg).with_data("In", backend.clone(), "data/"), backend)
+    }
+
+    #[tokio::test]
+    async fn queue_result_deletes_after_success_only() {
+        let present = |b: &MemBackend, k: &str| b.get(&format!("data/acme/{k}")).unwrap().is_some();
+        let ev = json!({"bucket": "In", "key": "a.csv"});
+
+        // `delete = true` removes the event's own object, and nothing else
+        let (e, b) = delete_engine("return { on_queue = function() return { ok = true, delete = true } end }", r#"["read","delete"]"#);
+        e.invoke(inv(Trigger::Queue, ev.clone())).await.unwrap();
+        assert!(!present(&b, "a.csv") && present(&b, "b.csv"));
+
+        // an explicit list can name several objects
+        let (e, b) = delete_engine(
+            r#"return { on_queue = function() return { delete = { { bucket = "In", key = "a.csv" }, { bucket = "In", key = "b.csv" } } } end }"#,
+            r#"["delete"]"#,
+        );
+        e.invoke(inv(Trigger::Queue, ev.clone())).await.unwrap();
+        assert!(!present(&b, "a.csv") && !present(&b, "b.csv"));
+
+        // a failing handler deletes nothing
+        let (e, b) = delete_engine(r#"return { on_queue = function() error("boom") end }"#, r#"["delete"]"#);
+        assert!(e.invoke(inv(Trigger::Queue, ev.clone())).await.is_err());
+        assert!(present(&b, "a.csv"));
+
+        // other triggers ignore `delete`
+        let (e, b) = delete_engine("return { handle = function() return { delete = true } end }", r#"["delete"]"#);
+        e.invoke(inv(Trigger::Http, ev.clone())).await.unwrap();
+        assert!(present(&b, "a.csv"));
+    }
+
+    #[tokio::test]
+    async fn result_delete_obeys_grants_and_shape() {
+        let present = |b: &MemBackend| b.get("data/acme/a.csv").unwrap().is_some();
+        let ev = json!({"bucket": "In", "key": "a.csv"});
+        // no delete grant: the invocation fails and the object stays
+        let (e, b) = delete_engine("return { on_queue = function() return { delete = true } end }", r#""read""#);
+        assert!(matches!(e.invoke(inv(Trigger::Queue, ev.clone())).await, Err(Error::Script(_))));
+        assert!(present(&b));
+        // a bucket the tenant was not granted
+        let (e, b) = delete_engine(r#"return { on_queue = function() return { delete = { { bucket = "Out", key = "a.csv" } } } end }"#, r#""delete""#);
+        assert!(matches!(e.invoke(inv(Trigger::Queue, ev.clone())).await, Err(Error::Script(_))));
+        assert!(present(&b));
+        // `true` without bucket and key in the event, and malformed entries
+        let (e, _) = delete_engine("return { on_queue = function() return { delete = true } end }", r#""delete""#);
+        assert!(matches!(e.invoke(inv(Trigger::Queue, json!({}))).await, Err(Error::Script(_))));
+        let (e, _) = delete_engine(r#"return { on_queue = function() return { delete = "a.csv" } end }"#, r#""delete""#);
+        assert!(matches!(e.invoke(inv(Trigger::Queue, ev)).await, Err(Error::Script(_))));
     }
 
     #[test]
     fn data_grants_parse_from_a_name_or_a_list() {
         let a: Access = serde_json::from_str(r#""readwrite""#).unwrap();
-        assert!(a.read && a.write && !a.upload && !a.download);
+        assert!(a.read && a.write && a.delete && !a.upload && !a.download);
         let a: Access = serde_json::from_str(r#"["write","download"]"#).unwrap();
-        assert!(!a.read && a.write && !a.upload && a.download);
+        assert!(!a.read && a.write && !a.delete && !a.upload && a.download);
         assert!(serde_json::from_str::<Access>(r#""admin""#).is_err());
         assert!(serde_json::from_str::<Access>("[]").is_err());
     }
@@ -672,7 +780,7 @@ mod tests {
         let e = engine_cfg(
             r#"return { handle = function()
                 local n, last, text = 0, nil, nil
-                for ev in native.xml.events(native.data["in"].open("big.xml")) do
+                for ev in native.xml.events(native.data.In.open("big.xml")) do
                     if ev.type == "start" and ev.tag == "entry" then n += 1; last = ev.attrs.id end
                     if ev.type == "text" then text = ev.text end
                 end
@@ -682,9 +790,9 @@ mod tests {
                 return { n = n, last = last, text = text, depths = depths, dtd = dtd }
             end }"#,
             Limits { timeout: Duration::from_secs(60), ..Limits::default() },
-            r#"{"data":{"in":"read"}}"#,
+            r#"{"data":{"In":"read"}}"#,
         )
-        .with_data("in", backend, "data/");
+        .with_data("In", backend, "data/");
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!({"n":200000,"last":"199999","text":"x & y","depths":["start0","start1","end1","end0"],"dtd":false})
@@ -732,14 +840,14 @@ mod tests {
             &ScriptKey::new("acme", "s", None).unwrap(),
             r#"return { handle = function()
                 local n = 0
-                for i = 1, 10 do if pcall(native.data.out.get, "k") then n += 1 end end
+                for i = 1, 10 do if pcall(native.data.Out.get, "k") then n += 1 end end
                 return n
             end }"#,
         );
-        store.put(&ScriptKey::config("acme").unwrap(), r#"{"data":{"out":"read"},"limits":{"max_data_ops":3}}"#);
+        store.put(&ScriptKey::config("acme").unwrap(), r#"{"data":{"Out":"read"},"limits":{"max_data_ops":3}}"#);
         let backend = Arc::new(MemBackend::default());
         let e = Engine::new(Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)), Limits::default())
-            .with_data("out", backend, "data/");
+            .with_data("Out", backend, "data/");
         assert_eq!(e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(), json!(3));
     }
 
@@ -751,14 +859,14 @@ mod tests {
         let backend = Arc::new(MemBackend::default());
         backend.put("data/acme/in.xml", b"<feed><entry/><entry/><entry/></feed>".to_vec()).unwrap();
         let e = engine_cfg(include_str!("../../../examples/acme/feed/latest.luau"), Limits::default(), config)
-            .with_data("in", backend, "data/")
-            .with_data("out", Arc::new(MemBackend::default()), "data/");
+            .with_data("In", backend, "data/")
+            .with_data("Out", Arc::new(MemBackend::default()), "data/");
         let out = e.invoke(inv(Trigger::Queue, json!({"key": "in.xml"}))).await.unwrap();
         assert_eq!(out, json!({"entries": 3, "found": true}));
 
         let e = engine_cfg(include_str!("../../../examples/acme/hello/latest.luau"), Limits::default(), config)
-            .with_data("in", Arc::new(MemBackend::default()), "data/")
-            .with_data("out", Arc::new(MemBackend::default()), "data/");
+            .with_data("In", Arc::new(MemBackend::default()), "data/")
+            .with_data("Out", Arc::new(MemBackend::default()), "data/");
         let out = e.invoke(inv(Trigger::Http, json!({"x": 1}))).await.unwrap();
         assert_eq!(out, json!({"trigger": "http", "count": 1, "event": {"x": 1}}));
     }
@@ -802,18 +910,18 @@ mod tests {
     #[tokio::test]
     async fn router_and_target_share_one_budget() {
         let store = Arc::new(MemoryStore::default());
-        put(&store, "router", r#"return { on_route = function() native.data.out.get("a"); native.data.out.get("b"); return "t" end }"#);
+        put(&store, "router", r#"return { on_route = function() native.data.Out.get("a"); native.data.Out.get("b"); return "t" end }"#);
         put(
             &store,
             "t",
             r#"return { on_queue = function()
                 local ok = 0
-                for _ = 1, 5 do if pcall(native.data.out.get, "k") then ok += 1 end end
+                for _ = 1, 5 do if pcall(native.data.Out.get, "k") then ok += 1 end end
                 return ok
             end }"#,
         );
-        store.put(&ScriptKey::config("acme").unwrap(), r#"{"router":"router","data":{"out":"read"},"limits":{"max_data_ops":3}}"#);
-        let e = routed(&store).with_data("out", Arc::new(MemBackend::default()), "data/");
+        store.put(&ScriptKey::config("acme").unwrap(), r#"{"router":"router","data":{"Out":"read"},"limits":{"max_data_ops":3}}"#);
+        let e = routed(&store).with_data("Out", Arc::new(MemBackend::default()), "data/");
         // 3 allowed in total; the router used 2, so the target gets exactly 1
         assert_eq!(e.invoke(msg(json!({}))).await.unwrap(), json!(1));
     }

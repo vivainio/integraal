@@ -43,7 +43,7 @@ end
 
 -- Object functions for one bucket, scoped to the tenant's prefix. Which buckets exist, and whether
 -- they are read, write or readwrite, comes from the tenant's config.json `data` block.
--- `in` is a Luau keyword: write native.data["in"].get(...).
+-- Bucket names are operator-defined; the conventional ones are In, Out, Backup and Temp.
 declare extern type DataBucket with
     get: (key: string) -> string?
     put: (key: string, body: string) -> ()
