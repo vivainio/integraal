@@ -4,7 +4,7 @@
 //!        POST /v1/{tenant}            (script chosen by the tenant's routes / router)
 //! Queue: SQS message body is `{tenant, script?, version?, event}`; no `script` means routed
 //!
-//! Env: SCRIPT_BUCKET, [SCRIPT_PREFIX], [DATA_BUCKET, DATA_PREFIX], [DB_TABLE, CALLBACK_BASE_URL], [SQS_QUEUE_URL], [PORT=8080], [AWS_ENDPOINT_URL]
+//! Env: SCRIPT_BUCKET, [SCRIPT_PREFIX], [DATA_BUCKET, DATA_PREFIX], [DB_TABLE, CALLBACK_BASE_URL], [THROTTLE], [SQS_QUEUE_URL], [PORT=8080], [AWS_ENDPOINT_URL]
 
 use std::{sync::Arc, time::Duration};
 
@@ -31,6 +31,10 @@ async fn main() -> anyhow::Result<()> {
 
     let engine = match std::env::var("DB_TABLE") {
         Ok(table) => engine.with_db(Arc::new(integraal_core::DynamoBackend::from_env(table).await)),
+        Err(_) => engine,
+    };
+    let engine = match std::env::var("THROTTLE") {
+        Ok(rules) => engine.with_throttle(integraal_wrappers::Throttle::from_json(&rules).map_err(anyhow::Error::msg)?),
         Err(_) => engine,
     };
     let engine = match std::env::var("CALLBACK_BASE_URL") {

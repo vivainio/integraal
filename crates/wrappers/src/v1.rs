@@ -231,10 +231,23 @@ fn callback_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Res
     Ok(cb)
 }
 
+/// Keeps the throttle slot held for as long as a streamed response body exists.
+struct SlotReader<R> {
+    inner: R,
+    _slot: Option<crate::Slot>,
+}
+
+impl<R: std::io::Read> std::io::Read for SlotReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
 fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     use std::{collections::HashMap, io::Read};
 
     let policy = host.http.clone();
+    let throttle = host.throttle.clone();
     let (max_timeout, max_body) = (host.limits.max_http_timeout, host.limits.max_http_response_bytes);
     let do_request = move |lua: &Lua, method: String, url: String, headers: HashMap<String, String>, body: Option<mlua::LuaString>, stream: bool| {
         budget.take_http().map_err(mlua::Error::runtime)?;
@@ -247,6 +260,8 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             .into();
         let method = method.to_ascii_uppercase();
         let url = policy.check(&method, &url).map_err(mlua::Error::runtime)?;
+        // Held until the response is fully read (or, when streaming, until the stream is dropped).
+        let slot = throttle.as_ref().map(|t| t.acquire(&url, budget.deadline)).transpose().map_err(mlua::Error::runtime)?;
         let mut req = ureq::http::Request::builder().method(method.as_str()).uri(url.as_str());
         for (k, v) in &headers {
             req = req.header(k, v);
@@ -266,7 +281,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
         }
         out.set("headers", hdrs)?;
         if stream {
-            let reader: Box<dyn Read + Send> = Box::new(resp.into_body().into_reader());
+            let reader: Box<dyn Read + Send> = Box::new(SlotReader { inner: resp.into_body().into_reader(), _slot: slot });
             out.set("body", lua.create_userdata(crate::xml::ByteStream::new(reader))?)?;
             return Ok(out);
         }

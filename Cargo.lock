@@ -1644,6 +1644,7 @@ dependencies = [
  "axum",
  "integraal-core",
  "integraal-loader",
+ "integraal-wrappers",
  "serde",
  "serde_json",
  "tokio",

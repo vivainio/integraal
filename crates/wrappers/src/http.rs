@@ -92,7 +92,16 @@ impl HttpPolicy {
     }
 }
 
-fn matches_rule(pattern: &str, url: &Url) -> bool {
+/// Whether `pattern` parses as an allowlist-style URL pattern (with an optional `*.` host).
+pub(crate) fn pattern_is_valid(pattern: &str) -> bool {
+    let pattern = match pattern.split_once("://*.") {
+        Some((scheme, rest)) => format!("{scheme}://wildcard.{rest}"),
+        None => pattern.to_string(),
+    };
+    Url::parse(&pattern).map(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some()).unwrap_or(false)
+}
+
+pub(crate) fn matches_rule(pattern: &str, url: &Url) -> bool {
     // `Url` cannot parse a wildcard host, so swap it for a placeholder first.
     let (pattern, wildcard) = match pattern.split_once("://*.") {
         Some((scheme, rest)) => (format!("{scheme}://wildcard.{rest}"), true),

@@ -68,7 +68,8 @@ kept in the table outside every tenant partition; to rotate it, delete the `SYS#
 
 ## `native.http`
 Outbound HTTP, restricted to the tenant's [`http.allow`](tenant-config.md#httpallow) list.
-Redirects are **not** followed (a redirect could leave the allowlist); follow them explicitly.
+If the operator throttles a URL, the call waits for a free slot and fails with a `throttled` error
+if none opens before the deadline; see [Throttling](deployment.md#throttling). Redirects are **not** followed (a redirect could leave the allowlist); follow them explicitly.
 
 ```lua
 local r = native.http.request({

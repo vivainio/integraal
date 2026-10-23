@@ -6,7 +6,7 @@ use std::{
 
 use integraal_loader::{CachedLoader, LoadError, ScriptKey};
 use integraal_wrappers::{
-    install, parse_runtime_version, Access, DataScope, DataScopes, DbScope, HostContext, HostLimits, HttpPolicy, ItemBackend, ObjectBackend, ScriptName,
+    install, parse_runtime_version, Access, DataScope, DataScopes, DbScope, Throttle, HostContext, HostLimits, HttpPolicy, ItemBackend, ObjectBackend, ScriptName,
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
@@ -153,11 +153,21 @@ pub struct Engine {
     data: HashMap<String, (Arc<dyn ObjectBackend>, String)>,
     db: Option<(Arc<dyn ItemBackend>, Arc<integraal_wrappers::CallbackSigner>)>,
     callback_base_url: Option<String>,
+    throttle: Option<Arc<Throttle>>,
+}
+
+/// Everything besides limits and config that one invocation's native API is wired to.
+#[derive(Clone)]
+struct Services {
+    data: DataScopes,
+    db: Option<DbScope>,
+    cb_url: Option<String>,
+    throttle: Option<Arc<Throttle>>,
 }
 
 impl Engine {
     pub fn new(loader: Arc<CachedLoader>, limits: Limits) -> Self {
-        Self { loader, limits, ceiling: Limits::ceiling_from_env(), data: HashMap::new(), db: None, callback_base_url: None }
+        Self { loader, limits, ceiling: Limits::ceiling_from_env(), data: HashMap::new(), db: None, callback_base_url: None, throttle: None }
     }
 
     /// Overrides the operator ceiling (default: `Limits::ceiling_from_env()`).
@@ -196,6 +206,12 @@ impl Engine {
         self
     }
 
+    /// Limits outbound HTTP per URL prefix, across all tenants in this process (Fargate; not used on Lambda).
+    pub fn with_throttle(mut self, throttle: Throttle) -> Self {
+        self.throttle = Some(Arc::new(throttle));
+        self
+    }
+
     pub async fn invoke(&self, inv: Invocation) -> Result<serde_json::Value, Error> {
         self.invoke_within(inv, None).await
     }
@@ -223,8 +239,8 @@ impl Engine {
                 .with_access(*access);
             data.insert(name.clone(), scope);
         }
-        let cb_url = self.callback_base_url.clone();
         let db = self.db.as_ref().map(|(b, s)| DbScope::new(b.clone(), inv.tenant.as_str()).with_signer(s.clone()));
+        let svc = Services { data, db, cb_url: self.callback_base_url.clone(), throttle: self.throttle.clone() };
 
         // Luau states are not Send-safe to hold across awaits; run on a blocking thread.
         match inv.script.clone() {
@@ -232,7 +248,7 @@ impl Engine {
                 let key = ScriptKey::new(&inv.tenant, &script, inv.version.as_deref())?;
                 let source = self.loader.load(&key).await?;
                 let call = Call { tenant: inv.tenant, script, trigger: inv.trigger, event: inv.event };
-                tokio::task::spawn_blocking(move || run(&source.source, &call, &limits, data, db, cb_url, &config)).await
+                tokio::task::spawn_blocking(move || run(&source.source, &call, &limits, &svc, &config)).await
             }
             None => {
                 // No script named: the tenant's router picks one, and the chosen script runs in the same VM.
@@ -240,7 +256,7 @@ impl Engine {
                 let source = self.loader.load(&ScriptKey::new(&inv.tenant, &router, None)?).await?;
                 let (loader, handle) = (self.loader.clone(), tokio::runtime::Handle::current());
                 tokio::task::spawn_blocking(move || {
-                    run_routed(&source.source, router, &inv, &limits, data, db, cb_url, &config, &loader, &handle)
+                    run_routed(&source.source, router, &inv, &limits, &svc, &config, &loader, &handle)
                 })
                 .await
             }
@@ -258,23 +274,23 @@ struct Vm {
     data: DataScopes,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, data: DataScopes, db: Option<DbScope>, cb_url: Option<String>, config: &TenantConfig) -> Result<Vm, Error> {
+fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, svc: &Services, config: &TenantConfig) -> Result<Vm, Error> {
     let http = config.http.expand(&config.vars).map_err(Error::Config)?;
     let lua = Lua::new();
     let deadline = Instant::now() + limits.timeout;
     lua.set_memory_limit(limits.memory_bytes).map_err(internal)?;
     let script = Arc::new(Mutex::new(script.to_string()));
-    let vm_data = data.clone();
+    let vm_data = svc.data.clone();
     install(
         &lua,
         version,
         &HostContext {
             tenant: tenant.to_string(),
             script: script.clone(),
-            data,
-            db,
-            callback_base_url: cb_url,
+            data: svc.data.clone(),
+            db: svc.db.clone(),
+            callback_base_url: svc.cb_url.clone(),
+            throttle: svc.throttle.clone(),
             http,
             vars: config.vars.clone(),
             limits: HostLimits {
@@ -364,8 +380,8 @@ fn apply_deletes(result: &serde_json::Value, event: &serde_json::Value, data: &D
     Ok(())
 }
 
-fn run(source: &str, call: &Call, limits: &Limits, data: DataScopes, db: Option<DbScope>, cb_url: Option<String>, config: &TenantConfig) -> Result<serde_json::Value, Error> {
-    let vm = new_vm(parse_runtime_version(source)?, &call.tenant, &call.script, limits, data, db, cb_url, config)?;
+fn run(source: &str, call: &Call, limits: &Limits, svc: &Services, config: &TenantConfig) -> Result<serde_json::Value, Error> {
+    let vm = new_vm(parse_runtime_version(source)?, &call.tenant, &call.script, limits, svc, config)?;
     call_in_vm(&vm, source, call)
 }
 
@@ -378,14 +394,12 @@ fn run_routed(
     router: String,
     inv: &Invocation,
     limits: &Limits,
-    data: DataScopes,
-    db: Option<DbScope>,
-    cb_url: Option<String>,
+    svc: &Services,
     config: &TenantConfig,
     loader: &CachedLoader,
     handle: &tokio::runtime::Handle,
 ) -> Result<serde_json::Value, Error> {
-    let vm = new_vm(parse_runtime_version(router_src)?, &inv.tenant, &router, limits, data.clone(), db.clone(), cb_url.clone(), config)?;
+    let vm = new_vm(parse_runtime_version(router_src)?, &inv.tenant, &router, limits, svc, config)?;
     let route_call = Call { tenant: inv.tenant.clone(), script: router, trigger: Trigger::Route, event: inv.event.clone() };
     let decision = call_in_vm(&vm, router_src, &route_call)?;
 
@@ -408,7 +422,7 @@ fn run_routed(
         call_in_vm(&vm, &target.source, &call)
     } else {
         let remaining = Limits { timeout: vm.deadline.saturating_duration_since(Instant::now()), ..limits.clone() };
-        run(&target.source, &call, &remaining, data, db, cb_url, config)
+        run(&target.source, &call, &remaining, svc, config)
     }
 }
 
@@ -764,6 +778,29 @@ mod tests {
         store.put(&ScriptKey::config("acme").unwrap(), r#"{"http":{"allow":["https://evil.example.org/"]}}"#);
         let allowed = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         assert!(!allowed["err"].as_str().unwrap().contains("allowlist"));
+    }
+
+    #[tokio::test]
+    async fn throttled_http_gives_up_at_the_deadline() {
+        let script = r#"return { handle = function()
+            local errs = {}
+            for i = 1, 2 do
+                local ok, err = pcall(native.http.get, "https://api.partner.invalid/v1/x")
+                errs[i] = tostring(err)
+            end
+            return errs
+        end }"#;
+        let config = r#"{"http":{"allow":["https://api.partner.invalid/"]}}"#;
+        // one start per 100 s: the first call goes out, the second could only start after the deadline
+        let rules = Throttle::from_json(r#"[{"url":"https://api.partner.invalid/v1/","per_second":0.01}]"#).unwrap();
+        let e = engine_cfg(script, Limits::default(), config).with_throttle(rules);
+        let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert!(!out[0].as_str().unwrap().contains("throttled"), "{out}");
+        assert!(out[1].as_str().unwrap().contains("throttled"), "{out}");
+
+        // without a throttle, neither call is held back
+        let out = engine_cfg(script, Limits::default(), config).invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert!(!out[1].as_str().unwrap().contains("throttled"), "{out}");
     }
 
     #[tokio::test]

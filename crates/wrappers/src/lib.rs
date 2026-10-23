@@ -13,11 +13,13 @@
 mod data;
 mod db;
 mod http;
+mod throttle;
 mod v1;
 mod xml;
 
 pub use xml::{ByteStream, MAX_STREAM_BYTES};
 pub use http::{AllowRule, HttpPolicy};
+pub use throttle::{Slot, Throttle, ThrottleRule};
 pub use data::{Access, DataScope, DataScopes, PresignMethod, MAX_PRESIGN_TTL, ObjectBackend, MAX_LIST_KEYS, MAX_OBJECT_BYTES};
 pub use db::{Callback, CallbackSigner, DbScope, Take, Taken, Item, ItemBackend, DB_TTL, MAX_ITEM_BYTES, MAX_QUERY_ITEMS};
 
@@ -99,6 +101,8 @@ pub struct HostContext {
     pub db: Option<DbScope>,
     /// Public base URL of the webhook ingress; `native.callback` errors when absent.
     pub callback_base_url: Option<String>,
+    /// Operator-set limits on outbound HTTP, shared by everything in this process (Fargate only).
+    pub throttle: Option<std::sync::Arc<Throttle>>,
     /// Outbound HTTP allowlist from the tenant config (empty denies all).
     pub http: HttpPolicy,
     /// Tenant `vars` from config.json, exposed read-only as `native.config`.
