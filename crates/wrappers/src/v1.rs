@@ -350,7 +350,9 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                 .as_ref()
                 .ok_or("the credential vault is not configured for this runtime")?
                 .resolve(&tenant, name, &url)?;
-            secrets.push(v.clone());
+            if v.len() >= crate::MIN_SECRET_BYTES {
+                secrets.push(v.clone());
+            }
             Ok(v)
         };
         let headers = headers

@@ -56,7 +56,7 @@ bearer token (at least 24 characters, e.g. `openssl rand -hex 32`).
 
 ```sh
 curl -X PUT  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-     -d '{"value":"sk_live_...","allow":["https://api.stripe.com/v1/"]}' \
+     -d '{"value":{"live":{"key":"sk_live_..."}},"allow":["https://api.stripe.com/v1/"]}' \
      http://server:9090/admin/vault/acme/stripe
 curl         -H "Authorization: Bearer $TOKEN" http://server:9090/admin/vault/acme      # names + allow, no values
 curl -X DELETE -H "Authorization: Bearer $TOKEN" http://server:9090/admin/vault/acme/stripe
@@ -64,8 +64,9 @@ curl -X POST   -H "Authorization: Bearer $TOKEN" http://server:9090/admin/rekey 
 ```
 
 `allow` (1-16 prefixes, same syntax as `http.allow`) limits where that secret can ever be sent,
-independently of the tenant's own allowlist. Names are 1-64 characters (letters, digits, `-`, `_`,
-`.`) and values 8 bytes to 16 KB. Writes and deletes are logged with tenant and name, never the value.
+independently of the tenant's own allowlist. A value is any JSON (not `null`) up to 16 KB, so one secret can hold
+several related fields; scripts address a field as `{{vault:name.field.path}}`. Names are 1-64
+characters (letters, digits, `-`, `_`; no `.`, which separates the path). Writes and deletes are logged with tenant and name, never the value.
 
 **Rotation.** A small index (`SYS#vault-index`, one row per tenant that has stored a secret) lets
 `POST /admin/rekey` re-seal every tenant's entries under the active master key; it is idempotent, so

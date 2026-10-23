@@ -85,7 +85,7 @@ struct AdminState {
 /// Credential vault API. Every request needs `Authorization: Bearer <admin token>`.
 ///
 /// - `GET    /admin/vault/{tenant}`            names and allowed URLs (never values)
-/// - `PUT    /admin/vault/{tenant}/{name}`     `{"value": "...", "allow": ["https://api.example.com/v1/"]}`
+/// - `PUT    /admin/vault/{tenant}/{name}`     `{"value": <any JSON>, "allow": ["https://api.example.com/v1/"]}`
 /// - `DELETE /admin/vault/{tenant}/{name}`
 /// - `POST   /admin/vault/{tenant}/rekey`      re-seal one tenant's entries under the active master key
 /// - `POST   /admin/rekey`                     the same for every tenant that uses the vault
@@ -132,7 +132,7 @@ async fn admin_auth(
 
 #[derive(serde::Deserialize)]
 struct PutSecret {
-    value: String,
+    value: Value,
     allow: Vec<String>,
 }
 

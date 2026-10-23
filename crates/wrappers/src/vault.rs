@@ -1,7 +1,7 @@
 //! Credential vault: secrets that scripts can send but never read.
 //!
 //! Operators store a secret together with the URL prefixes it may be sent to. A script puts
-//! `{{vault:NAME}}` in the headers or body of a `native.http` request; the host substitutes the
+//! `{{vault:NAME.field.path}}` in the headers or body of a `native.http` request; the host substitutes the
 //! value after the tenant's allowlist check, and only when the request URL also matches the
 //! secret's own `allow` list. No native function returns a secret.
 //!
@@ -22,7 +22,8 @@ use crate::{
 };
 
 pub const MAX_SECRET_BYTES: usize = 16 * 1024;
-/// Shorter secrets are refused so that redacting them from responses cannot mangle ordinary text.
+/// Only values this long are redacted from responses, so a short field such as a username cannot
+/// mangle ordinary text.
 pub const MIN_SECRET_BYTES: usize = 8;
 const MAX_ALLOW: usize = 16;
 
@@ -77,14 +78,15 @@ impl Vault {
         &self,
         tenant: &str,
         name: &str,
-        value: &str,
+        value: &serde_json::Value,
         allow: &[String],
     ) -> Result<(), String> {
         check_tenant(tenant)?;
-        check_name(name)?;
-        if !(MIN_SECRET_BYTES..=MAX_SECRET_BYTES).contains(&value.len()) {
+        check_secret_name(name)?;
+        let json = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+        if value.is_null() || json.len() > MAX_SECRET_BYTES {
             return Err(format!(
-                "secret must be {MIN_SECRET_BYTES}-{MAX_SECRET_BYTES} bytes"
+                "a secret is a JSON value of at most {MAX_SECRET_BYTES} bytes, not null"
             ));
         }
         if allow.is_empty() || allow.len() > MAX_ALLOW {
@@ -93,7 +95,7 @@ impl Vault {
         if let Some(bad) = allow.iter().find(|a| !pattern_is_valid(a)) {
             return Err(format!("invalid allow url {bad:?}"));
         }
-        let sealed = self.keys.seal_secret(tenant, name, value.as_bytes())?;
+        let sealed = self.keys.seal_secret(tenant, name, &json)?;
         // Index first: an index row without a secret is harmless, a secret missing from the index is not.
         self.backend.put(
             INDEX_PK,
@@ -130,7 +132,7 @@ impl Vault {
 
     pub fn delete(&self, tenant: &str, name: &str) -> Result<(), String> {
         check_tenant(tenant)?;
-        check_name(name)?;
+        check_secret_name(name)?;
         self.backend.delete(&pk(tenant), name)
     }
 
@@ -194,9 +196,20 @@ impl Vault {
         Ok((tenants.len(), entries))
     }
 
-    /// The secret, provided `url` is one of the entry's allowed targets. Error text never includes the value.
-    pub(crate) fn resolve(&self, tenant: &str, name: &str, url: &Url) -> Result<Vec<u8>, String> {
-        check_name(name)?;
+    /// The text for a reference like `stripe` or `stripe.live.key`: the first segment names the secret,
+    /// the rest walks into its JSON (object keys, array indexes). The result must be a string, number
+    /// or boolean. Only for `url`s the secret allows. Error text never includes the value.
+    pub(crate) fn resolve(
+        &self,
+        tenant: &str,
+        reference: &str,
+        url: &Url,
+    ) -> Result<Vec<u8>, String> {
+        let (name, path) = match reference.split_once('.') {
+            Some((n, p)) => (n, Some(p)),
+            None => (reference, None),
+        };
+        check_secret_name(name)?;
         let item = self
             .backend
             .get(&pk(tenant), name)?
@@ -209,13 +222,43 @@ impl Vault {
             ));
         }
         let blob = STANDARD.decode(&stored.sealed).map_err(|e| e.to_string())?;
-        self.keys.open_secret(tenant, name, &blob)
+        let plain = self.keys.open_secret(tenant, name, &blob)?;
+        let root: serde_json::Value = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+        let mut node = &root;
+        for seg in path.into_iter().flat_map(|p| p.split('.')) {
+            node = match node {
+                serde_json::Value::Object(m) => m.get(seg),
+                serde_json::Value::Array(a) => seg.parse::<usize>().ok().and_then(|i| a.get(i)),
+                _ => None,
+            }
+            .ok_or_else(|| format!("vault secret {reference:?} has no field {seg:?}"))?;
+        }
+        match node {
+            serde_json::Value::String(s) => Ok(s.clone().into_bytes()),
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
+                Ok(node.to_string().into_bytes())
+            }
+            _ => Err(format!(
+                "vault secret {reference:?} is not a single value; name a field such as {name}.field"
+            )),
+        }
     }
+}
+
+/// Secret names are the first segment of a `{{vault:name.path}}` reference, so they cannot contain `.`.
+fn check_secret_name(name: &str) -> Result<(), String> {
+    check_name(name)?;
+    if name.contains('.') {
+        return Err(format!(
+            "invalid secret name {name:?} (letters, digits, - and _)"
+        ));
+    }
+    Ok(())
 }
 
 const OPEN: &[u8] = b"{{vault:";
 
-/// Replaces each `{{vault:NAME}}` in `input` with `resolve(NAME)`.
+/// Replaces each `{{vault:REF}}` in `input` with `resolve(REF)`, where REF is `name` or `name.field.path`.
 pub(crate) fn substitute(
     input: &[u8],
     mut resolve: impl FnMut(&str) -> Result<Vec<u8>, String>,
@@ -226,8 +269,9 @@ pub(crate) fn substitute(
         out.extend_from_slice(&rest[..i]);
         let after = &rest[i + OPEN.len()..];
         let end = find(after, b"}}").ok_or("unterminated {{vault: placeholder")?;
-        let name = std::str::from_utf8(&after[..end]).map_err(|_| "invalid vault secret name")?;
-        out.extend_from_slice(&resolve(name)?);
+        let reference =
+            std::str::from_utf8(&after[..end]).map_err(|_| "invalid vault reference")?;
+        out.extend_from_slice(&resolve(reference)?);
         rest = &after[end + 2..];
     }
     out.extend_from_slice(rest);
@@ -259,6 +303,7 @@ pub(crate) fn redact(data: &[u8], secrets: &[Vec<u8>]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::MasterKey;
+    use serde_json::json;
     use std::{collections::BTreeMap, sync::Mutex};
 
     #[derive(Default)]
@@ -317,7 +362,7 @@ mod tests {
         v.put(
             "acme",
             "stripe",
-            "sk_live_123456",
+            &json!("sk_live_123456"),
             &["https://api.stripe.com/v1/".into()],
         )
         .unwrap();
@@ -358,14 +403,53 @@ mod tests {
     fn put_validates() {
         let v = Vault::new(Arc::new(Mem::default()), keys(&[1], 1));
         let ok = ["https://a.example.com/".to_string()];
-        assert!(v.put("t", "n", "short", &ok).is_err());
-        assert!(v.put("t", "n", "long enough value", &[]).is_err());
+        assert!(v.put("t", "n", &json!("long enough value"), &[]).is_err());
         assert!(v
-            .put("t", "n", "long enough value", &["not a url".into()])
+            .put("t", "n", &json!("long enough value"), &["not a url".into()])
             .is_err());
-        assert!(v.put("t", "bad name", "long enough value", &ok).is_err());
-        assert!(v.put("a/b", "n", "long enough value", &ok).is_err());
-        assert!(v.put("t", "n", "long enough value", &ok).is_ok());
+        assert!(v
+            .put("t", "bad name", &json!("long enough value"), &ok)
+            .is_err());
+        assert!(v.put("a/b", "n", &json!("long enough value"), &ok).is_err());
+        assert!(v.put("t", "n", &json!("long enough value"), &ok).is_ok());
+    }
+
+    #[test]
+    fn references_walk_into_the_json_value() {
+        let v = Vault::new(Arc::new(Mem::default()), keys(&[1], 1));
+        let allow = ["https://api.example.com/".to_string()];
+        let u = url("https://api.example.com/x");
+        v.put(
+            "t",
+            "oauth",
+            &json!({"client": {"id": "abc", "secret": "s3cr3t-value"}, "scopes": ["read", "write"], "ttl": 3600, "on": true}),
+            &allow,
+        )
+        .unwrap();
+        v.put("t", "plain", &json!("just-a-string"), &allow)
+            .unwrap();
+
+        let get = |r: &str| v.resolve("t", r, &u);
+        assert_eq!(get("oauth.client.secret").unwrap(), b"s3cr3t-value");
+        assert_eq!(get("oauth.scopes.1").unwrap(), b"write");
+        assert_eq!(get("oauth.ttl").unwrap(), b"3600");
+        assert_eq!(get("oauth.on").unwrap(), b"true");
+        assert_eq!(get("plain").unwrap(), b"just-a-string");
+        // a whole object, a missing field, or a path into a string is an error that leaks nothing
+        for bad in [
+            "oauth",
+            "oauth.client",
+            "oauth.nope",
+            "oauth.client.id.x",
+            "plain.x",
+            "oauth.scopes.9",
+        ] {
+            let e = get(bad).unwrap_err();
+            assert!(
+                !e.contains("s3cr3t-value") && !e.contains("just-a-string"),
+                "{bad}: {e}"
+            );
+        }
     }
 
     #[test]
@@ -373,7 +457,7 @@ mod tests {
         let mem = Arc::new(Mem::default());
         let allow = ["https://api.example.com/".to_string()];
         Vault::new(mem.clone(), keys(&[1], 1))
-            .put("t", "k", "secret-value-1", &allow)
+            .put("t", "k", &json!("secret-value-1"), &allow)
             .unwrap();
 
         let rotated = Vault::new(mem.clone(), keys(&[1, 2], 2));
@@ -401,10 +485,14 @@ mod tests {
         let mem = Arc::new(Mem::default());
         let allow = ["https://api.example.com/".to_string()];
         let old = Vault::new(mem.clone(), keys(&[1], 1));
-        old.put("a", "k1", "secret-value-1", &allow).unwrap();
-        old.put("a", "k2", "secret-value-2", &allow).unwrap();
-        old.put("b", "k1", "secret-value-3", &allow).unwrap();
-        old.put("gone", "k1", "secret-value-4", &allow).unwrap();
+        old.put("a", "k1", &json!("secret-value-1"), &allow)
+            .unwrap();
+        old.put("a", "k2", &json!("secret-value-2"), &allow)
+            .unwrap();
+        old.put("b", "k1", &json!("secret-value-3"), &allow)
+            .unwrap();
+        old.put("gone", "k1", &json!("secret-value-4"), &allow)
+            .unwrap();
         old.delete("gone", "k1").unwrap();
 
         let new = Vault::new(mem.clone(), keys(&[1, 2], 2));

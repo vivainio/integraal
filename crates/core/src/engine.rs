@@ -1111,7 +1111,7 @@ mod tests {
                 local ok, err = pcall(native.http.get, url, headers)
                 return tostring(err)
             end
-            local h = { authorization = "Bearer {{vault:key}}" }
+            local h = { authorization = "Bearer {{vault:key.api.token}}" }
             return {
                 other = try("https://other.invalid/x", h),
                 missing = try("https://api.invalid/x", { a = "{{vault:nope}}" }),
@@ -1140,7 +1140,7 @@ mod tests {
             .put(
                 "acme",
                 "key",
-                "sk_live_abcdef",
+                &json!({"api": {"token": "sk_live_abcdef"}}),
                 &["https://api.invalid/".into()],
             )
             .unwrap();
