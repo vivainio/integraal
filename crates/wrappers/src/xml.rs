@@ -34,10 +34,11 @@ impl UserData for ByteStream {
     }
 }
 
-struct Limited<R> {
-    inner: R,
-    left: u64,
-    deadline: Instant,
+/// Caps total bytes read and enforces the invocation deadline on every read.
+pub(crate) struct Limited<R> {
+    pub inner: R,
+    pub left: u64,
+    pub deadline: Instant,
 }
 
 impl<R: Read> Read for Limited<R> {
@@ -46,7 +47,7 @@ impl<R: Read> Read for Limited<R> {
             return Err(io::Error::other("__timeout__"));
         }
         if self.left == 0 {
-            return Err(io::Error::other("xml input exceeds stream limit"));
+            return Err(io::Error::other("input exceeds stream limit"));
         }
         let max = buf.len().min(self.left.min(usize::MAX as u64) as usize);
         let n = self.inner.read(&mut buf[..max])?;
@@ -106,7 +107,7 @@ pub fn api(lua: &Lua, max_stream_bytes: u64, deadline: Instant) -> mlua::Result<
     Ok(xml)
 }
 
-fn take_stream(ud: &AnyUserData) -> mlua::Result<Box<dyn Read + Send>> {
+pub(crate) fn take_stream(ud: &AnyUserData) -> mlua::Result<Box<dyn Read + Send>> {
     let stream = ud
         .borrow::<ByteStream>()
         .map_err(|_| mlua::Error::runtime("not a stream"))?;

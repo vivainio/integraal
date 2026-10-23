@@ -1257,6 +1257,118 @@ mod tests {
         );
     }
 
+    fn make_zip() -> Vec<u8> {
+        use std::io::Write;
+        use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+        let big = "<r>".to_string() + &"<i>v</i>".repeat(50_000) + "</r>";
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let mut out = Vec::new();
+        let mut w = ZipWriter::new(std::io::Cursor::new(&mut out));
+        w.start_file("a.txt", deflated).unwrap();
+        w.write_all(b"hello").unwrap();
+        w.start_file("skipped.bin", deflated).unwrap();
+        w.write_all(big.as_bytes()).unwrap();
+        w.start_file("dir/b.xml", deflated).unwrap();
+        w.write_all(big.as_bytes()).unwrap();
+        w.add_directory("d/", deflated).unwrap();
+        w.start_file("stored.txt", stored).unwrap();
+        w.write_all(b"plain").unwrap();
+        w.finish().unwrap();
+        out
+    }
+
+    /// An archive as produced by a streaming writer: sizes only in trailing data descriptors.
+    fn make_streamed_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        use flate2::{write::DeflateEncoder, Compression};
+        use std::io::Write;
+        let mut out = Vec::new();
+        for (name, data) in files {
+            out.extend(0x0403_4b50u32.to_le_bytes());
+            out.extend([20, 0, 8, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            out.extend((name.len() as u16).to_le_bytes());
+            out.extend([0, 0]);
+            out.extend(name.as_bytes());
+            let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(data).unwrap();
+            let comp = enc.finish().unwrap();
+            out.extend(&comp);
+            out.extend(0x0807_4b50u32.to_le_bytes());
+            out.extend(crc32fast::hash(data).to_le_bytes());
+            out.extend((comp.len() as u32).to_le_bytes());
+            out.extend((data.len() as u32).to_le_bytes());
+        }
+        out.extend(0x0605_4b50u32.to_le_bytes());
+        out.extend([0u8; 18]);
+        out
+    }
+
+    async fn run_zip(script: &str, zip: Vec<u8>) -> Result<serde_json::Value, crate::Error> {
+        let backend = Arc::new(MemBackend::default());
+        backend.put("data/acme/z.zip", zip).unwrap();
+        engine_cfg(script, Limits::default(), r#"{"buckets":{"In":"read"}}"#)
+            .with_bucket("In", backend, "data/")
+            .invoke(inv(Trigger::Invoke, json!(null)))
+            .await
+    }
+
+    #[tokio::test]
+    async fn zip_entries_iterate_skip_open_and_detect_corruption() {
+        let script = r#"return { handle = function()
+            local seen, a, n, stale = {}, nil, 0, nil
+            local first
+            for entry in native.zip.entries(native.bucket.In.open("z.zip")) do
+                table.insert(seen, entry.name)
+                if entry.name == "a.txt" then
+                    a = entry:read()
+                    first = entry
+                elseif entry.name == "dir/b.xml" then
+                    for ev in native.xml.events(entry:open()) do
+                        if ev.type == "start" and ev.tag == "i" then n += 1 end
+                    end
+                elseif entry.name == "stored.txt" then
+                    stale = select(2, pcall(function() return first:open() end))
+                    a = a .. "+" .. entry:read()
+                end
+            end
+            return { seen = seen, a = a, n = n, reuse = tostring(stale):find("already") ~= nil }
+        end }"#;
+        assert_eq!(
+            run_zip(script, make_zip()).await.unwrap(),
+            json!({"seen":["a.txt","skipped.bin","dir/b.xml","d/","stored.txt"],"a":"hello+plain","n":50000,"reuse":true})
+        );
+
+        let streamed = make_streamed_zip(&[("one", b"first"), ("two", &[7u8; 100_000]), ("three", b"last")]);
+        let script = r#"return { handle = function()
+            local seen = {}
+            for entry in native.zip.entries(native.bucket.In.open("z.zip")) do
+                table.insert(seen, entry.name .. ":" .. (entry.size or "?"))
+                if entry.name ~= "two" then seen[#seen] ..= ":" .. entry:read() end
+            end
+            return seen
+        end }"#;
+        assert_eq!(
+            run_zip(script, streamed.clone()).await.unwrap(),
+            json!(["one:?:first", "two:?", "three:?:last"])
+        );
+
+        // A flipped byte in stored data must trip the checksum.
+        let mut bad = make_zip();
+        let at = bad.windows(5).position(|w| w == b"plain").unwrap();
+        bad[at] = b'X';
+        let script = r#"return { handle = function()
+            for entry in native.zip.entries(native.bucket.In.open("z.zip")) do entry:read() end
+        end }"#;
+        let err = run_zip(script, bad).await.unwrap_err().to_string();
+        assert!(err.contains("checksum"), "{err}");
+
+        // A cut-off archive is an error, not a silently shorter listing.
+        let mut cut = streamed;
+        cut.truncate(cut.len() - 40);
+        let err = run_zip(script, cut).await.unwrap_err().to_string();
+        assert!(err.contains("truncated") || err.contains("zip"), "{err}");
+    }
+
     #[tokio::test]
     async fn config_vars_reach_script_and_allowlist() {
         let store = Arc::new(MemoryStore::default());

@@ -24,6 +24,15 @@ declare extern type XmlEvent with
     depth: number
 end
 
+-- One entry of a zip archive; valid only until the iterator advances.
+declare extern type ZipEntry with
+    name: string
+    size: number?
+    is_dir: boolean
+    open: (self) -> ByteStream
+    read: (self) -> string
+end
+
 declare extern type HttpResponse with
     status: number
     headers: { [string]: string }
@@ -97,5 +106,8 @@ declare native: {
     },
     xml: {
         events: (source: string | ByteStream, opts: { trim: boolean? }?) -> () -> XmlEvent?,
+    },
+    zip: {
+        entries: (source: string | ByteStream) -> () -> ZipEntry?,
     },
 }

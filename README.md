@@ -26,7 +26,7 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 `native.db.{get,put,delete,query}` (small items under `TEN#<tenant>#` partition keys, 24h TTL on every write; needs `db.table`),
 `native.callback.create` (signed single-use callback URLs, served by the webhook Lambda; needs `callbacks.base_url`),
 `native.http.{request,get}` (only URLs in `config.json` `http.allow`; no redirects, no private IPs).
-`native.bucket.<name>.open(key)` and `native.http.request{stream=true}` return byte streams; `native.xml.events(string_or_stream, {trim=true})` is a streaming pull parser over them (no size cap beyond 4 GiB; DTDs rejected).
+`native.bucket.<name>.open(key)` and `native.http.request{stream=true}` return byte streams; `native.xml.events(string_or_stream, {trim=true})` is a streaming pull parser over them (no size cap beyond 4 GiB; DTDs rejected); `native.zip.entries(string_or_stream)` iterates a zip archive's entries the same way, each openable as a stream.
 
 ## Config
 One JSON file (`--config <path>`, default `./integraal.json`): script/buckets, table, queue, callbacks, throttling, ceilings. See `docs/deployment.md`. Only AWS SDK variables (credentials, region, `AWS_ENDPOINT_URL`) stay in the environment.
