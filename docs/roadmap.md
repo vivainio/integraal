@@ -3,12 +3,11 @@
 Planned but **not implemented**:
 
 ## S3 object pipeline
+Routing (per-tenant router scripts) is implemented; the rest of the pipeline is not.
 Objects arriving under a tenant's data prefix trigger scripts.
 
 - S3 → SQS notification on the data bucket; the tenant and relative key are parsed from the object
   key, so one notification serves all tenants.
-- Static `routes` in `config.json` (prefix/suffix → script), with a Lua "reaction" script only for
-  logic rules can't express.
 - In-process chaining: a script returns `{ next = "...", event = ... }` and the engine continues
   within one invocation, sharing the deadline and call budgets.
 - Message dispositions from the return value: success acks; `native.retry(delay, reason)`,

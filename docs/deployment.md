@@ -8,6 +8,7 @@
 | `SCRIPT_PREFIX` | both | optional key prefix, concatenated as-is (end it with `/`) |
 | `DATA_BUCKET` | both | enables `native.data` |
 | `DATA_PREFIX` | both | base prefix; must end with `/`. Tenant data lives at `<DATA_PREFIX><tenant>/` |
+| `DB_TABLE` | both | enables `native.db` (DynamoDB table, see below) |
 | `SQS_QUEUE_URL` | server | enables the SQS poller |
 | `PORT` | server | HTTP port (default `8080`) |
 | `MAX_TIMEOUT_MS` / `MAX_MEMORY_MB` | both | operator ceilings for tenant limits |
@@ -27,7 +28,13 @@
 
 - Runtime role: `s3:GetObject` on the script bucket; `s3:GetObject`, `PutObject`, `DeleteObject`
   and `ListBucket` on the data bucket; `sqs:ReceiveMessage`/`DeleteMessage` on the queue (server).
+- `dynamodb:GetItem`, `PutItem`, `DeleteItem` and `Query` on the `DB_TABLE` table.
 - Give tenants no direct access to the script bucket.
+
+## DynamoDB table
+`native.db` needs one shared table with string partition key `pk`, string sort key `sk`, and
+**TTL enabled on the attribute `ttl`**. Items hold the value in `v`. All tenants share the table;
+isolation comes from the enforced `TEN#<tenant>#` partition key prefix.
 
 ## Lambda
 

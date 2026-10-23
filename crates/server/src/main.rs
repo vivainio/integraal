@@ -1,9 +1,10 @@
 //! Fargate entrypoint. Serves HTTP (ALB target) and polls SQS, both feeding the same engine.
 //!
 //! HTTP:  POST /v1/{tenant}/{script}   (optional `x-script-version` header; body is the event)
-//! Queue: SQS message body is `{tenant, script, version?, event}`
+//!        POST /v1/{tenant}            (script chosen by the tenant's routes / router)
+//! Queue: SQS message body is `{tenant, script?, version?, event}`; no `script` means routed
 //!
-//! Env: SCRIPT_BUCKET, [SCRIPT_PREFIX], [DATA_BUCKET, DATA_PREFIX], [SQS_QUEUE_URL], [PORT=8080], [AWS_ENDPOINT_URL]
+//! Env: SCRIPT_BUCKET, [SCRIPT_PREFIX], [DATA_BUCKET, DATA_PREFIX], [DB_TABLE], [SQS_QUEUE_URL], [PORT=8080], [AWS_ENDPOINT_URL]
 
 use std::{sync::Arc, time::Duration};
 
@@ -31,6 +32,11 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => engine,
     };
 
+    let engine = match std::env::var("DB_TABLE") {
+        Ok(table) => engine.with_db(Arc::new(integraal_core::DynamoBackend::from_env(table).await)),
+        Err(_) => engine,
+    };
+
     if let Ok(queue_url) = std::env::var("SQS_QUEUE_URL") {
         tokio::spawn(poll_queue(engine.clone(), queue_url));
     }
@@ -38,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/{tenant}/{script}", post(http_invoke))
+        .route("/v1/{tenant}", post(http_routed))
         .with_state(engine);
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
@@ -47,8 +54,28 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn http_invoke(
-    State(engine): State<Engine>,
+    state: State<Engine>,
     Path((tenant, script)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Option<Json<Value>>,
+) -> (StatusCode, Json<Value>) {
+    run_http(state.0, tenant, Some(script), headers, body).await
+}
+
+/// No script in the path: the tenant's routes / router script choose one.
+async fn http_routed(
+    state: State<Engine>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+    body: Option<Json<Value>>,
+) -> (StatusCode, Json<Value>) {
+    run_http(state.0, tenant, None, headers, body).await
+}
+
+async fn run_http(
+    engine: Engine,
+    tenant: String,
+    script: Option<String>,
     headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
@@ -65,7 +92,7 @@ fn status_for(e: &Error) -> StatusCode {
         Error::Load(integraal_loader::LoadError::NotFound(_)) => StatusCode::NOT_FOUND,
         Error::Load(integraal_loader::LoadError::InvalidName(..)) => StatusCode::BAD_REQUEST,
         Error::Timeout => StatusCode::GATEWAY_TIMEOUT,
-        Error::Script(_) | Error::NoHandler(..) | Error::BadModule | Error::Wrappers(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        Error::NoRoute | Error::Config(_) | Error::Script(_) | Error::NoHandler(..) | Error::BadModule | Error::Wrappers(_) => StatusCode::UNPROCESSABLE_ENTITY,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

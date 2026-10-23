@@ -10,6 +10,7 @@ One envelope `{tenant, script, version?, event}`, three entrypoints:
 - **ALB → Fargate** — `POST /v1/{tenant}/{script}` (`x-script-version` header optional), `GET /healthz`
 - **SQS → Fargate** — set `SQS_QUEUE_URL`; message deleted only on success (DLQ handles failures)
 
+A message without `script` is routed by the tenant's `router` script (see docs → Triggers).
 Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, falling back to `handle(ctx, event)`.
 
 ## Layout in the script bucket
@@ -22,11 +23,12 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 ## Native API (`--!runtime 1`)
 `native.log`, `native.json.{encode,decode}`, `native.time.now_ms`,
 `native.data.{get,put,delete,list}` (confined to `DATA_BUCKET/DATA_PREFIX<tenant>/`),
+`native.db.{get,put,delete,query}` (small items under `TEN#<tenant>#` partition keys, 24h TTL on every write; needs `DB_TABLE`),
 `native.http.{request,get}` (only URLs in `config.json` `http.allow`; no redirects, no private IPs).
 `native.data.open(key)` and `native.http.request{stream=true}` return byte streams; `native.xml.events(string_or_stream, {trim=true})` is a streaming pull parser over them (no size cap beyond 4 GiB; DTDs rejected).
 
 ## Config
-`SCRIPT_BUCKET`, `SCRIPT_PREFIX`, `DATA_BUCKET`, `DATA_PREFIX`, `SQS_QUEUE_URL`, `PORT`, `AWS_ENDPOINT_URL`.
+`SCRIPT_BUCKET`, `SCRIPT_PREFIX`, `DATA_BUCKET`, `DATA_PREFIX`, `DB_TABLE`, `SQS_QUEUE_URL`, `PORT`, `AWS_ENDPOINT_URL`.
 
 ## Local testing
 Uses [roto](https://github.com/vivainio/roto) as the AWS simulator: see `dev/local.sh`.

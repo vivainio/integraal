@@ -24,6 +24,11 @@ async fn main() -> Result<(), Error> {
         Err(_) => engine,
     };
 
+    let engine = match std::env::var("DB_TABLE") {
+        Ok(table) => engine.with_db(Arc::new(integraal_core::DynamoBackend::from_env(table).await)),
+        Err(_) => engine,
+    };
+
     lambda_runtime::run(service_fn(|ev: LambdaEvent<Value>| {
         let engine = engine.clone();
         async move {

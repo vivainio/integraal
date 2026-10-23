@@ -31,6 +31,22 @@ Object storage confined to `DATA_BUCKET/DATA_PREFIX<tenant>/`. Keys are **relati
 Keys may not be empty, start with `/`, contain `.` or `..` segments, backslashes or control
 characters, or exceed 512 bytes.
 
+## `native.db`
+Small items in a shared DynamoDB table, enabled by `DB_TABLE`. Every item is addressed by a
+partition name `pk` and an optional sort key `sk` (default `""`). The stored partition key is
+always `TEN#<tenant>#<pk>`, so a tenant can only reach its own rows. **Every write sets a 24-hour
+expiry** (refreshed on each `put`); expired items are never returned, even before DynamoDB removes them.
+
+| Function | Result |
+| --- | --- |
+| `get(pk, sk?)` | the stored value, or `nil` if missing or expired. |
+| `put(pk, sk?, value)` | stores any JSON-serializable value (at most 64 KB encoded). |
+| `delete(pk, sk?)` | removes the item. |
+| `query(pk, opts?)` | array of `{ sk, value }` ordered by `sk`; `opts.sk_prefix`, `opts.limit` (at most 100). |
+
+`pk` may not be empty; `pk` and `sk` are limited to 256 bytes and may not contain control
+characters. Calls count against `max_data_ops`.
+
 ## `native.http`
 Outbound HTTP, restricted to the tenant's [`http.allow`](tenant-config.md#httpallow) list.
 Redirects are **not** followed (a redirect could leave the allowlist); follow them explicitly.

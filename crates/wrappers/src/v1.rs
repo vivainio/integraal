@@ -9,10 +9,11 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     let native = lua.create_table()?;
     native.set("version", 1)?;
 
-    let (tenant, script) = (host.tenant.clone(), host.script.clone());
+    let (tenant, script_name) = (host.tenant.clone(), host.script.clone());
     native.set(
         "log",
         lua.create_function(move |_, (level, msg): (String, String)| {
+            let script = script_name.lock().unwrap().clone();
             match level.as_str() {
                 "error" => tracing::error!(%tenant, %script, "{msg}"),
                 "warn" => tracing::warn!(%tenant, %script, "{msg}"),
@@ -53,6 +54,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     native.set("time", time)?;
 
     native.set("data", data_api(lua, host, budget.clone())?)?;
+    native.set("db", db_api(lua, host, budget.clone())?)?;
     native.set("http", http_api(lua, host, budget)?)?;
     native.set("xml", crate::xml::api(lua, host.limits.max_stream_bytes, host.limits.deadline)?)?;
     native.set("config", lua.to_value(&host.vars)?)?;
@@ -109,6 +111,66 @@ fn data_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
         })?,
     )?;
     Ok(data)
+}
+
+/// Values are any JSON-serializable Lua value, stored as JSON text. Shares the `max_data_ops` budget.
+fn db_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
+    let db = lua.create_table()?;
+    let scope = host.db.clone();
+    let need = move || {
+        budget.take_data().map_err(mlua::Error::runtime)?;
+        scope.clone().ok_or_else(|| mlua::Error::runtime("native.db is not configured for this runtime"))
+    };
+    let err = |e: String| mlua::Error::runtime(e);
+
+    let n = need.clone();
+    db.set(
+        "get",
+        lua.create_function(move |lua, (pk, sk): (String, Option<String>)| {
+            match n()?.get(&pk, sk.as_deref().unwrap_or("")).map_err(err)? {
+                Some(json) => lua.to_value(&serde_json::from_str::<serde_json::Value>(&json).map_err(mlua::Error::external)?),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    let n = need.clone();
+    db.set(
+        "put",
+        lua.create_function(move |lua, (pk, sk, value): (String, Option<String>, Value)| {
+            let json = serde_json::to_string(&lua.from_value::<serde_json::Value>(value)?).map_err(mlua::Error::external)?;
+            n()?.put(&pk, sk.as_deref().unwrap_or(""), json).map_err(err)
+        })?,
+    )?;
+
+    let n = need.clone();
+    db.set(
+        "delete",
+        lua.create_function(move |_, (pk, sk): (String, Option<String>)| {
+            n()?.delete(&pk, sk.as_deref().unwrap_or("")).map_err(err)
+        })?,
+    )?;
+
+    let n = need;
+    db.set(
+        "query",
+        lua.create_function(move |lua, (pk, opts): (String, Option<Table>)| {
+            let (prefix, limit) = match opts {
+                Some(o) => (o.get::<Option<String>>("sk_prefix")?, o.get::<Option<usize>>("limit")?),
+                None => (None, None),
+            };
+            let rows = n()?.query(&pk, prefix.as_deref().unwrap_or(""), limit).map_err(err)?;
+            let out = lua.create_table()?;
+            for (sk, json) in rows {
+                let row = lua.create_table()?;
+                row.set("sk", sk)?;
+                row.set("value", lua.to_value(&serde_json::from_str::<serde_json::Value>(&json).map_err(mlua::Error::external)?)?)?;
+                out.push(row)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+    Ok(db)
 }
 
 fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {

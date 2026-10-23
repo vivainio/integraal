@@ -10,7 +10,7 @@ end
 declare extern type Context with
     tenant: string
     script: string
-    trigger: "invoke" | "http" | "queue"
+    trigger: "invoke" | "http" | "queue" | "route"
     runtime: number
 end
 
@@ -36,6 +36,11 @@ declare extern type HttpStreamResponse with
     body: ByteStream
 end
 
+declare extern type DbRow with
+    sk: string
+    value: any
+end
+
 declare native: {
     version: number,
     log: (level: "error" | "warn" | "info" | "debug", message: string) -> (),
@@ -53,6 +58,12 @@ declare native: {
         delete: (key: string) -> (),
         list: (prefix: string?) -> { string },
         open: (key: string) -> ByteStream?,
+    },
+    db: {
+        get: (pk: string, sk: string?) -> any,
+        put: (pk: string, sk: string?, value: any) -> (),
+        delete: (pk: string, sk: string?) -> (),
+        query: (pk: string, opts: { sk_prefix: string?, limit: number? }?) -> { DbRow },
     },
     http: {
         request: ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, stream: true }) -> HttpStreamResponse)

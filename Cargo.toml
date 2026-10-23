@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 mlua = { version = "0.12", features = ["luau", "vendored", "serde", "send"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
+aws-sdk-dynamodb = "1"
 aws-sdk-sqs = "1"
 
 integraal-loader = { path = "crates/loader" }

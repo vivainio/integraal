@@ -1,13 +1,15 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use integraal_loader::{CachedLoader, LoadError, ScriptKey};
-use integraal_wrappers::{install, parse_runtime_version, DataScope, HostContext, HostLimits, HttpPolicy, ObjectBackend};
+use integraal_wrappers::{
+    install, parse_runtime_version, DataScope, DbScope, HostContext, HostLimits, HttpPolicy, ItemBackend, ObjectBackend, ScriptName,
+};
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
-use crate::{Error, Invocation};
+use crate::{Error, Invocation, Trigger};
 
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -107,6 +109,17 @@ pub struct TenantConfig {
     pub vars: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub limits: TenantLimits,
+    /// Script whose `on_route`/`route` handler picks the script for messages that don't name one.
+    #[serde(default)]
+    pub router: Option<String>,
+}
+
+/// A fully resolved unit of work: which script runs, with which event.
+struct Call {
+    tenant: String,
+    script: String,
+    trigger: Trigger,
+    event: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -115,11 +128,12 @@ pub struct Engine {
     limits: Limits,
     ceiling: Limits,
     data: Option<(Arc<dyn ObjectBackend>, String)>,
+    db: Option<Arc<dyn ItemBackend>>,
 }
 
 impl Engine {
     pub fn new(loader: Arc<CachedLoader>, limits: Limits) -> Self {
-        Self { loader, limits, ceiling: Limits::ceiling_from_env(), data: None }
+        Self { loader, limits, ceiling: Limits::ceiling_from_env(), data: None, db: None }
     }
 
     /// Overrides the operator ceiling (default: `Limits::ceiling_from_env()`).
@@ -134,19 +148,24 @@ impl Engine {
         self
     }
 
+    /// Enables `native.db`. Each tenant is confined to partition keys starting `TEN#<tenant>#`.
+    pub fn with_db(mut self, backend: Arc<dyn ItemBackend>) -> Self {
+        self.db = Some(backend);
+        self
+    }
+
     pub async fn invoke(&self, inv: Invocation) -> Result<serde_json::Value, Error> {
         self.invoke_within(inv, None).await
     }
 
     /// Like `invoke`, additionally capping the timeout (e.g. to the time a Lambda has left).
     pub async fn invoke_within(&self, inv: Invocation, max_time: Option<Duration>) -> Result<serde_json::Value, Error> {
-        let key = ScriptKey::new(&inv.tenant, &inv.script, inv.version.as_deref())?;
-        let script = self.loader.load(&key).await?;
         let config = match self.loader.load(&ScriptKey::config(&inv.tenant)?).await {
-            Ok(c) => serde_json::from_str(&c.source).map_err(|e| Error::Config(e.to_string()))?,
+            Ok(c) => serde_json::from_str::<TenantConfig>(&c.source).map_err(|e| Error::Config(e.to_string()))?,
             Err(LoadError::NotFound(_)) => TenantConfig::default(),
             Err(e) => return Err(e.into()),
         };
+        let config = Arc::new(config);
         let mut limits = self.limits.resolve(&self.ceiling, &config.limits);
         if let Some(max) = max_time {
             limits.timeout = limits.timeout.min(max);
@@ -155,32 +174,67 @@ impl Engine {
             .data
             .as_ref()
             .map(|(b, base)| DataScope::new(b.clone(), format!("{base}{}/", inv.tenant)).with_max_object_bytes(limits.max_object_bytes));
+        let db = self.db.as_ref().map(|b| DbScope::new(b.clone(), inv.tenant.as_str()));
+
         // Luau states are not Send-safe to hold across awaits; run on a blocking thread.
-        tokio::task::spawn_blocking(move || run(&script.source, &inv, &limits, data, config))
-            .await
-            .map_err(|e| Error::Internal(e.to_string()))?
+        match inv.script.clone() {
+            Some(script) => {
+                let key = ScriptKey::new(&inv.tenant, &script, inv.version.as_deref())?;
+                let source = self.loader.load(&key).await?;
+                let call = Call { tenant: inv.tenant, script, trigger: inv.trigger, event: inv.event };
+                tokio::task::spawn_blocking(move || run(&source.source, &call, &limits, data, db, &config)).await
+            }
+            None => {
+                // No script named: the tenant's router picks one, and the chosen script runs in the same VM.
+                let router = config.router.clone().ok_or(Error::NoRoute)?;
+                let source = self.loader.load(&ScriptKey::new(&inv.tenant, &router, None)?).await?;
+                let (loader, handle) = (self.loader.clone(), tokio::runtime::Handle::current());
+                tokio::task::spawn_blocking(move || {
+                    run_routed(&source.source, router, &inv, &limits, data, db, &config, &loader, &handle)
+                })
+                .await
+            }
+        }
+        .map_err(|e| Error::Internal(e.to_string()))?
     }
 }
 
-fn run(source: &str, inv: &Invocation, limits: &Limits, data: Option<DataScope>, config: TenantConfig) -> Result<serde_json::Value, Error> {
-    let version = parse_runtime_version(source)?;
-    let http = config.http.expand(&config.vars).map_err(Error::Config)?;
+/// A Luau state set up for one invocation: native API installed, sandboxed, limits armed.
+struct Vm {
+    lua: Lua,
+    version: u32,
+    deadline: Instant,
+    script: ScriptName,
+}
 
+fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, data: Option<DataScope>, db: Option<DbScope>, config: &TenantConfig) -> Result<Vm, Error> {
+    let http = config.http.expand(&config.vars).map_err(Error::Config)?;
     let lua = Lua::new();
     let deadline = Instant::now() + limits.timeout;
     lua.set_memory_limit(limits.memory_bytes).map_err(internal)?;
-    install(&lua, version, &HostContext { tenant: inv.tenant.clone(), script: inv.script.clone(), data, http, vars: config.vars,
-        limits: HostLimits {
-            deadline: Instant::now() + limits.timeout,
-            max_http_response_bytes: limits.max_http_response_bytes,
-            max_object_bytes: limits.max_object_bytes,
-            max_stream_bytes: limits.max_stream_bytes,
-            max_http_requests: limits.max_http_requests,
-            max_data_ops: limits.max_data_ops,
-            max_http_timeout: limits.max_http_timeout,
-        } })?;
+    let script = Arc::new(Mutex::new(script.to_string()));
+    install(
+        &lua,
+        version,
+        &HostContext {
+            tenant: tenant.to_string(),
+            script: script.clone(),
+            data,
+            db,
+            http,
+            vars: config.vars.clone(),
+            limits: HostLimits {
+                deadline,
+                max_http_response_bytes: limits.max_http_response_bytes,
+                max_object_bytes: limits.max_object_bytes,
+                max_stream_bytes: limits.max_stream_bytes,
+                max_http_requests: limits.max_http_requests,
+                max_data_ops: limits.max_data_ops,
+                max_http_timeout: limits.max_http_timeout,
+            },
+        },
+    )?;
     lua.sandbox(true).map_err(internal)?;
-
     lua.set_interrupt(move |_| {
         if Instant::now() >= deadline {
             Err(mlua::Error::runtime("__timeout__"))
@@ -188,26 +242,80 @@ fn run(source: &str, inv: &Invocation, limits: &Limits, data: Option<DataScope>,
             Ok(VmState::Continue)
         }
     });
+    Ok(Vm { lua, version, deadline, script })
+}
 
-    let chunk_name = format!("={}/{}", inv.tenant, inv.script);
+/// Loads `source` in the VM and calls the handler matching `call.trigger`.
+fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, Error> {
+    let (lua, deadline) = (&vm.lua, vm.deadline);
+    *vm.script.lock().unwrap() = call.script.clone();
+
+    let chunk_name = format!("={}/{}", call.tenant, call.script);
     let module: Table = lua.load(source).set_name(chunk_name).eval().map_err(|e| script_err(e, deadline))?;
 
-    let handler: Function = inv
+    let handler: Function = call
         .trigger
         .handlers()
         .iter()
         .find_map(|name| module.get::<Option<Function>>(*name).ok().flatten())
-        .ok_or(Error::NoHandler(inv.trigger, inv.trigger.handlers()))?;
+        .ok_or(Error::NoHandler(call.trigger, call.trigger.handlers()))?;
 
     let ctx = lua.create_table().map_err(internal)?;
-    ctx.set("tenant", inv.tenant.as_str()).map_err(internal)?;
-    ctx.set("script", inv.script.as_str()).map_err(internal)?;
-    ctx.set("trigger", format!("{:?}", inv.trigger).to_lowercase()).map_err(internal)?;
-    ctx.set("runtime", version).map_err(internal)?;
+    ctx.set("tenant", call.tenant.as_str()).map_err(internal)?;
+    ctx.set("script", call.script.as_str()).map_err(internal)?;
+    ctx.set("trigger", format!("{:?}", call.trigger).to_lowercase()).map_err(internal)?;
+    ctx.set("runtime", vm.version).map_err(internal)?;
 
-    let event = lua.to_value(&inv.event).map_err(internal)?;
+    let event = lua.to_value(&call.event).map_err(internal)?;
     let out: mlua::Value = handler.call((ctx, event)).map_err(|e| script_err(e, deadline))?;
     lua.from_value(out).map_err(|e| Error::Script(format!("handler result is not JSON-serializable: {e}")))
+}
+
+fn run(source: &str, call: &Call, limits: &Limits, data: Option<DataScope>, db: Option<DbScope>, config: &TenantConfig) -> Result<serde_json::Value, Error> {
+    let vm = new_vm(parse_runtime_version(source)?, &call.tenant, &call.script, limits, data, db, config)?;
+    call_in_vm(&vm, source, call)
+}
+
+/// Runs the router, then the script it picked, in one VM: one native-API install, one heap,
+/// one deadline and one set of call budgets. If the target pins a different runtime version
+/// (which fixes the `native` API at VM creation) it gets a fresh VM with the remaining time.
+#[allow(clippy::too_many_arguments)]
+fn run_routed(
+    router_src: &str,
+    router: String,
+    inv: &Invocation,
+    limits: &Limits,
+    data: Option<DataScope>,
+    db: Option<DbScope>,
+    config: &TenantConfig,
+    loader: &CachedLoader,
+    handle: &tokio::runtime::Handle,
+) -> Result<serde_json::Value, Error> {
+    let vm = new_vm(parse_runtime_version(router_src)?, &inv.tenant, &router, limits, data.clone(), db.clone(), config)?;
+    let route_call = Call { tenant: inv.tenant.clone(), script: router, trigger: Trigger::Route, event: inv.event.clone() };
+    let decision = call_in_vm(&vm, router_src, &route_call)?;
+
+    // The router returns a script name, or `{ script, version?, event? }` to also rewrite the event.
+    let (script, version, event) = match decision {
+        serde_json::Value::String(s) => (s, inv.version.clone(), inv.event.clone()),
+        serde_json::Value::Object(mut o) => {
+            let script = o.get("script").and_then(|s| s.as_str()).map(str::to_string).ok_or(Error::NoRoute)?;
+            let version = o.get("version").and_then(|v| v.as_str()).map(str::to_string).or_else(|| inv.version.clone());
+            (script, version, o.remove("event").unwrap_or_else(|| inv.event.clone()))
+        }
+        _ => return Err(Error::NoRoute),
+    };
+
+    let key = ScriptKey::new(&inv.tenant, &script, version.as_deref())?;
+    let target = handle.block_on(loader.load(&key))?;
+    let call = Call { tenant: inv.tenant.clone(), script, trigger: inv.trigger, event };
+
+    if parse_runtime_version(&target.source)? == vm.version {
+        call_in_vm(&vm, &target.source, &call)
+    } else {
+        let remaining = Limits { timeout: vm.deadline.saturating_duration_since(Instant::now()), ..limits.clone() };
+        run(&target.source, &call, &remaining, data, db, config)
+    }
 }
 
 fn internal(e: mlua::Error) -> Error {
@@ -247,7 +355,7 @@ mod tests {
     }
 
     fn inv(trigger: Trigger, event: serde_json::Value) -> Invocation {
-        Invocation { tenant: "acme".into(), script: "s".into(), version: None, trigger, event }
+        Invocation { tenant: "acme".into(), script: Some("s".into()), version: None, trigger, event }
     }
 
     #[tokio::test]
@@ -320,6 +428,55 @@ mod tests {
             json!({"got":"hello","keys":["notes/a"],"missing":true,"escaped":false})
         );
         assert!(backend.get("data/acme/notes/a").unwrap().is_some());
+    }
+
+    #[derive(Default)]
+    struct MemItems(std::sync::Mutex<std::collections::BTreeMap<(String, String), integraal_wrappers::Item>>);
+    impl ItemBackend for MemItems {
+        fn get(&self, pk: &str, sk: &str) -> Result<Option<integraal_wrappers::Item>, String> {
+            Ok(self.0.lock().unwrap().get(&(pk.into(), sk.into())).cloned())
+        }
+        fn put(&self, pk: &str, item: integraal_wrappers::Item) -> Result<(), String> {
+            self.0.lock().unwrap().insert((pk.into(), item.sk.clone()), item);
+            Ok(())
+        }
+        fn delete(&self, pk: &str, sk: &str) -> Result<(), String> {
+            self.0.lock().unwrap().remove(&(pk.into(), sk.into()));
+            Ok(())
+        }
+        fn query(&self, pk: &str, p: &str, limit: usize) -> Result<Vec<integraal_wrappers::Item>, String> {
+            let m = self.0.lock().unwrap();
+            Ok(m.iter().filter(|((k, sk), _)| k == pk && sk.starts_with(p)).take(limit).map(|(_, i)| i.clone()).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn db_is_confined_to_tenant_and_expires_in_24h() {
+        let backend = Arc::new(MemItems::default());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        // another tenant's row, and an already-expired row of ours
+        backend.put("TEN#other#cart", integraal_wrappers::Item { sk: "".into(), value: "\"secret\"".into(), ttl: now + 1000 }).unwrap();
+        backend.put("TEN#acme#cart", integraal_wrappers::Item { sk: "old".into(), value: "1".into(), ttl: now - 1 }).unwrap();
+        let e = engine(
+            r#"return { handle = function()
+                native.db.put("cart", "a", { n = 1 })
+                native.db.put("cart", "b", "x")
+                native.db.put("solo", nil, true)
+                return { a = native.db.get("cart", "a"), solo = native.db.get("solo"), miss = native.db.get("cart", "zz") == nil,
+                         expired = native.db.get("cart", "old") == nil, other = native.db.get("other") == nil,
+                         rows = native.db.query("cart", { sk_prefix = "a" }), all = #native.db.query("cart"),
+                         bad = pcall(native.db.get, "") }
+            end }"#,
+            Limits::default(),
+        )
+        .with_db(backend.clone());
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!({"a":{"n":1},"solo":true,"miss":true,"expired":true,"other":true,
+                   "rows":[{"sk":"a","value":{"n":1}}],"all":2,"bad":false})
+        );
+        let ttl = backend.get("TEN#acme#cart", "a").unwrap().unwrap().ttl;
+        assert!((now + 86_400..=now + 86_405).contains(&ttl));
     }
 
     #[tokio::test]
@@ -439,6 +596,68 @@ mod tests {
             .with_data(Arc::new(MemBackend::default()), "data/");
         let out = e.invoke(inv(Trigger::Http, json!({"x": 1}))).await.unwrap();
         assert_eq!(out, json!({"trigger": "http", "count": 1, "event": {"x": 1}}));
+    }
+
+    fn routed(store: &Arc<MemoryStore>) -> Engine {
+        Engine::new(Arc::new(CachedLoader::new(Shared(store.clone()), Duration::ZERO)), Limits::default())
+    }
+
+    fn put(store: &MemoryStore, script: &str, src: &str) {
+        store.put(&ScriptKey::new("acme", script, None).unwrap(), src);
+    }
+
+    fn msg(event: serde_json::Value) -> Invocation {
+        Invocation { tenant: "acme".into(), script: None, version: None, trigger: Trigger::Queue, event }
+    }
+
+    #[tokio::test]
+    async fn router_picks_script_and_can_rewrite_event() {
+        let store = Arc::new(MemoryStore::default());
+        put(&store, "parse-order", "return { on_queue = function(ctx, ev) return { by = 'parse-order', key = ev.key, trigger = ctx.trigger } end }");
+        put(&store, "audit", "return { on_queue = function(_, ev) return { by = 'audit', kind = ev.kind } end }");
+        put(
+            &store,
+            "router",
+            r#"return { on_route = function(ctx, ev)
+                if ctx.trigger ~= "route" then error("bad trigger") end
+                if ev.key and string.sub(ev.key, 1, 16) == "incoming/orders/" then return "parse-order" end
+                if ev.kind == "audit" then return "audit" end
+                return { script = "audit", event = { kind = "rewritten" } }
+            end }"#,
+        );
+        store.put(&ScriptKey::config("acme").unwrap(), r#"{"router":"router"}"#);
+        let e = routed(&store);
+        // target sees the original trigger, not "route"
+        let out = e.invoke(msg(json!({"key": "incoming/orders/1.xml"}))).await.unwrap();
+        assert_eq!(out, json!({"by": "parse-order", "key": "incoming/orders/1.xml", "trigger": "queue"}));
+        assert_eq!(e.invoke(msg(json!({"kind": "audit"}))).await.unwrap(), json!({"by": "audit", "kind": "audit"}));
+        assert_eq!(e.invoke(msg(json!({"kind": "other"}))).await.unwrap(), json!({"by": "audit", "kind": "rewritten"}));
+    }
+
+    #[tokio::test]
+    async fn router_and_target_share_one_budget() {
+        let store = Arc::new(MemoryStore::default());
+        put(&store, "router", r#"return { on_route = function() native.data.get("a"); native.data.get("b"); return "t" end }"#);
+        put(
+            &store,
+            "t",
+            r#"return { on_queue = function()
+                local ok = 0
+                for _ = 1, 5 do if pcall(native.data.get, "k") then ok += 1 end end
+                return ok
+            end }"#,
+        );
+        store.put(&ScriptKey::config("acme").unwrap(), r#"{"router":"router","limits":{"max_data_ops":3}}"#);
+        let e = routed(&store).with_data(Arc::new(MemBackend::default()), "data/");
+        // 3 allowed in total; the router used 2, so the target gets exactly 1
+        assert_eq!(e.invoke(msg(json!({}))).await.unwrap(), json!(1));
+    }
+
+    #[tokio::test]
+    async fn unroutable_message_is_an_error() {
+        let store = Arc::new(MemoryStore::default());
+        let e = routed(&store);
+        assert!(matches!(e.invoke(msg(json!({"key": "x"}))).await, Err(Error::NoRoute)));
     }
 
     #[tokio::test]

@@ -29,6 +29,7 @@ return { on_queue = on_queue, handle = handle }
 | `invoke` | `on_invoke`, `handle` |
 | `http` | `on_http`, `handle` |
 | `queue` | `on_queue`, `handle` |
+| `route` (router scripts only) | `on_route`, `route` |
 
 If none exists the invocation fails with a *no handler* error.
 
@@ -37,7 +38,7 @@ If none exists the invocation fails with a *no handler* error.
 `handler(ctx, event)`:
 
 - `ctx.tenant`, `ctx.script` – who and what is running
-- `ctx.trigger` – `"invoke"`, `"http"` or `"queue"`
+- `ctx.trigger` – `"invoke"`, `"http"`, `"queue"`, or `"route"` (router scripts)
 - `ctx.runtime` – the pinned native API version
 - `event` – the JSON `event` of the envelope, converted to Lua values
 

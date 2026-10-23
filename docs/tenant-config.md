@@ -26,6 +26,10 @@ A missing file means *defaults, no HTTP access, no vars*. A malformed file fails
 
 The file is re-fetched by ETag at most every 30 s, so edits apply within about half a minute.
 
+## `router`
+Name of the script whose `on_route` handler chooses a script for messages that don't name one;
+see [Routing](triggers.md#routing).
+
 ## `vars`
 Arbitrary JSON, exposed to scripts as `native.config`. String values can be interpolated into
 `http.allow` as `${name}`; an undefined or non-string reference fails the invocation instead of
