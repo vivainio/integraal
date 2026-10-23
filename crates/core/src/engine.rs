@@ -1443,6 +1443,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gzip_streams_and_strings_roundtrip() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::{Read, Write};
+        // Two members back to back: a valid .gz file may contain several.
+        let mut gz = Vec::new();
+        for part in ["<r><i>1</i>", "<i>2</i></r>"] {
+            let mut e = GzEncoder::new(Vec::new(), Compression::default());
+            e.write_all(part.as_bytes()).unwrap();
+            gz.extend(e.finish().unwrap());
+        }
+        let input = Arc::new(MemBackend::default());
+        input.put("in/acme/f.xml.gz", gz).unwrap();
+        let mut bad = input.get("in/acme/f.xml.gz").unwrap().unwrap();
+        let n = bad.len();
+        bad[n - 6] ^= 0xff; // inside the last member's checksum/size trailer
+        input.put("in/acme/bad.gz", bad).unwrap();
+        let output = Arc::new(MemBackend::default());
+        let e = engine_cfg(
+            r#"return { handle = function()
+                local n = 0
+                for ev in native.xml.events(native.gzip.open(native.bucket.In.open("f.xml.gz"))) do
+                    if ev.type == "start" and ev.tag == "i" then n += 1 end
+                end
+                local s = native.gzip.compress(string.rep("abc", 1000))
+                local back = native.gzip.decompress(s)
+                local out = native.bucket.Out.create("o.gz")
+                local w = native.gzip.writer(out)
+                for i = 1, 200 do w:write(string.rep("line " .. i .. "\n", 100)) end
+                w:finish(); out:close()
+                local mem = native.gzip.writer(); mem:write("hi"); 
+                local bad = pcall(function()
+                    local st = native.gzip.open(native.bucket.In.open("bad.gz"))
+                    for _ in native.xml.events(st) do end
+                end)
+                return { n = n, small = #s < 100, back = #back, mem = native.gzip.decompress(mem:finish()), bad = bad }
+            end }"#,
+            Limits::default(),
+            r#"{"buckets":{"In":"read","Out":"readwrite"}}"#,
+        )
+        .with_bucket("In", input, "in/")
+        .with_bucket("Out", output.clone(), "out/");
+        let res = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert_eq!(res, json!({"n":2,"small":true,"back":3000,"mem":"hi","bad":false}));
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(&output.get("out/acme/o.gz").unwrap().unwrap()[..])
+            .read_to_string(&mut text)
+            .unwrap();
+        assert!(text.starts_with("line 1\nline 1\n") && text.ends_with("line 200\n"));
+    }
+
+    #[tokio::test]
     async fn config_vars_reach_script_and_allowlist() {
         let store = Arc::new(MemoryStore::default());
         store.put(

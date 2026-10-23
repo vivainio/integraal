@@ -71,3 +71,24 @@ is built in memory, capped at the object size limit, and `finish()` returns it a
 
 With a sink, `sink:close()` after `finish()` commits the upload. Entries are deflated, with sizes in
 trailing data descriptors (zip64), so any size works and nothing needs to be known up front.
+
+## `native.gzip`
+| function | |
+| --- | --- |
+| `native.gzip.open(source)` | stream of the decompressed bytes of a gzip string or stream; multi-member files work |
+| `native.gzip.writer(sink?)` | `w:write(data)`, `w:finish()`; compresses into a bucket sink, or into memory when there is none (`finish()` then returns the data) |
+| `native.gzip.compress(s)` / `decompress(s)` | whole strings, capped at the object size limit |
+
+```lua
+-- .xml.gz in a bucket, parsed without ever holding it in memory
+for ev in native.xml.events(native.gzip.open(native.bucket.In.open("feed.xml.gz"))) do ... end
+
+-- compressed export
+local out = native.bucket.Out.create("export.csv.gz")
+local gz = native.gzip.writer(out)
+gz:write("a,b\n1,2\n")
+gz:finish()
+out:close()
+```
+Decompressed output counts against `max_stream_mb`, which guards against decompression bombs. Corrupt
+data or a bad checksum raises an error.

@@ -71,6 +71,15 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
         )?,
     )?;
     native.set(
+        "gzip",
+        crate::gzip::api(
+            lua,
+            host.limits.max_stream_bytes,
+            host.limits.max_object_bytes,
+            host.limits.deadline,
+        )?,
+    )?;
+    native.set(
         "crypto",
         crate::crypto::api(
             lua,

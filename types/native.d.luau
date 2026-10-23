@@ -37,6 +37,11 @@ declare extern type ZipWriter with
     finish: (self) -> string?
 end
 
+declare extern type GzipWriter with
+    write: (self, data: string) -> ()
+    finish: (self) -> string?
+end
+
 -- One entry of a zip archive; valid only until the iterator advances.
 declare extern type ZipEntry with
     name: string
@@ -120,6 +125,12 @@ declare native: {
     },
     xml: {
         events: (source: string | ByteStream, opts: { trim: boolean? }?) -> () -> XmlEvent?,
+    },
+    gzip: {
+        open: (source: string | ByteStream) -> ByteStream,
+        writer: (sink: Sink?) -> GzipWriter,
+        compress: (data: string) -> string,
+        decompress: (data: string) -> string,
     },
     zip: {
         entries: (source: string | ByteStream) -> () -> ZipEntry?,
