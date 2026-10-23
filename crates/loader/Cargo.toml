@@ -1,0 +1,15 @@
+[package]
+name = "integraal-loader"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

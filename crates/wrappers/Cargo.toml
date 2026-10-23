@@ -1,0 +1,14 @@
+[package]
+name = "integraal-wrappers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mlua.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+url = "2"
+ureq = "3"
+quick-xml = "0.38"
