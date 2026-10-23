@@ -85,7 +85,7 @@ impl Budget {
             return Err("__timeout__".into());
         }
         counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
             .map(|_| ())
             .map_err(|_| format!("{what} call limit exceeded for this invocation"))
     }
