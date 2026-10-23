@@ -11,6 +11,11 @@ pub trait ObjectBackend: Send + Sync {
     fn delete(&self, key: &str) -> Result<(), String>;
     /// Streams the object without materializing it. Not subject to `MAX_OBJECT_BYTES`.
     fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String>;
+    /// Starts a streaming upload of `key`. The object only appears once the writer is committed;
+    /// a writer dropped without `commit` leaves nothing behind. Not subject to `MAX_OBJECT_BYTES`.
+    fn create(&self, _key: &str) -> Result<Box<dyn ObjectWriter>, String> {
+        Err("streaming writes are not supported by this backend".into())
+    }
     /// Keys starting with `prefix`, at most `limit`.
     fn list(&self, prefix: &str, limit: usize) -> Result<Vec<String>, String>;
     /// A time-limited URL that lets a third party GET or PUT exactly this key.
@@ -22,6 +27,15 @@ pub trait ObjectBackend: Send + Sync {
     ) -> Result<String, String> {
         Err("presigned URLs are not supported by this backend".into())
     }
+}
+
+/// A streaming upload in progress (S3 multipart in production).
+pub trait ObjectWriter: Send {
+    fn write(&mut self, data: &[u8]) -> Result<(), String>;
+    /// Makes the object visible.
+    fn commit(self: Box<Self>) -> Result<(), String>;
+    /// Discards everything written so far.
+    fn abort(self: Box<Self>);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +187,12 @@ impl BucketScope {
             return Err(format!("object exceeds {} bytes", self.max_object_bytes));
         }
         self.backend.put(&self.full(key)?, body)
+    }
+
+    /// Streaming upload; requires the `write` grant.
+    pub fn create(&self, key: &str) -> Result<Box<dyn ObjectWriter>, String> {
+        self.need_write()?;
+        self.backend.create(&self.full(key)?)
     }
 
     pub fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String> {

@@ -1,8 +1,12 @@
 use aws_sdk_s3::{error::SdkError, operation::get_object::GetObjectError, Client};
-use integraal_wrappers::{ObjectBackend, PresignMethod};
+use integraal_wrappers::{ObjectBackend, ObjectWriter, PresignMethod};
 use std::io::Read;
 
-use aws_sdk_s3::{presigning::PresigningConfig, primitives::ByteStream};
+use aws_sdk_s3::{
+    presigning::PresigningConfig,
+    primitives::ByteStream,
+    types::{CompletedMultipartUpload, CompletedPart},
+};
 use tokio::runtime::Handle;
 
 /// S3-backed `ObjectBackend`. Blocks on the captured runtime handle, so it must
@@ -58,7 +62,166 @@ impl Read for S3Reader {
     }
 }
 
+/// S3 rejects non-final multipart parts under 5 MiB.
+const PART_BYTES: usize = 8 * 1024 * 1024;
+
+/// Streams an upload as a multipart upload, holding at most one part in memory. Objects smaller
+/// than a part are sent with a plain PUT, so no multipart upload exists for them. Dropping the
+/// writer without `commit` aborts the upload, so no orphaned parts keep accruing storage.
+struct S3Writer {
+    client: Client,
+    bucket: String,
+    key: String,
+    handle: Handle,
+    buf: Vec<u8>,
+    upload_id: Option<String>,
+    parts: Vec<CompletedPart>,
+}
+
+impl S3Writer {
+    fn upload_part(&mut self, body: Vec<u8>) -> Result<(), String> {
+        let (client, bucket, key) = (self.client.clone(), self.bucket.clone(), self.key.clone());
+        let existing = self.upload_id.clone();
+        let number = self.parts.len() as i32 + 1;
+        let (id, part) = self.handle.block_on(async move {
+            let id = match existing {
+                Some(id) => id,
+                None => client
+                    .create_multipart_upload()
+                    .bucket(&bucket)
+                    .key(&key)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .upload_id()
+                    .ok_or("S3 returned no upload id")?
+                    .to_string(),
+            };
+            let out = client
+                .upload_part()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(&id)
+                .part_number(number)
+                .body(body.into())
+                .send()
+                .await;
+            match out {
+                Ok(o) => Ok((
+                    id,
+                    CompletedPart::builder()
+                        .part_number(number)
+                        .set_e_tag(o.e_tag().map(str::to_string))
+                        .build(),
+                )),
+                Err(e) => {
+                    // Ours alone to clean up: the caller never learns this id.
+                    let _ = client
+                        .abort_multipart_upload()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .upload_id(&id)
+                        .send()
+                        .await;
+                    Err(e.to_string())
+                }
+            }
+        })?;
+        self.upload_id = Some(id);
+        self.parts.push(part);
+        Ok(())
+    }
+}
+
+impl ObjectWriter for S3Writer {
+    fn write(&mut self, data: &[u8]) -> Result<(), String> {
+        self.buf.extend_from_slice(data);
+        while self.buf.len() >= PART_BYTES {
+            let rest = self.buf.split_off(PART_BYTES);
+            let part = std::mem::replace(&mut self.buf, rest);
+            self.upload_part(part)?;
+        }
+        Ok(())
+    }
+
+    fn commit(mut self: Box<Self>) -> Result<(), String> {
+        let tail = std::mem::take(&mut self.buf);
+        if self.upload_id.is_none() {
+            let (client, bucket, key) = (self.client.clone(), self.bucket.clone(), self.key.clone());
+            return self.handle.block_on(async move {
+                client
+                    .put_object()
+                    .bucket(bucket)
+                    .key(key)
+                    .body(tail.into())
+                    .send()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            });
+        }
+        if !tail.is_empty() {
+            self.upload_part(tail)?;
+        }
+        let id = self.upload_id.take().unwrap();
+        let (client, bucket, key) = (self.client.clone(), self.bucket.clone(), self.key.clone());
+        let parts = std::mem::take(&mut self.parts);
+        let done = self.handle.block_on(async {
+            client
+                .complete_multipart_upload()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(&id)
+                .multipart_upload(
+                    CompletedMultipartUpload::builder()
+                        .set_parts(Some(parts))
+                        .build(),
+                )
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        });
+        if done.is_err() {
+            self.upload_id = Some(id); // Drop aborts it
+        }
+        done
+    }
+
+    fn abort(self: Box<Self>) {}
+}
+
+impl Drop for S3Writer {
+    fn drop(&mut self) {
+        // Spawned rather than blocked on: a drop may happen on a runtime thread.
+        if let Some(id) = self.upload_id.take() {
+            let (client, bucket, key) = (self.client.clone(), self.bucket.clone(), self.key.clone());
+            self.handle.spawn(async move {
+                let _ = client
+                    .abort_multipart_upload()
+                    .bucket(bucket)
+                    .key(key)
+                    .upload_id(id)
+                    .send()
+                    .await;
+            });
+        }
+    }
+}
+
 impl ObjectBackend for S3Backend {
+    fn create(&self, key: &str) -> Result<Box<dyn ObjectWriter>, String> {
+        Ok(Box::new(S3Writer {
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+            key: key.to_string(),
+            handle: self.handle.clone(),
+            buf: Vec::new(),
+            upload_id: None,
+            parts: Vec::new(),
+        }))
+    }
+
     fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String> {
         self.handle.block_on(async {
             match self

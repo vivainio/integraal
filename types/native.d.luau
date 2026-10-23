@@ -24,6 +24,19 @@ declare extern type XmlEvent with
     depth: number
 end
 
+-- Streaming upload from `Bucket.create`; the object appears on `close`.
+declare extern type Sink with
+    write: (self, data: string) -> ()
+    close: (self) -> number
+    abort: (self) -> ()
+end
+
+declare extern type ZipWriter with
+    add: (self, name: string, content: (string | ByteStream)?) -> ()
+    write: (self, data: string) -> ()
+    finish: (self) -> string?
+end
+
 -- One entry of a zip archive; valid only until the iterator advances.
 declare extern type ZipEntry with
     name: string
@@ -59,6 +72,7 @@ declare extern type Bucket with
     delete: (key: string) -> ()
     list: (prefix: string?) -> { string }
     open: (key: string) -> ByteStream?
+    create: (key: string) -> Sink
     presign_get: (key: string, ttl_s: number?) -> string
     presign_put: (key: string, ttl_s: number?) -> string
 end
@@ -109,5 +123,6 @@ declare native: {
     },
     zip: {
         entries: (source: string | ByteStream) -> () -> ZipEntry?,
+        writer: (sink: Sink?) -> ZipWriter,
     },
 }

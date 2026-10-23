@@ -9,20 +9,22 @@
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
 //! under the tenant's own partition keys, each expiring after 24 hours), and `native.crypto`
-//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip.entries` (streaming iterator over a zip archive).
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer).
 
 mod bucket;
 mod crypto;
 mod db;
 mod http;
+mod sink;
 mod throttle;
 mod v1;
 mod vault;
 mod xml;
 mod zip;
+mod zip_writer;
 
 pub use bucket::{
-    Access, BucketScope, BucketScopes, ObjectBackend, PresignMethod, MAX_LIST_KEYS,
+    Access, BucketScope, BucketScopes, ObjectBackend, ObjectWriter, PresignMethod, MAX_LIST_KEYS,
     MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
 };
 pub use crypto::{MasterKey, MasterKeys};

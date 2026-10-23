@@ -57,3 +57,17 @@ end
   supported; encrypted entries and other compression methods error.
 - CRC and size are verified when an entry is read to its end. A truncated archive errors.
 - Total uncompressed output is capped by `max_stream_mb`, which also guards against zip bombs.
+
+## `native.zip.writer(sink?)`
+Writes a zip archive in one forward pass. Pass a sink from `native.bucket.<name>.create(key)` to
+stream straight into a bucket (see [Buckets](buckets.md#streaming-uploads)); with no sink the archive
+is built in memory, capped at the object size limit, and `finish()` returns it as a string.
+
+| method | |
+| --- | --- |
+| `z:add(name, content)` | writes a whole entry from a string or a stream (e.g. `bucket.open(k)` or `entry:open()`) |
+| `z:add(name)` then `z:write(data)` | an entry built from several writes; the next `add` or `finish` closes it |
+| `z:finish()` | writes the central directory; returns the archive for in-memory writers |
+
+With a sink, `sink:close()` after `finish()` commits the upload. Entries are deflated, with sizes in
+trailing data descriptors (zip64), so any size works and nothing needs to be known up front.

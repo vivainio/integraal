@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MemBackend(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+    struct MemBackend(Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>);
     impl ObjectBackend for MemBackend {
         fn get(&self, k: &str) -> Result<Option<Vec<u8>>, String> {
             Ok(self.0.lock().unwrap().get(k).cloned())
@@ -687,6 +687,21 @@ mod tests {
                 .get(k)
                 .cloned()
                 .map(|v| Box::new(std::io::Cursor::new(v)) as Box<dyn std::io::Read + Send>))
+        }
+        fn create(&self, k: &str) -> Result<Box<dyn integraal_wrappers::ObjectWriter>, String> {
+            struct W(Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>, String, Vec<u8>);
+            impl integraal_wrappers::ObjectWriter for W {
+                fn write(&mut self, d: &[u8]) -> Result<(), String> {
+                    self.2.extend_from_slice(d);
+                    Ok(())
+                }
+                fn commit(self: Box<Self>) -> Result<(), String> {
+                    self.0.lock().unwrap().insert(self.1, self.2);
+                    Ok(())
+                }
+                fn abort(self: Box<Self>) {}
+            }
+            Ok(Box::new(W(self.0.clone(), k.into(), Vec::new())))
         }
         fn delete(&self, k: &str) -> Result<(), String> {
             self.0.lock().unwrap().remove(k);
@@ -1367,6 +1382,64 @@ mod tests {
         cut.truncate(cut.len() - 40);
         let err = run_zip(script, cut).await.unwrap_err().to_string();
         assert!(err.contains("truncated") || err.contains("zip"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn zip_writer_streams_to_bucket_and_reads_back() {
+        use std::io::Read;
+        let big = "<r>".to_string() + &"<i>v</i>".repeat(100_000) + "</r>";
+        let input = Arc::new(MemBackend::default());
+        input.put("in/acme/src.xml", big.clone().into_bytes()).unwrap();
+        let output = Arc::new(MemBackend::default());
+        let e = engine_cfg(
+            r#"return { handle = function()
+                local out = native.bucket.Out.create("pack.zip")
+                local z = native.zip.writer(out)
+                z:add("hello.txt", "hello")
+                z:add("dir/copy.xml", native.bucket.In.open("src.xml"))
+                z:add("parts.txt"); z:write("a"); z:write("b")
+                z:add("empty/")
+                z:finish()
+                local bytes = out:close()
+                local closed = pcall(function() out:write("x") end)
+
+                local aborted = native.bucket.Out.create("aborted.zip")
+                aborted:write("junk"); aborted:abort()
+
+                local seen = {}
+                for e in native.zip.entries(native.bucket.Out.open("pack.zip")) do
+                    seen[#seen + 1] = e.name .. "=" .. #e:read()
+                end
+                local mem = native.zip.writer(); mem:add("m.txt", "mem")
+                local s = mem:finish()
+                local n = 0
+                for e in native.zip.entries(s) do n += #e:read() end
+                return { seen = seen, wrote = bytes > 0, closed = closed, mem_n = n,
+                         gone = native.bucket.Out.get("aborted.zip") == nil }
+            end }"#,
+            Limits::default(),
+            r#"{"buckets":{"In":"read","Out":"readwrite"}}"#,
+        )
+        .with_bucket("In", input, "in/")
+        .with_bucket("Out", output.clone(), "out/");
+        let res = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert_eq!(
+            res,
+            json!({"seen":["hello.txt=5","dir/copy.xml=800007","parts.txt=2","empty/=0"],
+                   "wrote":true,"closed":false,"mem_n":3,"gone":true})
+        );
+
+        // An independent reader (central directory based) must accept the archive too.
+        let bytes = output.get("out/acme/pack.zip").unwrap().unwrap();
+        let mut ar = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(ar.len(), 4);
+        let mut text = String::new();
+        ar.by_name("dir/copy.xml").unwrap().read_to_string(&mut text).unwrap();
+        assert_eq!(text, big);
+        text.clear();
+        ar.by_name("parts.txt").unwrap().read_to_string(&mut text).unwrap();
+        assert_eq!(text, "ab");
+        assert!(ar.by_name("empty/").unwrap().is_dir());
     }
 
     #[tokio::test]

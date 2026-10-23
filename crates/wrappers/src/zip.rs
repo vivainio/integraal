@@ -398,5 +398,6 @@ pub fn api(
             })
         })?,
     )?;
+    crate::zip_writer::api(lua, &zip, max_object_bytes, deadline)?;
     Ok(zip)
 }

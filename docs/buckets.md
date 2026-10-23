@@ -16,6 +16,7 @@ Using a bucket you were not granted raises an error.
 | `put(key, body)` | write | writes an object. Capped at `max_object_mb`. |
 | `delete(key)` | delete | deletes an object. |
 | `list(prefix?)` | read | array of relative keys, at most 1000. |
+| `create(key)` | write | a **sink** for a streaming upload (multipart on S3), so the object can exceed `max_object_mb`. See below. |
 | `open(key)` | read | a **stream** (see [Streams and XML](streams-xml.md)), or `nil` if missing. Not subject to the object cap. |
 | `presign_get(key, ttl_s?)` | download | URL that lets a third party download exactly that key. |
 | `presign_put(key, ttl_s?)` | upload | URL that lets a third party upload exactly that key. |
@@ -47,7 +48,7 @@ Each bucket takes one grant or a list of grants:
 | Grant | Allows |
 | --- | --- |
 | `read` | `get`, `open`, `list` |
-| `write` | `put` |
+| `write` | `put`, `create` |
 | `delete` | `delete` |
 | `readwrite` | `read`, `write` and `delete` |
 | `upload` | `presign_put` only |
@@ -88,3 +89,19 @@ To react to uploads, point S3 event notifications at the queue: see
 Scripts can reach only the buckets their config grants, and only their own prefix in each.
 Because policy lives in the script bucket, a tenant cannot widen its own grants, HTTP allowlist or
 limits. Give tenants no direct access to the script bucket.
+
+## Streaming uploads
+`create(key)` returns a sink. `sink:write(data)` uploads as you go (S3 buffers one 8 MiB part), and the
+object only appears when you call `sink:close()`, which returns the bytes written. `sink:abort()`, or
+the script ending (or failing) without `close`, discards the upload. Total size is limited by
+`max_stream_mb`, and each `create` counts as one data operation.
+
+```lua
+local out = native.bucket.Out.create("export.zip")
+local z = native.zip.writer(out)
+for _, key in native.bucket.In.list("batch/") do
+  z:add(key, native.bucket.In.open(key))   -- streamed, never held in memory
+end
+z:finish()
+out:close()
+```
