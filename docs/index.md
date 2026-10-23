@@ -38,4 +38,5 @@ return { handle = handle }
 | write my first script | [Writing scripts](writing-scripts.md) |
 | look up a native function | [Native API](native-api.md) |
 | configure a tenant | [Tenant config](tenant-config.md) |
+| work with S3 data, DynamoDB, crypto, HTTP or routing | [Native API](native-api.md) chapters |
 | run it locally | [Local development](local-development.md) |

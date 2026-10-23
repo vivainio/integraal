@@ -27,6 +27,8 @@
 
 ## Script bucket and data buckets, different trust levels
 
+Details in [Data](data.md#trust-levels).
+
 | Bucket | Contents | Who writes |
 | --- | --- | --- |
 | **Script bucket** (`scripts.bucket`) | scripts and `<tenant>/config.json` | operator / deployment pipeline |

@@ -26,30 +26,19 @@ process at startup.
 | --- | --- | --- |
 | `scripts.bucket` | all (required) | bucket holding scripts and tenant `config.json` files |
 | `scripts.prefix` | all | key prefix, concatenated as-is (end it with `/`) |
-| `data.buckets` | server, Lambda | named data buckets (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`). Enables `native.data.<name>` |
+| `data.buckets` | server, Lambda | named data buckets (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`). Enables `native.data.<name>`; see [Data](data.md#deployment) |
 | `data.prefix` | server, Lambda | base prefix applied in every data bucket; empty or ending in `/`. Tenant data lives at `<prefix><tenant>/` |
-| `db.table` | all | DynamoDB table behind `native.db` and `native.callback` (see below) |
-| `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db` |
-| `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto keys](#crypto) |
+| `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |
+| `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
+| `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
 | `queue.url` | server, webhook | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `data.buckets` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it |
 | `server.port` | server | HTTP port (default `8080`) |
-| `throttle` | server | outbound HTTP limits, see [Throttling](#throttling) |
-| `ceiling` | server, Lambda | operator ceilings for tenant `timeout_ms` and `memory_mb` |
+| `throttle` | server | outbound HTTP limits, see [Throttling](http.md#throttling) |
+| `ceiling` | server, Lambda | operator ceilings for tenant `timeout_ms` and `memory_mb`; see [Limits](limits.md#deployment-ceiling) |
 | `log` | all | `tracing` filter, such as `info` or `integraal_core=debug` (default `info`) |
 
 Only the standard AWS SDK variables remain in the environment: credentials, region and
 `AWS_ENDPOINT_URL` (to point at a simulator such as roto).
-
-## Crypto keys {#crypto}
-
-`crypto.keys` maps a key number (1-255) to the **name of an environment variable** holding a
-32-byte master key, as 64 hex characters or base64 (`openssl rand -hex 32`). The secret itself never
-goes in the config file; inject it from Secrets Manager or similar. `crypto.active` is the number
-used for new encryption. Startup fails if a listed variable is missing or malformed.
-
-To rotate: generate key 2, deploy with both keys and `"active": 2`, let scripts re-encrypt data
-that `native.crypto.is_current` reports as stale, then drop key 1. Data sealed with a key you remove
-can no longer be decrypted, and losing every key loses the data: back them up separately from the data.
 
 ## Bucket layout
 
@@ -57,46 +46,15 @@ can no longer be decrypted, and losing every key loses the data: back them up se
 <scripts.bucket>/<tenant>/<script>/latest.luau      mutable, revalidated
 <scripts.bucket>/<tenant>/<script>/<version>.luau   immutable
 <scripts.bucket>/<tenant>/config.json               operator-owned policy
-<each data.buckets bucket>/<data.prefix><tenant>/...   tenant data
+<each data.buckets bucket>/<data.prefix><tenant>/...   tenant data, see Data
 ```
 
 ## IAM
 
-- Runtime role: `s3:GetObject` on the script bucket; `s3:GetObject`, `PutObject`, `DeleteObject`
-  and `ListBucket` on each data bucket (scope per bucket, e.g. no `DeleteObject` on `backup`; presigned URLs are signed with this role's credentials, so they only work for operations it allows); `sqs:ReceiveMessage`/`DeleteMessage` on the queue (server).
-- `dynamodb:GetItem`, `PutItem`, `DeleteItem` (conditional writes included) and `Query` on the `db.table` table.
-- Give tenants no direct access to the script bucket.
-
-## DynamoDB table
-`native.db` needs one shared table with string partition key `pk`, string sort key `sk`, and
-**TTL enabled on the attribute `ttl`**. Items hold the value in `v`. All tenants share the table;
-isolation comes from the enforced `TEN#<tenant>#` partition key prefix.
-
-## Throttling
-Add a `throttle` array to the server's config to limit outbound `native.http` calls to chosen URLs, for all
-tenants together:
-
-```json
-[{ "url": "https://api.partner.com/v1/", "max_concurrent": 2, "per_second": 5 }]
-```
-
-- `url` matches like an `http.allow` entry (scheme, host, port, path prefix; `*.` for subdomains).
-  A call matching several rules must satisfy all of them.
-- `max_concurrent` caps requests in flight; a streamed response counts until its stream is closed.
-- `per_second` spaces request starts evenly (`0.5` means one every two seconds).
-- A throttled call **waits for its slot**. If no slot can be had before the invocation deadline,
-  the call fails at once with a `throttled: ...` error (catch it with `pcall`). Waiting uses up the
-  script's time budget, so size `timeout_ms` accordingly.
-- Limits apply **per process**: with several Fargate tasks each enforces its own, so divide the
-  target limit by the task count. They are not applied on Lambda (the Lambda entrypoints ignore the key).
-- Malformed rules stop the server at startup.
-
-## Webhook Lambda
-`integraal-webhook` (binary `bootstrap`, behind a Function URL) receives `POST /cb/<tenant>/<token>`,
-verifies and consumes the callback, and sends it to `queue.url` for the Fargate poller. It runs
-no scripts. Config: its `db` and `queue` sections. IAM: `dynamodb:GetItem`/`PutItem`/`DeleteItem` on the
-table and `sqs:SendMessage` on the queue. Replies: 202 queued, 404 invalid/unknown/used, 410 expired,
-413 body over 200 KB, 500 enqueue failed (the callback is restored so the sender can retry).
+Per-feature permissions are listed in each chapter: [Data](data.md#deployment),
+[DynamoDB](dynamodb.md#deployment), [Callbacks](callbacks.md#deployment-webhook-lambda). In
+addition the runtime role needs `s3:GetObject` on the script bucket and, for the server,
+`sqs:ReceiveMessage`/`DeleteMessage` on the queue. Give tenants no direct access to the script bucket.
 
 ## Lambda
 
