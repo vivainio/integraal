@@ -196,15 +196,24 @@ impl Vault {
         Ok((tenants.len(), entries))
     }
 
-    /// The text for a reference like `stripe` or `stripe.live.key`: the first segment names the secret,
-    /// the rest walks into its JSON (object keys, array indexes). The result must be a string, number
-    /// or boolean. Only for `url`s the secret allows. Error text never includes the value.
+    /// The text for a reference like `stripe` or `stripe.live.key` if `url` is one of the secret's
+    /// allowed targets. Error text never includes the value.
+    #[cfg(test)]
     pub(crate) fn resolve(
         &self,
         tenant: &str,
         reference: &str,
         url: &Url,
     ) -> Result<Vec<u8>, String> {
+        let secret = self.lookup(tenant, reference)?;
+        secret.check(url)?;
+        Ok(secret.value)
+    }
+
+    /// Fetches the value a reference like `stripe` or `stripe.live.key` points at: the first segment
+    /// names the secret, the rest walks into its JSON (object keys, array indexes), and the result
+    /// must be a string, number or boolean. The caller must `check` the target URL before using it.
+    pub(crate) fn lookup(&self, tenant: &str, reference: &str) -> Result<Secret, String> {
         let (name, path) = match reference.split_once('.') {
             Some((n, p)) => (n, Some(p)),
             None => (reference, None),
@@ -215,12 +224,6 @@ impl Vault {
             .get(&pk(tenant), name)?
             .ok_or_else(|| format!("vault secret {name:?} does not exist"))?;
         let stored: Stored = serde_json::from_str(&item.value).map_err(|e| e.to_string())?;
-        if !stored.allow.iter().any(|p| matches_rule(p, url)) {
-            return Err(format!(
-                "vault secret {name:?} may not be sent to {}",
-                url.host_str().unwrap_or("this url")
-            ));
-        }
         let blob = STANDARD.decode(&stored.sealed).map_err(|e| e.to_string())?;
         let plain = self.keys.open_secret(tenant, name, &blob)?;
         let root: serde_json::Value = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
@@ -233,15 +236,72 @@ impl Vault {
             }
             .ok_or_else(|| format!("vault secret {reference:?} has no field {seg:?}"))?;
         }
-        match node {
-            serde_json::Value::String(s) => Ok(s.clone().into_bytes()),
+        let value = match node {
+            serde_json::Value::String(s) => s.clone().into_bytes(),
             serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
-                Ok(node.to_string().into_bytes())
+                node.to_string().into_bytes()
             }
-            _ => Err(format!(
-                "vault secret {reference:?} is not a single value; name a field such as {name}.field"
-            )),
+            _ => {
+                return Err(format!(
+                    "vault secret {reference:?} is not a single value; name a field such as {name}.field"
+                ))
+            }
+        };
+        Ok(Secret {
+            name: name.to_string(),
+            value,
+            allow: stored.allow,
+        })
+    }
+}
+
+/// A looked-up value together with the URLs its owner allows it to be sent to.
+pub(crate) struct Secret {
+    name: String,
+    pub value: Vec<u8>,
+    allow: Vec<String>,
+}
+
+impl Secret {
+    pub fn check(&self, url: &Url) -> Result<(), String> {
+        if self.allow.iter().any(|p| matches_rule(p, url)) {
+            Ok(())
+        } else {
+            Err(format!(
+                "vault secret {:?} may not be sent to {}",
+                self.name,
+                url.host_str().unwrap_or("this url")
+            ))
         }
+    }
+}
+
+/// Which parts of an HTTP request may contain `{{vault:...}}` placeholders. Everything else stays
+/// literal, so a script that relays untrusted text cannot make that text pull in a secret.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Expand {
+    pub header: bool,
+    pub body: bool,
+    pub url: bool,
+}
+
+impl Expand {
+    /// From the `vault` option of a request: a list of `"header"`, `"body"` and `"url"`.
+    pub fn parse(parts: Option<Vec<String>>) -> Result<Self, String> {
+        let mut e = Self::default();
+        for p in parts.into_iter().flatten() {
+            match p.as_str() {
+                "header" => e.header = true,
+                "body" => e.body = true,
+                "url" => e.url = true,
+                other => {
+                    return Err(format!(
+                        "unknown vault target {other:?} (expected header, body or url)"
+                    ))
+                }
+            }
+        }
+        Ok(e)
     }
 }
 

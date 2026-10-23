@@ -1107,15 +1107,20 @@ mod tests {
     #[tokio::test]
     async fn vault_secrets_are_injected_only_where_allowed_and_never_readable() {
         let script = r#"return { handle = function()
-            local try = function(url, headers)
-                local ok, err = pcall(native.http.get, url, headers)
+            local try = function(url, headers, vault)
+                local ok, err = pcall(native.http.get, url, headers, vault)
                 return tostring(err)
             end
+            local on = { "header" }
             local h = { authorization = "Bearer {{vault:key.api.token}}" }
             return {
-                other = try("https://other.invalid/x", h),
-                missing = try("https://api.invalid/x", { a = "{{vault:nope}}" }),
-                allowed = try("https://api.invalid/x", h),
+                other = try("https://other.invalid/x", h, on),
+                missing = try("https://api.invalid/x", { a = "{{vault:nope}}" }, on),
+                allowed = try("https://api.invalid/x", h, on),
+                in_url = try("https://api.invalid/{{vault:key.api.token}}", {}, { "url" }),
+                url_elsewhere = try("https://other.invalid/{{vault:key.api.token}}", {}, { "url" }),
+                off = try("https://api.invalid/x", { a = "{{vault:nope}}" }),
+                bad_target = try("https://api.invalid/x", h, { "cookie" }),
                 has_read = native.vault ~= nil,
             }
         end }"#;
@@ -1156,7 +1161,34 @@ mod tests {
         // passes the vault check and goes on to fail at the (unresolvable) network
         let allowed = out["allowed"].as_str().unwrap();
         assert!(allowed.contains("http request failed"), "{out}");
-        assert!(!out.to_string().contains("sk_live_abcdef"));
+        assert!(!out.to_string().contains("sk_live_abcdef"), "{out}");
+        // a secret in the url is also checked against the final url, and errors never echo it
+        assert!(
+            out["in_url"]
+                .as_str()
+                .unwrap()
+                .contains("http request failed"),
+            "{out}"
+        );
+        assert!(
+            out["url_elsewhere"]
+                .as_str()
+                .unwrap()
+                .contains("may not be sent"),
+            "{out}"
+        );
+        // without opting in, placeholders stay literal (so untrusted text cannot pull in secrets)
+        assert!(
+            out["off"].as_str().unwrap().contains("http request failed"),
+            "{out}"
+        );
+        assert!(
+            out["bad_target"]
+                .as_str()
+                .unwrap()
+                .contains("unknown vault target"),
+            "{out}"
+        );
         assert_eq!(
             out["has_read"],
             json!(false),

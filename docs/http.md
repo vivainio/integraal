@@ -24,6 +24,37 @@ private/loopback/link-local IP addresses.
 
 Calls count against `max_http_requests`; sizes and timeouts are set in [Limits](limits.md).
 
+## Credential vault {#credential-vault}
+Secrets the operator stores (see [Credential vault](deployment.md#vault)) can be *used* in requests
+but never read. Each secret is a JSON value. A request opts in, per part, with
+`vault = { "header", "body", "url" }`, and then `{{vault:NAME.path.to.field}}` is expanded in exactly
+those parts. `NAME` is the secret and the rest walks into its JSON (object keys, array indexes); the
+result must be a string, number or boolean. A secret that is itself a plain string is `{{vault:NAME}}`.
+
+```lua
+native.http.request({
+  method = "POST",
+  url = "https://api.stripe.com/v1/charges",
+  headers = { authorization = "Bearer {{vault:stripe.live.key}}" },   -- {"live": {"key": "sk_..."}}
+  body = "amount=100",
+  vault = { "header" },
+})
+-- native.http.get(url, headers, { "header" }) takes the same list as its third argument
+```
+
+Without the option, placeholders stay literal text. That is deliberate: a script that relays
+untrusted input in a body cannot be tricked into pulling in a secret by an input containing
+`{{vault:...}}`. Turn on only the parts you build yourself.
+
+The host substitutes just before sending. The final URL must pass the tenant's `http.allow`
+**and** match the `allow` list stored with every secret used, otherwise the call raises an error that
+does not contain the value (errors from the HTTP layer are scrubbed too). There is no function that
+returns a secret. Requests using secrets cannot use `stream = true`, and any occurrence of a
+substituted value of 8 bytes or more in the response body or headers is replaced with `[redacted]`.
+This is best effort: a service that transforms the value, for instance base64, can still reflect it,
+so give secrets narrow `allow` prefixes. A secret in the URL ends up in the target service's logs, so
+prefer headers when the API allows. Each placeholder counts against `max_data_ops`.
+
 ## Tenant config: `http.allow`
 A list of rules. A request must match one on **scheme, host, port and path prefix**:
 

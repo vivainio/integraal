@@ -45,7 +45,7 @@ Only the standard AWS SDK variables remain in the environment: credentials, regi
 ## Credential vault {#vault}
 
 Secrets (API keys, client secrets) that scripts may send in outbound HTTP but never read; see
-[`native.http`](native-api.md#credential-vault). They are stored one row each in the `db.table`
+[`native.http`](http.md#credential-vault). They are stored one row each in the `db.table`
 under a partition scripts cannot address (`VAULT#<tenant>`), sealed with a key derived from the
 [master keys](#crypto) and bound to the tenant and name. Needs `db` and `crypto`.
 

@@ -327,7 +327,8 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                            url: String,
                            headers: HashMap<String, String>,
                            body: Option<mlua::LuaString>,
-                           stream: bool| {
+                           stream: bool,
+                           expand: crate::vault::Expand| {
         budget.take_http().map_err(mlua::Error::runtime)?;
         let remaining = budget
             .deadline
@@ -339,42 +340,75 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             .build()
             .into();
         let method = method.to_ascii_uppercase();
-        let url = policy.check(&method, &url).map_err(mlua::Error::runtime)?;
-
-        // `{{vault:NAME}}` placeholders become secrets only here, after the allowlist check, and
-        // only for URLs the secret itself allows. The script never sees the substituted request.
-        let mut secrets: Vec<Vec<u8>> = Vec::new();
-        let mut resolve = |name: &str| -> Result<Vec<u8>, String> {
+        // `{{vault:...}}` placeholders are expanded only in the parts the script asked for, and a
+        // secret is sent only to URLs it allows (checked against the final URL, after the tenant's
+        // own allowlist). The script never sees the substituted request or any error that contains it.
+        let mut used: Vec<crate::vault::Secret> = Vec::new();
+        let mut lookup = |reference: &str| -> Result<Vec<u8>, String> {
             budget.take_data()?;
-            let v = vault
+            let secret = vault
                 .as_ref()
                 .ok_or("the credential vault is not configured for this runtime")?
-                .resolve(&tenant, name, &url)?;
-            if v.len() >= crate::MIN_SECRET_BYTES {
-                secrets.push(v.clone());
-            }
-            Ok(v)
+                .lookup(&tenant, reference)?;
+            let value = secret.value.clone();
+            used.push(secret);
+            Ok(value)
         };
-        let headers = headers
-            .into_iter()
-            .map(|(k, v)| {
-                let v = crate::vault::substitute(v.as_bytes(), &mut resolve)?;
-                Ok((
-                    k,
-                    String::from_utf8(v).map_err(|_| "vault secret is not valid in a header")?,
-                ))
-            })
-            .collect::<Result<HashMap<_, _>, String>>()
-            .map_err(mlua::Error::runtime)?;
-        let body = body
-            .map(|b| crate::vault::substitute(&b.as_bytes(), &mut resolve))
-            .transpose()
-            .map_err(mlua::Error::runtime)?;
-        if stream && !secrets.is_empty() {
+        let expanded = (|| -> Result<_, String> {
+            let url = if expand.url {
+                let u = crate::vault::substitute(url.as_bytes(), &mut lookup)?;
+                String::from_utf8(u).map_err(|_| "vault secret is not valid in a url")?
+            } else {
+                url.clone()
+            };
+            let headers = headers
+                .iter()
+                .map(|(k, v)| {
+                    if !expand.header {
+                        return Ok((k.clone(), v.clone()));
+                    }
+                    let v = crate::vault::substitute(v.as_bytes(), &mut lookup)?;
+                    Ok((
+                        k.clone(),
+                        String::from_utf8(v)
+                            .map_err(|_| "vault secret is not valid in a header")?,
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>, String>>()?;
+            let body = match &body {
+                Some(b) if expand.body => {
+                    Some(crate::vault::substitute(&b.as_bytes(), &mut lookup)?)
+                }
+                Some(b) => Some(b.as_bytes().to_vec()),
+                None => None,
+            };
+            Ok((url, headers, body))
+        })();
+        let secrets_in_use = !used.is_empty();
+        // Whatever fails from here on is reported with secret values scrubbed out.
+        let scrub = |msg: String| {
+            let values: Vec<Vec<u8>> = used.iter().map(|s| s.value.clone()).collect();
+            mlua::Error::runtime(
+                String::from_utf8_lossy(&crate::vault::redact(msg.as_bytes(), &values))
+                    .into_owned(),
+            )
+        };
+        let (url, headers, body) = expanded.map_err(&scrub)?;
+        let url = policy.check(&method, &url).map_err(&scrub)?;
+        for secret in &used {
+            secret.check(&url).map_err(&scrub)?;
+        }
+        if stream && secrets_in_use {
             return Err(mlua::Error::runtime(
                 "requests using vault secrets cannot stream the response",
             ));
         }
+        // Only values long enough not to mangle ordinary text are redacted from responses.
+        let secrets: Vec<Vec<u8>> = used
+            .iter()
+            .filter(|s| s.value.len() >= crate::MIN_SECRET_BYTES)
+            .map(|s| s.value.clone())
+            .collect();
         // Held until the response is fully read (or, when streaming, until the stream is dropped).
         let slot = throttle
             .as_ref()
@@ -390,7 +424,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
         let body = body.unwrap_or_default();
         let resp = agent
             .run(req.body(body).map_err(mlua::Error::external)?)
-            .map_err(|e| mlua::Error::runtime(format!("http request failed: {e}")))?;
+            .map_err(|e| scrub(format!("http request failed: {e}")))?;
 
         let out = lua.create_table()?;
         out.set("status", resp.status().as_u16())?;
@@ -418,7 +452,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             .into_reader()
             .take(max_body)
             .read_to_end(&mut buf)
-            .map_err(|e| mlua::Error::runtime(format!("reading response: {e}")))?;
+            .map_err(|e| scrub(format!("reading response: {e}")))?;
         out.set(
             "body",
             lua.create_string(crate::vault::redact(&buf, &secrets))?,
@@ -441,6 +475,8 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                     .unwrap_or_default(),
                 opts.get("body")?,
                 opts.get::<Option<bool>>("stream")?.unwrap_or(false),
+                crate::vault::Expand::parse(opts.get::<Option<Vec<String>>>("vault")?)
+                    .map_err(mlua::Error::runtime)?,
             )
         })?,
     )?;
@@ -448,7 +484,12 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
     http.set(
         "get",
         lua.create_function(
-            move |lua, (url, headers): (String, Option<HashMap<String, String>>)| {
+            move |lua,
+                  (url, headers, vault): (
+                String,
+                Option<HashMap<String, String>>,
+                Option<Vec<String>>,
+            )| {
                 r(
                     lua,
                     "GET".into(),
@@ -456,6 +497,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                     headers.unwrap_or_default(),
                     None,
                     false,
+                    crate::vault::Expand::parse(vault).map_err(mlua::Error::runtime)?,
                 )
             },
         )?,

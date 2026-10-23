@@ -91,9 +91,9 @@ declare native: {
         base64_decode: (text: string) -> string,
     },
     http: {
-        request: ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, stream: true }) -> HttpStreamResponse)
-            & ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, stream: false? }) -> HttpResponse),
-        get: (url: string, headers: { [string]: string }?) -> HttpResponse,
+        request: ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, vault: { string }?, stream: true }) -> HttpStreamResponse)
+            & ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, vault: { string }?, stream: false? }) -> HttpResponse),
+        get: (url: string, headers: { [string]: string }?, vault: { string }?) -> HttpResponse,
     },
     xml: {
         events: (source: string | ByteStream, opts: { trim: boolean? }?) -> () -> XmlEvent?,
