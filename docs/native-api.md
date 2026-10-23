@@ -78,8 +78,31 @@ key name. Needs [`crypto`](deployment.md#crypto) in the deployment config.
 | `decrypt(key, ciphertext, aad?)` | plaintext; raises if the key or `aad` differs or the data was modified. |
 | `is_current(ciphertext)` | `true` if it was sealed with the operator's active master key. |
 | `hmac_sha256(key, data, key_id?)` | 32-byte tag; `key_id` selects an older master key to verify old tags. |
+| `public_key(key, key_id?)`, `seal(public_key, plaintext)`, `open(key, ciphertext)` | public-key encryption in the age format, see below. |
 | `sha256(data)`, `random(n)` | digest; `n` random bytes (1-1024). Work without `crypto` configured. |
 | `hex_encode/decode`, `base64_encode/decode` | conversions between binary strings and text. |
+
+**Public-key variant (uploads from outside).** `public_key(key, key_id?)` returns an
+[age](https://age-encryption.org) public key (`age1...`) whose private half exists only inside this
+tenant's scripts, derived from the master key like the symmetric keys (but unrelated to the
+symmetric key of the same name). Hand it to anyone; they encrypt with the stock tool and upload,
+for instance through a `presign_put` URL, and a script reads the object and calls `open(key, blob)`.
+`seal(public_key, plaintext)` does the same encryption from a script.
+
+```sh
+age -r age1... report.csv > report.csv.age     # no -a: armored input is not supported
+```
+
+```lua
+local pk = native.crypto.public_key("inbox")                     -- publish this
+local url = native.data.In.presign_put("drop/report.csv.age")    -- give this to the sender
+local csv = native.crypto.open("inbox", native.data.In.get("drop/report.csv.age"))
+```
+
+`open` tries every configured master key, so uploads sealed to an older public key still open after
+rotation; senders should switch to the new `public_key` (`key_id` returns an older one). The
+format does not authenticate the sender: anyone with the public key can upload, so treat opened
+data as untrusted input.
 
 `aad` is optional context that must match on decrypt (for example the object key, which stops a
 ciphertext being moved to another key). Inputs are capped at `max_object_mb`.

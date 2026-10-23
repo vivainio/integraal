@@ -55,13 +55,24 @@ impl MasterKey {
     }
 
     fn derive(&self, tenant: &str, name: &str) -> [u8; 32] {
+        self.expand("integraal/v1", tenant, name)
+    }
+
+    /// The age (X25519) identity behind `public_key`/`open`; unrelated to the symmetric key of the same name.
+    fn age_identity(&self, tenant: &str, name: &str) -> age::x25519::Identity {
+        use bech32::ToBase32;
+        let seed = self.expand("integraal/v1/age", tenant, name);
+        bech32::encode("age-secret-key-", seed.to_base32(), bech32::Variant::Bech32)
+            .expect("fixed hrp")
+            .to_uppercase()
+            .parse()
+            .expect("well-formed age identity")
+    }
+
+    fn expand(&self, label: &str, tenant: &str, name: &str) -> [u8; 32] {
         let mut out = [0u8; 32];
         // Length-prefixed so ("a", "bc") and ("ab", "c") cannot collide.
-        let info = format!(
-            "integraal/v1/{}:{tenant}/{}:{name}",
-            tenant.len(),
-            name.len()
-        );
+        let info = format!("{label}/{}:{tenant}/{}:{name}", tenant.len(), name.len());
         Hkdf::<Sha256>::new(None, &self.0)
             .expand(info.as_bytes(), &mut out)
             .expect("32 bytes is a valid HKDF length");
@@ -94,6 +105,10 @@ impl MasterKeys {
     /// A single key, numbered 1.
     pub fn single(key: MasterKey) -> Self {
         Self::new([(1, key)], 1).expect("1 is present")
+    }
+
+    fn ids(&self) -> impl Iterator<Item = u8> + '_ {
+        self.keys.keys().copied()
     }
 
     fn get(&self, id: u8) -> Result<&MasterKey, String> {
@@ -157,14 +172,17 @@ pub(crate) fn api(
     fn err(m: impl std::fmt::Display) -> mlua::Error {
         mlua::Error::runtime(m.to_string())
     }
+    fn no_keys() -> mlua::Error {
+        err("native.crypto keys are not configured for this runtime (crypto.keys)")
+    }
 
     let master_active = master.as_ref().map(|m| m.active);
+    let age_master = master.clone();
+    let age_tenant = tenant.to_string();
     let key_for = {
         let tenant = tenant.to_string();
         move |name: &str, id: Option<u8>| -> mlua::Result<(u8, [u8; 32])> {
-            let master = master.as_ref().ok_or_else(|| {
-                err("native.crypto keys are not configured for this runtime (crypto.keys)")
-            })?;
+            let master = master.as_ref().ok_or_else(no_keys)?;
             check_name(name).map_err(err)?;
             let id = id.unwrap_or(master.active);
             Ok((id, master.get(id).map_err(err)?.derive(&tenant, name)))
@@ -230,6 +248,62 @@ pub(crate) fn api(
                 lua.create_string(mac.finalize().into_bytes().as_slice())
             },
         )?,
+    )?;
+
+    // Public-key encryption in the age format (https://age-encryption.org), so anyone holding the
+    // public key can encrypt with the stock `age` tool and only this tenant's scripts can open it.
+    let m = age_master.clone();
+    let tn = age_tenant.clone();
+    t.set(
+        "public_key",
+        lua.create_function(move |_, (name, key_id): (String, Option<u8>)| {
+            check_name(&name).map_err(err)?;
+            let m = m.as_ref().ok_or_else(no_keys)?;
+            let id = key_id.unwrap_or(m.active);
+            Ok(m.get(id)
+                .map_err(err)?
+                .age_identity(&tn, &name)
+                .to_public()
+                .to_string())
+        })?,
+    )?;
+
+    let s = sized;
+    t.set(
+        "seal",
+        lua.create_function(move |lua, (recipient, plain): (String, LuaString)| {
+            s(&plain.as_bytes())?;
+            let r: age::x25519::Recipient = recipient
+                .parse()
+                .map_err(|e| err(format!("invalid age public key: {e}")))?;
+            lua.create_string(
+                age::encrypt(&r, &plain.as_bytes())
+                    .map_err(|e| err(format!("seal failed: {e}")))?,
+            )
+        })?,
+    )?;
+
+    let (m, tn) = (age_master, age_tenant);
+    t.set(
+        "open",
+        lua.create_function(move |lua, (name, blob): (String, LuaString)| {
+            check_name(&name).map_err(err)?;
+            let m = m.as_ref().ok_or_else(no_keys)?;
+            let blob = blob.as_bytes();
+            if blob.starts_with(b"-----BEGIN AGE") {
+                return Err(err("armored input is not supported; encrypt without `-a`"));
+            }
+            // age ciphertext does not say which key sealed it, so try each configured master key.
+            for id in m.ids() {
+                let identity = m.get(id).map_err(err)?.age_identity(&tn, &name);
+                if let Ok(plain) = age::decrypt(&identity, &blob) {
+                    return lua.create_string(plain);
+                }
+            }
+            Err(err(
+                "open failed: not sealed to this tenant's key, or the data was modified",
+            ))
+        })?,
     )?;
 
     t.set(
@@ -397,6 +471,53 @@ mod tests {
             .eval()
             .unwrap();
         assert!(ok);
+    }
+
+    #[test]
+    fn public_key_sealing_round_trips_and_survives_rotation() {
+        let key = |b| MasterKey::from_bytes([b; 32]);
+        let v1 = Some(MasterKeys::new([(1, key(1))], 1).unwrap());
+        let v12 = Some(MasterKeys::new([(1, key(1)), (2, key(2))], 2).unwrap());
+
+        let lua = lua_with(v1, "acme");
+        let (pk, blob): (String, LuaString) = lua
+            .load(
+                r#"
+                local pk = crypto.public_key("inbox")
+                assert(pk:sub(1, 4) == "age1" and pk == crypto.public_key("inbox"))
+                assert(pk ~= crypto.public_key("other"))
+                local blob = crypto.seal(pk, "from outside")
+                assert(crypto.open("inbox", blob) == "from outside")
+                assert(not pcall(crypto.open, "other", blob))
+                assert(not pcall(crypto.open, "inbox", blob:sub(1, -2)))
+                assert(not pcall(crypto.seal, "nonsense", "x"))
+                return pk, blob"#,
+            )
+            .eval()
+            .unwrap();
+        let blob = blob.as_bytes().to_vec();
+
+        // After rotation old uploads still open, and the public key changes with the active key.
+        let lua = lua_with(v12, "acme");
+        lua.globals()
+            .set("blob", lua.create_string(&blob).unwrap())
+            .unwrap();
+        lua.globals().set("old_pk", pk).unwrap();
+        lua.load(
+            r#"
+            assert(crypto.open("inbox", blob) == "from outside")
+            assert(crypto.public_key("inbox") ~= old_pk)
+            assert(crypto.public_key("inbox", 1) == old_pk)"#,
+        )
+        .exec()
+        .unwrap();
+
+        // Another tenant cannot open it.
+        let lua = lua_with(Some(MasterKeys::new([(1, key(1))], 1).unwrap()), "globex");
+        lua.globals()
+            .set("blob", lua.create_string(&blob).unwrap())
+            .unwrap();
+        assert!(lua.load(r#"crypto.open("inbox", blob)"#).exec().is_err());
     }
 
     #[test]
