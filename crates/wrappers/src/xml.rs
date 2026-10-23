@@ -14,7 +14,7 @@ use quick_xml::{events::Event, Reader};
 pub const MAX_STREAM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_DEPTH: usize = 256;
 
-/// A readable byte source handed to scripts (`native.data.open`, streaming HTTP).
+/// A readable byte source handed to scripts (`native.bucket.open`, streaming HTTP).
 /// Consumed by the first parser that takes it.
 pub struct ByteStream(Mutex<Option<Box<dyn Read + Send>>>);
 

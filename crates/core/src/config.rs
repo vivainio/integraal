@@ -7,7 +7,7 @@
 //! ```json
 //! {
 //!   "scripts":   { "bucket": "scripts", "prefix": "" },
-//!   "data":      { "prefix": "tenants/", "buckets": { "In": "data-in", "Out": "data-out" } },
+//!   "buckets":   { "prefix": "tenants/", "map": { "In": "data-in", "Out": "data-out" } },
 //!   "db":        { "table": "integraal" },
 //!   "callbacks": { "base_url": "https://hooks.example.com" },
 //!   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
@@ -32,9 +32,9 @@ use crate::{Engine, Limits};
 pub struct GlobalConfig {
     /// Where scripts and each tenant's `config.json` live.
     pub scripts: ScriptsConfig,
-    /// Named tenant data buckets (`native.data.<name>`).
+    /// Named tenant buckets (`native.bucket.<name>`).
     #[serde(default)]
-    pub data: DataConfig,
+    pub buckets: BucketsConfig,
     /// DynamoDB table behind `native.db` and `native.callback`.
     #[serde(default)]
     pub db: Option<DbConfig>,
@@ -71,13 +71,13 @@ pub struct ScriptsConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DataConfig {
-    /// Base prefix in every data bucket; empty or ending with `/`. Tenant data is `<prefix><tenant>/`.
+pub struct BucketsConfig {
+    /// Base prefix in every bucket; empty or ending with `/`. Tenant data is `<prefix><tenant>/`.
     #[serde(default)]
     pub prefix: String,
     /// Logical name (letters, digits, `_`; by convention `In`, `Out`, `Backup`, `Temp`) to S3 bucket.
     #[serde(default)]
-    pub buckets: BTreeMap<String, String>,
+    pub map: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,15 +165,15 @@ impl GlobalConfig {
         if self.scripts.bucket.is_empty() {
             return Err("scripts.bucket is empty".into());
         }
-        if !(self.data.prefix.is_empty() || self.data.prefix.ends_with('/')) {
-            return Err("data.prefix must be empty or end with '/'".into());
+        if !(self.buckets.prefix.is_empty() || self.buckets.prefix.ends_with('/')) {
+            return Err("buckets.prefix must be empty or end with '/'".into());
         }
-        for (name, bucket) in &self.data.buckets {
+        for (name, bucket) in &self.buckets.map {
             let ok =
                 !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !ok || bucket.is_empty() {
                 return Err(format!(
-                    "data.buckets entry {name:?} is invalid (names are letters, digits and _)"
+                    "buckets.map entry {name:?} is invalid (names are letters, digits and _)"
                 ));
             }
         }
@@ -226,9 +226,9 @@ impl GlobalConfig {
             self.ceiling.timeout_ms,
             self.ceiling.memory_mb,
         ));
-        for (name, bucket) in &self.data.buckets {
+        for (name, bucket) in &self.buckets.map {
             let backend = crate::S3Backend::from_env(bucket).await;
-            engine = engine.with_data(name, Arc::new(backend), self.data.prefix.clone());
+            engine = engine.with_bucket(name, Arc::new(backend), self.buckets.prefix.clone());
         }
         if let Some(db) = &self.db {
             engine = engine.with_db(Arc::new(crate::DynamoBackend::from_env(&db.table).await));
@@ -260,14 +260,14 @@ mod tests {
     fn minimal_and_full_configs_parse() {
         let c = GlobalConfig::parse(r#"{"scripts":{"bucket":"s"}}"#).unwrap();
         assert_eq!(
-            (c.server.port, c.log_filter(), c.data.buckets.len()),
+            (c.server.port, c.log_filter(), c.buckets.map.len()),
             (8080, "info", 0)
         );
         assert!(c.throttle().unwrap().is_none());
 
         let full = r#"{
             "scripts": {"bucket": "s", "prefix": "p/"},
-            "data": {"prefix": "tenants/", "buckets": {"In": "data-in", "Out": "data-out"}},
+            "buckets": {"prefix": "tenants/", "map": {"In": "data-in", "Out": "data-out"}},
             "db": {"table": "t"}, "callbacks": {"base_url": "https://h.example.com"},
             "queue": {"url": "https://sqs/q"}, "crypto": {"keys": {"1": "K1", "2": "K2"}, "active": 2}, "server": {"port": 9000},
             "throttle": [{"url": "https://api.partner.com/", "max_concurrent": 2}],
@@ -286,11 +286,11 @@ mod tests {
         assert!(GlobalConfig::parse("{}").is_err(), "scripts is required");
         assert!(bad(r#""bucket": "x""#), "unknown top-level key");
         assert!(
-            bad(r#""data": {"prefix": "tenants"}"#),
+            bad(r#""buckets": {"prefix": "tenants"}"#),
             "prefix without slash"
         );
         assert!(
-            bad(r#""data": {"buckets": {"in-box": "b"}}"#),
+            bad(r#""buckets": {"map": {"in-box": "b"}}"#),
             "bad bucket name"
         );
         assert!(

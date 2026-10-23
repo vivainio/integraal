@@ -93,20 +93,20 @@ impl S3Events {
         }
     }
 
-    /// From the global config's `data` section.
+    /// From the global config's `buckets` section.
     pub fn from_config(cfg: &crate::GlobalConfig) -> Self {
         Self::new(
-            cfg.data
-                .buckets
+            cfg.buckets
+                .map
                 .iter()
                 .map(|(name, bucket)| (name.clone(), bucket.clone())),
-            cfg.data.prefix.clone(),
+            cfg.buckets.prefix.clone(),
         )
     }
 
     /// One record -> one invocation (no script, so the tenant's router picks one) with
     /// `event = { bucket, key, size, etag, event }`: `bucket` is the logical name and `key` is relative
-    /// to the tenant's prefix, so both can be passed straight to `native.data` or `delete`.
+    /// to the tenant's prefix, so both can be passed straight to `native.bucket` or `delete`.
     /// `Ok(None)` means the record needs no processing (not a creation event, or a folder marker).
     pub fn invocation(&self, record: &Value) -> Result<Option<Invocation>, String> {
         let name = record
@@ -128,12 +128,12 @@ impl S3Events {
         let bucket = self
             .buckets
             .get(physical)
-            .ok_or_else(|| format!("bucket {physical:?} is not in data.buckets"))?;
+            .ok_or_else(|| format!("bucket {physical:?} is not in buckets.map"))?;
 
         let key = percent_decode(raw_key)?;
         let rest = key
             .strip_prefix(&self.prefix)
-            .ok_or_else(|| format!("key {key:?} is outside data.prefix"))?;
+            .ok_or_else(|| format!("key {key:?} is outside buckets.prefix"))?;
         let (tenant, relative) = rest
             .split_once('/')
             .ok_or_else(|| format!("key {key:?} has no tenant directory"))?;

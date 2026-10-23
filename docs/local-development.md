@@ -18,7 +18,7 @@ curl -X POST localhost:8080/v1/acme/hello \
 # {"count":1,"event":{"x":1},"trigger":"http"}
 ```
 
-Running it again increments `count`, which is stored in the `Out` data bucket through `native.data.Out`.
+Running it again increments `count`, which is stored in the `Out` bucket through `native.bucket.Out`.
 
 ## Tests
 

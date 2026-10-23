@@ -25,16 +25,16 @@
 | `integraal-webhook` | Webhook ingress Lambda: verifies callback tokens and enqueues to SQS. |
 | `integraal-server` | Fargate entrypoint: HTTP server and SQS poller. |
 
-## Script bucket and data buckets, different trust levels
+## Script bucket and buckets, different trust levels
 
-Details in [Data](data.md#trust-levels).
+Details in [Buckets](buckets.md#trust-levels).
 
 | Bucket | Contents | Who writes |
 | --- | --- | --- |
 | **Script bucket** (`scripts.bucket`) | scripts and `<tenant>/config.json` | operator / deployment pipeline |
-| **Data buckets** (`data.buckets`, e.g. `In`, `Out`, `Backup`, `Temp`) | tenant data under `data.prefix<tenant>/` | tenant scripts and third parties, as the tenant's `data` grants allow |
+| **Buckets** (`buckets.map`, e.g. `In`, `Out`, `Backup`, `Temp`) | tenant data under `buckets.prefix<tenant>/` | tenant scripts and third parties, as the tenant's `buckets` grants allow |
 
-Scripts can reach only the data buckets their config grants, and only their own prefix in each. Because policy lives in the
+Scripts can reach only the buckets their config grants, and only their own prefix in each. Because policy lives in the
 script bucket, a tenant cannot widen its own HTTP allowlist or raise its own limits.
 
 ## Script caching

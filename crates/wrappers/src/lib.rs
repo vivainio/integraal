@@ -4,26 +4,26 @@
 //! Each version lives in its own module and is only ever extended, so
 //! existing tenant scripts keep working while newer versions ship.
 //!
-//! v1: `native.log`, `native.json`, `native.time`, and `native.data.<bucket>`
+//! v1: `native.log`, `native.json`, `native.time`, and `native.bucket.<bucket>`
 //! (`get`/`put`/`delete`/`list`/`open` on the tenant's own prefix of each bucket its config grants), and
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
 //! under the tenant's own partition keys, each expiring after 24 hours), and `native.crypto`
 //! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64).
 
+mod bucket;
 mod crypto;
-mod data;
 mod db;
 mod http;
 mod throttle;
 mod v1;
 mod xml;
 
-pub use crypto::{MasterKey, MasterKeys};
-pub use data::{
-    Access, DataScope, DataScopes, ObjectBackend, PresignMethod, MAX_LIST_KEYS, MAX_OBJECT_BYTES,
-    MAX_PRESIGN_TTL,
+pub use bucket::{
+    Access, BucketScope, BucketScopes, ObjectBackend, PresignMethod, MAX_LIST_KEYS,
+    MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
 };
+pub use crypto::{MasterKey, MasterKeys};
 pub use db::{
     Callback, CallbackSigner, DbScope, Item, ItemBackend, Take, Taken, DB_TTL, MAX_ITEM_BYTES,
     MAX_QUERY_ITEMS,
@@ -108,8 +108,8 @@ pub type ScriptName = std::sync::Arc<std::sync::Mutex<String>>;
 pub struct HostContext {
     pub tenant: String,
     pub script: ScriptName,
-    /// Tenant-scoped object storage by bucket name, as granted by the tenant config; exposed as `native.data.<name>`.
-    pub data: DataScopes,
+    /// Tenant-scoped object storage by bucket name, as granted by the tenant config; exposed as `native.bucket.<name>`.
+    pub buckets: BucketScopes,
     /// Tenant-scoped small item store with 24h expiry; `native.db` errors when absent.
     pub db: Option<DbScope>,
     /// Public base URL of the webhook ingress; `native.callback` errors when absent.

@@ -10,7 +10,7 @@ process at startup.
 ```json
 {
   "scripts":   { "bucket": "scripts", "prefix": "" },
-  "data":      { "prefix": "tenants/", "buckets": { "In": "acme-in", "Out": "acme-out", "Backup": "acme-bak", "Temp": "acme-tmp" } },
+  "buckets":   { "prefix": "tenants/", "map": { "In": "acme-in", "Out": "acme-out", "Backup": "acme-bak", "Temp": "acme-tmp" } },
   "db":        { "table": "integraal" },
   "callbacks": { "base_url": "https://hooks.example.com" },
   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
@@ -26,12 +26,12 @@ process at startup.
 | --- | --- | --- |
 | `scripts.bucket` | all (required) | bucket holding scripts and tenant `config.json` files |
 | `scripts.prefix` | all | key prefix, concatenated as-is (end it with `/`) |
-| `data.buckets` | server, Lambda | named data buckets (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`). Enables `native.data.<name>`; see [Data](data.md#deployment) |
-| `data.prefix` | server, Lambda | base prefix applied in every data bucket; empty or ending in `/`. Tenant data lives at `<prefix><tenant>/` |
+| `buckets.map` | server, Lambda | named buckets (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`). Enables `native.bucket.<name>`; see [Buckets](buckets.md#deployment) |
+| `buckets.prefix` | server, Lambda | base prefix applied in every bucket; empty or ending in `/`. Tenant data lives at `<prefix><tenant>/` |
 | `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |
 | `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
 | `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
-| `queue.url` | server, webhook | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `data.buckets` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it |
+| `queue.url` | server, webhook | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `buckets.map` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it |
 | `server.port` | server | HTTP port (default `8080`) |
 | `throttle` | server | outbound HTTP limits, see [Throttling](http.md#throttling) |
 | `ceiling` | server, Lambda | operator ceilings for tenant `timeout_ms` and `memory_mb`; see [Limits](limits.md#deployment-ceiling) |
@@ -46,12 +46,12 @@ Only the standard AWS SDK variables remain in the environment: credentials, regi
 <scripts.bucket>/<tenant>/<script>/latest.luau      mutable, revalidated
 <scripts.bucket>/<tenant>/<script>/<version>.luau   immutable
 <scripts.bucket>/<tenant>/config.json               operator-owned policy
-<each data.buckets bucket>/<data.prefix><tenant>/...   tenant data, see Data
+<each buckets.map bucket>/<buckets.prefix><tenant>/...   tenant data, see Buckets
 ```
 
 ## IAM
 
-Per-feature permissions are listed in each chapter: [Data](data.md#deployment),
+Per-feature permissions are listed in each chapter: [Buckets](buckets.md#deployment),
 [DynamoDB](dynamodb.md#deployment), [Callbacks](callbacks.md#deployment-webhook-lambda). In
 addition the runtime role needs `s3:GetObject` on the script bucket and, for the server,
 `sqs:ReceiveMessage`/`DeleteMessage` on the queue. Give tenants no direct access to the script bucket.

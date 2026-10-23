@@ -53,7 +53,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     )?;
     native.set("time", time)?;
 
-    native.set("data", data_api(lua, host, budget.clone())?)?;
+    native.set("bucket", buckets_api(lua, host, budget.clone())?)?;
     native.set("db", db_api(lua, host, budget.clone())?)?;
     native.set("callback", callback_api(lua, host, budget.clone())?)?;
     native.set("http", http_api(lua, host, budget)?)?;
@@ -76,11 +76,11 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     lua.globals().set("native", native)
 }
 
-/// One table of object functions per bucket the tenant was granted: `native.data.In.get(key)`.
+/// One table of object functions per bucket the tenant was granted: `native.bucket.In.get(key)`.
 /// Naming any other bucket raises a clear error instead of indexing nil.
-fn data_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
+fn buckets_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     let data = lua.create_table()?;
-    for (name, scope) in &host.data {
+    for (name, scope) in &host.buckets {
         let scope = scope
             .clone()
             .with_max_object_bytes(host.limits.max_object_bytes);
@@ -99,7 +99,7 @@ fn data_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
     Ok(data)
 }
 
-fn bucket_api(lua: &Lua, scope: crate::DataScope, budget: Arc<Budget>) -> mlua::Result<Table> {
+fn bucket_api(lua: &Lua, scope: crate::BucketScope, budget: Arc<Budget>) -> mlua::Result<Table> {
     let bucket = lua.create_table()?;
     let need = move || {
         budget.take_data().map_err(mlua::Error::runtime)?;

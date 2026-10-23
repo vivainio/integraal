@@ -99,19 +99,19 @@ impl<'de> serde::Deserialize<'de> for Access {
 }
 
 /// The buckets one invocation may use, by name.
-pub type DataScopes = HashMap<String, DataScope>;
+pub type BucketScopes = HashMap<String, BucketScope>;
 
 /// A backend confined to one key prefix (`<base>/<tenant>/`). Scripts only ever
 /// see keys relative to it and cannot name anything outside.
 #[derive(Clone)]
-pub struct DataScope {
+pub struct BucketScope {
     backend: Arc<dyn ObjectBackend>,
     prefix: String,
     max_object_bytes: usize,
     access: Access,
 }
 
-impl DataScope {
+impl BucketScope {
     /// `prefix` must be empty or end with `/`. Starts with read and write access; narrow it with `with_access`.
     pub fn new(backend: Arc<dyn ObjectBackend>, prefix: impl Into<String>) -> Self {
         let prefix = prefix.into();

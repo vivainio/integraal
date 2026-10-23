@@ -20,5 +20,5 @@ deletes are implemented; the rest of the pipeline is not.
 
 ## Native API
 - XML DOM with XPath 1.0 selectors, and an XML generator with escaping.
-- Streaming writers (`native.data.writer`) for large outputs.
+- Streaming writers (`native.bucket.writer`) for large outputs.
 - `native.secrets` backed by Secrets Manager / SSM.

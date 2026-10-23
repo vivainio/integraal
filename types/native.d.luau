@@ -42,9 +42,9 @@ declare extern type DbRow with
 end
 
 -- Object functions for one bucket, scoped to the tenant's prefix. Which buckets exist, and whether
--- they are read, write or readwrite, comes from the tenant's config.json `data` block.
+-- they are read, write or readwrite, comes from the tenant's config.json `buckets` block.
 -- Bucket names are operator-defined; the conventional ones are In, Out, Backup and Temp.
-declare extern type DataBucket with
+declare extern type Bucket with
     get: (key: string) -> string?
     put: (key: string, body: string) -> ()
     delete: (key: string) -> ()
@@ -65,7 +65,7 @@ declare native: {
     time: {
         now_ms: () -> number,
     },
-    data: { [string]: DataBucket },
+    bucket: { [string]: Bucket },
     db: {
         get: (pk: string, sk: string?) -> any,
         put: (pk: string, sk: string?, value: any) -> (),

@@ -8,7 +8,7 @@ unhandled `nil`s are caught **before** you upload.
 --!strict
 --!runtime 1
 local function handle(ctx: Context, event: { key: string })
-  local body = native.data.In.get(event.key)   -- string?
+  local body = native.bucket.In.get(event.key)   -- string?
   native.log("info", body)                  -- error: string? is not string
   return {}
 end
@@ -24,7 +24,7 @@ declares:
 | --- | --- | --- |
 | `native` | global | every function in the [Native API](native-api.md) with exact signatures |
 | `Context` | type | `tenant`, `script`, `trigger`, `runtime` – the first handler argument |
-| `ByteStream` | type | what `native.data.<bucket>.open` and streaming HTTP return |
+| `ByteStream` | type | what `native.bucket.<bucket>.open` and streaming HTTP return |
 | `XmlEvent` | type | `native.xml.events` items |
 | `HttpResponse`, `HttpStreamResponse` | type | `native.http` results; `request{stream=true}` is typed as the stream variant |
 

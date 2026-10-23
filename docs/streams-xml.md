@@ -1,7 +1,7 @@
 # Streams and XML
 
 ## Streams
-`native.data.<bucket>.open` and `native.http.request{stream=true}` return a byte stream. A stream is
+`native.bucket.<bucket>.open` and `native.http.request{stream=true}` return a byte stream. A stream is
 consumed by the first parser that takes it; `stream:close()` releases it early. Streams are read
 in chunks, so a multi-gigabyte object never sits in memory (limited by `max_stream_mb`, see
 [Limits](limits.md)).

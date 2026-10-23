@@ -22,7 +22,7 @@ nav = [
   ] },
   { "Features" = [
     { "Native API overview" = "native-api.md" },
-    { "Data (S3)" = "data.md" },
+    { "Buckets (S3)" = "buckets.md" },
     { "DynamoDB" = "dynamodb.md" },
     { "Callbacks" = "callbacks.md" },
     { "Crypto" = "crypto.md" },

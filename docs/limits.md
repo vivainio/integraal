@@ -12,10 +12,10 @@ Every field is optional and unknown keys are rejected (so typos can't silently l
 | `timeout_ms` | 10 000 | 60 000 | Wall-clock budget for the invocation. |
 | `memory_mb` | 64 | 256 | Luau heap limit. |
 | `max_http_response_mb` | 5 | 100 | Largest non-streaming HTTP body. |
-| `max_object_mb` | 5 | 100 | Largest `native.data.<bucket>.get`/`put` object. |
+| `max_object_mb` | 5 | 100 | Largest `native.bucket.<bucket>.get`/`put` object. |
 | `max_stream_mb` | 4096 | 4096 | Total bytes one stream parse may read. |
 | `max_http_requests` | 100 | 1000 | `native.http` calls per invocation. |
-| `max_data_ops` | 1000 | 10 000 | `native.data`, `native.db` and `native.callback` calls per invocation. |
+| `max_data_ops` | 1000 | 10 000 | `native.bucket`, `native.db` and `native.callback` calls per invocation. |
 | `max_http_timeout_ms` | 10 000 | 30 000 | Per HTTP request timeout. |
 
 Requested values are **clamped to the operator ceiling**; a tenant can never exceed it. Exceeding a

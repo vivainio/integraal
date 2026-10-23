@@ -20,7 +20,7 @@ key name. Needs [`crypto`](#deployment-master-keys) in the deployment config.
 ciphertext being moved to another key). Inputs are capped at `max_object_mb`.
 
 ```lua
-local b = native.data.Out
+local b = native.bucket.Out
 b.put("invoices/7.json", native.crypto.encrypt("invoices", body, "invoices/7.json"))
 local plain = native.crypto.decrypt("invoices", b.get("invoices/7.json"), "invoices/7.json")
 ```
@@ -30,7 +30,7 @@ local plain = native.crypto.decrypt("invoices", b.get("invoices/7.json"), "invoi
 [age](https://age-encryption.org) public key (`age1...`) whose private half exists only inside this
 tenant's scripts, derived from the master key like the symmetric keys (but unrelated to the
 symmetric key of the same name). Hand it to anyone; they encrypt with the stock tool and upload,
-for instance through a [`presign_put`](data.md) URL, and a script reads the object and calls `open(key, blob)`.
+for instance through a [`presign_put`](buckets.md) URL, and a script reads the object and calls `open(key, blob)`.
 `seal(public_key, plaintext)` does the same encryption from a script.
 
 ```sh
@@ -39,8 +39,8 @@ age -r age1... report.csv > report.csv.age     # no -a: armored input is not sup
 
 ```lua
 local pk = native.crypto.public_key("inbox")                     -- publish this
-local url = native.data.In.presign_put("drop/report.csv.age")    -- give this to the sender
-local csv = native.crypto.open("inbox", native.data.In.get("drop/report.csv.age"))
+local url = native.bucket.In.presign_put("drop/report.csv.age")    -- give this to the sender
+local csv = native.crypto.open("inbox", native.bucket.In.get("drop/report.csv.age"))
 ```
 
 `open` tries every configured master key, so uploads sealed to an older public key still open after

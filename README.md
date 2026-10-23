@@ -22,14 +22,14 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 
 ## Native API (`--!runtime 1`)
 `native.log`, `native.json.{encode,decode}`, `native.time.now_ms`,
-`native.data.<bucket>.{get,put,delete,list,open,presign_get,presign_put}` for each bucket in `data.buckets` that the tenant's `config.json` `data` block grants (`read`/`write`/`delete`/`readwrite`; `upload`/`download` separately allow `presign_put`/`presign_get`) (confined to `<data.prefix><tenant>/`),
+`native.bucket.<name>.{get,put,delete,list,open,presign_get,presign_put}` for each bucket in `buckets.map` that the tenant's `config.json` `buckets` block grants (`read`/`write`/`delete`/`readwrite`; `upload`/`download` separately allow `presign_put`/`presign_get`) (confined to `<buckets.prefix><tenant>/`),
 `native.db.{get,put,delete,query}` (small items under `TEN#<tenant>#` partition keys, 24h TTL on every write; needs `db.table`),
 `native.callback.create` (signed single-use callback URLs, served by the webhook Lambda; needs `callbacks.base_url`),
 `native.http.{request,get}` (only URLs in `config.json` `http.allow`; no redirects, no private IPs).
-`native.data.<bucket>.open(key)` and `native.http.request{stream=true}` return byte streams; `native.xml.events(string_or_stream, {trim=true})` is a streaming pull parser over them (no size cap beyond 4 GiB; DTDs rejected).
+`native.bucket.<name>.open(key)` and `native.http.request{stream=true}` return byte streams; `native.xml.events(string_or_stream, {trim=true})` is a streaming pull parser over them (no size cap beyond 4 GiB; DTDs rejected).
 
 ## Config
-One JSON file (`--config <path>`, default `./integraal.json`): script/data buckets, table, queue, callbacks, throttling, ceilings. See `docs/deployment.md`. Only AWS SDK variables (credentials, region, `AWS_ENDPOINT_URL`) stay in the environment.
+One JSON file (`--config <path>`, default `./integraal.json`): script/buckets, table, queue, callbacks, throttling, ceilings. See `docs/deployment.md`. Only AWS SDK variables (credentials, region, `AWS_ENDPOINT_URL`) stay in the environment.
 
 ## Local testing
 Uses [roto](https://github.com/vivainio/roto) as the AWS simulator: see `dev/local.sh`.

@@ -33,7 +33,7 @@ Each section is documented in the chapter for the feature it configures.
 | Key | Chapter |
 | --- | --- |
 | `router` | [Router](router.md#tenant-config-router) |
-| `data` | [Data (S3)](data.md#grants) |
+| `buckets` | [Buckets (S3)](buckets.md#grants) |
 | `http.allow` | [Outbound HTTP](http.md#tenant-config-httpallow) |
 | `limits` | [Limits](limits.md) |
 | `vars` | [below](#vars) |
