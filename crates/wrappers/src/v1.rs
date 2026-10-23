@@ -393,10 +393,10 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                     .into_owned(),
             )
         };
-        let (url, headers, body) = expanded.map_err(&scrub)?;
-        let url = policy.check(&method, &url).map_err(&scrub)?;
+        let (url, headers, body) = expanded.map_err(scrub)?;
+        let url = policy.check(&method, &url).map_err(scrub)?;
         for secret in &used {
-            secret.check(&url).map_err(&scrub)?;
+            secret.check(&url).map_err(scrub)?;
         }
         if stream && secrets_in_use {
             return Err(mlua::Error::runtime(
