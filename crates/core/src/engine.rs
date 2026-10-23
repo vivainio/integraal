@@ -110,7 +110,8 @@ pub struct TenantConfig {
     pub vars: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub limits: TenantLimits,
-    /// Buckets this tenant may use as `native.data.<name>`, and how: `"read"`, `"write"` or `"readwrite"`.
+    /// Buckets this tenant may use as `native.data.<name>`, and how: a grant or list of grants from
+    /// `read`, `write`, `readwrite`, `upload` (presigned PUT) and `download` (presigned GET).
     /// Absent = no access. Names must match the deployment's `DATA_BUCKETS`.
     #[serde(default)]
     pub data: HashMap<String, Access>,
@@ -476,12 +477,12 @@ mod tests {
                     read_in = inn.get("drop.csv"), listed_in = inn.list(),
                     put_in = pcall(inn.put, "x", "y"), delete_in = pcall(inn.delete, "drop.csv"),
                     ungranted = pcall(function() return native.data.backup.get("x") end),
-                    get_url = inn.presign_get("drop.csv", 60), put_url = out.presign_put("up/new.csv"),
-                    put_url_in = pcall(inn.presign_put, "up/new.csv"),
+                    put_url = inn.presign_put("up/new.csv", 60), get_url = out.presign_get("res.csv"),
+                    get_url_in = pcall(inn.presign_get, "drop.csv"), put_url_out = pcall(out.presign_put, "res.csv"),
                 }
             end }"#,
             Limits::default(),
-            r#"{"data":{"in":"read","out":"readwrite"}}"#,
+            r#"{"data":{"in":["read","upload"],"out":["readwrite","download"]}}"#,
         )
         .with_data("in", inbox.clone(), "data/")
         .with_data("out", outbox.clone(), "data/")
@@ -490,11 +491,21 @@ mod tests {
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!({"got":"hello","keys":["notes/a"],"missing":true,"escaped":false,
                    "read_in":"a,b","listed_in":["drop.csv"],"put_in":false,"delete_in":false,"ungranted":false,
-                   "get_url":"mem://data/acme/drop.csv?Get&ttl=60","put_url":"mem://data/acme/up/new.csv?Put&ttl=900",
-                   "put_url_in":false})
+                   "put_url":"mem://data/acme/up/new.csv?Put&ttl=60","get_url":"mem://data/acme/res.csv?Get&ttl=900",
+                   "get_url_in":false,"put_url_out":false})
         );
         assert!(outbox.get("data/acme/notes/a").unwrap().is_some());
         assert!(inbox.get("data/acme/drop.csv").unwrap().is_some(), "read-only bucket was modified");
+    }
+
+    #[test]
+    fn data_grants_parse_from_a_name_or_a_list() {
+        let a: Access = serde_json::from_str(r#""readwrite""#).unwrap();
+        assert!(a.read && a.write && !a.upload && !a.download);
+        let a: Access = serde_json::from_str(r#"["write","download"]"#).unwrap();
+        assert!(!a.read && a.write && !a.upload && a.download);
+        assert!(serde_json::from_str::<Access>(r#""admin""#).is_err());
+        assert!(serde_json::from_str::<Access>("[]").is_err());
     }
 
     #[tokio::test]

@@ -30,8 +30,8 @@ Using a bucket you were not granted raises an error.
 | `delete(key)` | write | deletes an object. |
 | `list(prefix?)` | read | array of relative keys, at most 1000. |
 | `open(key)` | read | a **stream** (see below), or `nil` if missing. Not subject to the object cap. |
-| `presign_get(key, ttl_s?)` | read | URL that lets a third party download exactly that key. |
-| `presign_put(key, ttl_s?)` | write | URL that lets a third party upload exactly that key. |
+| `presign_get(key, ttl_s?)` | download | URL that lets a third party download exactly that key. |
+| `presign_put(key, ttl_s?)` | upload | URL that lets a third party upload exactly that key. |
 
 Presigned URLs default to 15 minutes and are capped at 1 hour. They are signed with the runtime
 role's credentials, so they stop working when those credentials expire (about 6 hours at most for

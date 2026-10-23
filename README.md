@@ -22,7 +22,7 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 
 ## Native API (`--!runtime 1`)
 `native.log`, `native.json.{encode,decode}`, `native.time.now_ms`,
-`native.data.<bucket>.{get,put,delete,list,open,presign_get,presign_put}` for each bucket in `DATA_BUCKETS` that the tenant's `config.json` `data` block grants (confined to `DATA_PREFIX<tenant>/`; `in` is a Luau keyword, so write `native.data["in"]`),
+`native.data.<bucket>.{get,put,delete,list,open,presign_get,presign_put}` for each bucket in `DATA_BUCKETS` that the tenant's `config.json` `data` block grants (`read`/`write`/`readwrite`; `upload`/`download` separately allow `presign_put`/`presign_get`) (confined to `DATA_PREFIX<tenant>/`; `in` is a Luau keyword, so write `native.data["in"]`),
 `native.db.{get,put,delete,query}` (small items under `TEN#<tenant>#` partition keys, 24h TTL on every write; needs `DB_TABLE`),
 `native.callback.create` (signed single-use callback URLs, served by the webhook Lambda; needs `CALLBACK_BASE_URL`),
 `native.http.{request,get}` (only URLs in `config.json` `http.allow`; no redirects, no private IPs).

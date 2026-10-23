@@ -29,23 +29,58 @@ pub enum PresignMethod {
 pub const MAX_PRESIGN_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// What a tenant may do in one named bucket, granted by the `data` block of its `config.json`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Access {
+///
+/// Presigning is a capability handed to a third party, so it is granted separately from the
+/// script's own access: `upload` allows `presign_put`, `download` allows `presign_get`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Access {
     /// `get`, `open`, `list`.
-    Read,
+    pub read: bool,
     /// `put`, `delete`.
-    Write,
-    ReadWrite,
+    pub write: bool,
+    /// `presign_put`.
+    pub upload: bool,
+    /// `presign_get`.
+    pub download: bool,
 }
 
 impl Access {
-    fn reads(self) -> bool {
-        matches!(self, Access::Read | Access::ReadWrite)
-    }
+    pub const READ_WRITE: Access = Access { read: true, write: true, upload: false, download: false };
 
-    fn writes(self) -> bool {
-        matches!(self, Access::Write | Access::ReadWrite)
+    fn grant(&mut self, name: &str) -> Result<(), String> {
+        match name {
+            "read" => self.read = true,
+            "write" => self.write = true,
+            "readwrite" => (self.read, self.write) = (true, true),
+            "upload" => self.upload = true,
+            "download" => self.download = true,
+            other => return Err(format!("unknown data grant {other:?} (expected read, write, readwrite, upload or download)")),
+        }
+        Ok(())
+    }
+}
+
+/// A grant is one name (`"read"`) or a list (`["read", "upload"]`).
+impl<'de> serde::Deserialize<'de> for Access {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+        let names = match OneOrMany::deserialize(d)? {
+            OneOrMany::One(n) => vec![n],
+            OneOrMany::Many(v) => v,
+        };
+        if names.is_empty() {
+            return Err(serde::de::Error::custom("empty data grant"));
+        }
+        let mut access = Access::default();
+        for n in &names {
+            access.grant(n).map_err(serde::de::Error::custom)?;
+        }
+        Ok(access)
     }
 }
 
@@ -63,11 +98,11 @@ pub struct DataScope {
 }
 
 impl DataScope {
-    /// `prefix` must be empty or end with `/`. Starts with full access; narrow it with `with_access`.
+    /// `prefix` must be empty or end with `/`. Starts with read and write access; narrow it with `with_access`.
     pub fn new(backend: Arc<dyn ObjectBackend>, prefix: impl Into<String>) -> Self {
         let prefix = prefix.into();
         debug_assert!(prefix.is_empty() || prefix.ends_with('/'));
-        Self { backend, prefix, max_object_bytes: MAX_OBJECT_BYTES, access: Access::ReadWrite }
+        Self { backend, prefix, max_object_bytes: MAX_OBJECT_BYTES, access: Access::READ_WRITE }
     }
 
     pub fn with_access(mut self, access: Access) -> Self {
@@ -76,11 +111,11 @@ impl DataScope {
     }
 
     fn need_read(&self) -> Result<(), String> {
-        if self.access.reads() { Ok(()) } else { Err("this bucket is write-only for this tenant".into()) }
+        if self.access.read { Ok(()) } else { Err("this bucket is not readable for this tenant".into()) }
     }
 
     fn need_write(&self) -> Result<(), String> {
-        if self.access.writes() { Ok(()) } else { Err("this bucket is read-only for this tenant".into()) }
+        if self.access.write { Ok(()) } else { Err("this bucket is not writable for this tenant".into()) }
     }
 
     pub fn with_max_object_bytes(mut self, n: usize) -> Self {
@@ -118,11 +153,12 @@ impl DataScope {
         self.backend.open(&self.full(key)?)
     }
 
-    /// A presigned URL for one key of this scope. GET needs read access, PUT needs write access.
+    /// A presigned URL for one key of this scope. GET needs the `download` grant, PUT needs `upload`.
     pub fn presign(&self, method: PresignMethod, key: &str, ttl: Option<std::time::Duration>) -> Result<String, String> {
         match method {
-            PresignMethod::Get => self.need_read()?,
-            PresignMethod::Put => self.need_write()?,
+            PresignMethod::Get if !self.access.download => return Err("presigned downloads are not granted for this bucket".into()),
+            PresignMethod::Put if !self.access.upload => return Err("presigned uploads are not granted for this bucket".into()),
+            _ => {}
         }
         let ttl = ttl.unwrap_or(std::time::Duration::from_secs(15 * 60)).clamp(std::time::Duration::from_secs(1), MAX_PRESIGN_TTL);
         self.backend.presign(method, &self.full(key)?, ttl)

@@ -36,14 +36,23 @@ a tenant gets nothing it isn't listed for, and naming a bucket the deployment do
 the invocation.
 
 ```json
-{ "data": { "in": "read", "out": "readwrite", "backup": "write" } }
+{ "data": { "in": ["read", "upload"], "out": ["write", "download"], "backup": "write" } }
 ```
 
-| Mode | Allows |
+Each bucket takes one grant or a list of grants:
+
+| Grant | Allows |
 | --- | --- |
-| `read` | `get`, `open`, `list`, `presign_get` |
-| `write` | `put`, `delete`, `presign_put` |
-| `readwrite` | all of the above |
+| `read` | `get`, `open`, `list` |
+| `write` | `put`, `delete` |
+| `readwrite` | `read` and `write` |
+| `upload` | `presign_put` only |
+| `download` | `presign_get` only |
+
+Presigning is a capability handed to a third party, so it is granted separately from the script's own
+access. In the example, scripts can read what partners upload to `in` (and mint upload links for it)
+but cannot modify it, and can write results to `out` and hand out download links without being able
+to read anything back.
 
 ## `vars`
 Arbitrary JSON, exposed to scripts as `native.config`. String values can be interpolated into
