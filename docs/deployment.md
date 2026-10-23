@@ -13,6 +13,7 @@ process at startup.
   "data":      { "prefix": "tenants/", "buckets": { "In": "acme-in", "Out": "acme-out", "Backup": "acme-bak", "Temp": "acme-tmp" } },
   "db":        { "table": "integraal" },
   "callbacks": { "base_url": "https://hooks.example.com" },
+  "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
   "queue":     { "url": "https://sqs.eu-west-1.amazonaws.com/123456789012/integraal" },
   "server":    { "port": 8080 },
   "throttle":  [{ "url": "https://api.partner.com/v1/", "max_concurrent": 2, "per_second": 5 }],
@@ -29,6 +30,7 @@ process at startup.
 | `data.prefix` | server, Lambda | base prefix applied in every data bucket; empty or ending in `/`. Tenant data lives at `<prefix><tenant>/` |
 | `db.table` | all | DynamoDB table behind `native.db` and `native.callback` (see below) |
 | `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db` |
+| `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto keys](#crypto) |
 | `queue.url` | server, webhook | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `data.buckets` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it |
 | `server.port` | server | HTTP port (default `8080`) |
 | `throttle` | server | outbound HTTP limits, see [Throttling](#throttling) |
@@ -37,6 +39,17 @@ process at startup.
 
 Only the standard AWS SDK variables remain in the environment: credentials, region and
 `AWS_ENDPOINT_URL` (to point at a simulator such as roto).
+
+## Crypto keys {#crypto}
+
+`crypto.keys` maps a key number (1-255) to the **name of an environment variable** holding a
+32-byte master key, as 64 hex characters or base64 (`openssl rand -hex 32`). The secret itself never
+goes in the config file; inject it from Secrets Manager or similar. `crypto.active` is the number
+used for new encryption. Startup fails if a listed variable is missing or malformed.
+
+To rotate: generate key 2, deploy with both keys and `"active": 2`, let scripts re-encrypt data
+that `native.crypto.is_current` reports as stale, then drop key 1. Data sealed with a key you remove
+can no longer be decrypted, and losing every key loses the data: back them up separately from the data.
 
 ## Bucket layout
 
