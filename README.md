@@ -30,3 +30,6 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 
 ## Local testing
 Uses [roto](https://github.com/vivainio/roto) as the AWS simulator: see `dev/local.sh`.
+
+## Types
+Scripts should use `--!strict`. Definitions for `native` live in `types/native.d.luau`; run `dev/typecheck.sh` (needs `luau-lsp`).

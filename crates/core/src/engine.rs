@@ -425,6 +425,22 @@ mod tests {
         assert_eq!(e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(), json!(3));
     }
 
+    /// The shipped, type-checked examples must also run on the real VM
+    /// (annotations are stripped at compile time).
+    #[tokio::test]
+    async fn typed_example_scripts_run() {
+        let backend = Arc::new(MemBackend::default());
+        backend.put("data/acme/in.xml", b"<feed><entry/><entry/><entry/></feed>".to_vec()).unwrap();
+        let e = engine(include_str!("../../../examples/acme/feed/latest.luau"), Limits::default()).with_data(backend, "data/");
+        let out = e.invoke(inv(Trigger::Queue, json!({"key": "in.xml"}))).await.unwrap();
+        assert_eq!(out, json!({"entries": 3, "found": true}));
+
+        let e = engine(include_str!("../../../examples/acme/hello/latest.luau"), Limits::default())
+            .with_data(Arc::new(MemBackend::default()), "data/");
+        let out = e.invoke(inv(Trigger::Http, json!({"x": 1}))).await.unwrap();
+        assert_eq!(out, json!({"trigger": "http", "count": 1, "event": {"x": 1}}));
+    }
+
     #[tokio::test]
     async fn rejects_unknown_runtime() {
         let e = engine("--!runtime 99\nreturn {}", Limits::default());
