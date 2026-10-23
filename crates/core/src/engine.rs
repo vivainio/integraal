@@ -1,11 +1,12 @@
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use integraal_loader::{CachedLoader, LoadError, ScriptKey};
 use integraal_wrappers::{
-    install, parse_runtime_version, DataScope, DbScope, HostContext, HostLimits, HttpPolicy, ItemBackend, ObjectBackend, ScriptName,
+    install, parse_runtime_version, Access, DataScope, DataScopes, DbScope, HostContext, HostLimits, HttpPolicy, ItemBackend, ObjectBackend, ScriptName,
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
@@ -109,6 +110,10 @@ pub struct TenantConfig {
     pub vars: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub limits: TenantLimits,
+    /// Buckets this tenant may use as `native.data.<name>`, and how: `"read"`, `"write"` or `"readwrite"`.
+    /// Absent = no access. Names must match the deployment's `DATA_BUCKETS`.
+    #[serde(default)]
+    pub data: HashMap<String, Access>,
     /// Script whose `on_route`/`route` handler picks the script for messages that don't name one.
     #[serde(default)]
     pub router: Option<String>,
@@ -127,13 +132,15 @@ pub struct Engine {
     loader: Arc<CachedLoader>,
     limits: Limits,
     ceiling: Limits,
-    data: Option<(Arc<dyn ObjectBackend>, String)>,
-    db: Option<Arc<dyn ItemBackend>>,
+    /// Named buckets with the base key prefix each tenant's directory sits under.
+    data: HashMap<String, (Arc<dyn ObjectBackend>, String)>,
+    db: Option<(Arc<dyn ItemBackend>, Arc<integraal_wrappers::CallbackSigner>)>,
+    callback_base_url: Option<String>,
 }
 
 impl Engine {
     pub fn new(loader: Arc<CachedLoader>, limits: Limits) -> Self {
-        Self { loader, limits, ceiling: Limits::ceiling_from_env(), data: None, db: None }
+        Self { loader, limits, ceiling: Limits::ceiling_from_env(), data: HashMap::new(), db: None, callback_base_url: None }
     }
 
     /// Overrides the operator ceiling (default: `Limits::ceiling_from_env()`).
@@ -142,15 +149,39 @@ impl Engine {
         self
     }
 
-    /// Enables `native.data`. Each tenant is confined to `<base_prefix><tenant>/`.
-    pub fn with_data(mut self, backend: Arc<dyn ObjectBackend>, base_prefix: impl Into<String>) -> Self {
-        self.data = Some((backend, base_prefix.into()));
+    /// Registers a named bucket for `native.data.<name>`. Each tenant is confined to
+    /// `<base_prefix><tenant>/` in it, and only reaches it if its config grants access.
+    pub fn with_data(mut self, name: impl Into<String>, backend: Arc<dyn ObjectBackend>, base_prefix: impl Into<String>) -> Self {
+        self.data.insert(name.into(), (backend, base_prefix.into()));
         self
+    }
+
+    /// Registers every bucket in `DATA_BUCKETS` (`name=bucket,name=bucket`) under `DATA_PREFIX`.
+    /// Must be called from within a Tokio runtime. No `DATA_BUCKETS` means no buckets.
+    pub async fn with_data_from_env(mut self) -> Result<Self, String> {
+        let Ok(spec) = std::env::var("DATA_BUCKETS") else { return Ok(self) };
+        let prefix = std::env::var("DATA_PREFIX").unwrap_or_default();
+        for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (name, bucket) = pair.split_once('=').ok_or_else(|| format!("DATA_BUCKETS entry {pair:?} is not name=bucket"))?;
+            let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !ok || bucket.is_empty() {
+                return Err(format!("DATA_BUCKETS entry {pair:?} is invalid (names are letters, digits and _)"));
+            }
+            self = self.with_data(name, Arc::new(crate::S3Backend::from_env(bucket).await), prefix.clone());
+        }
+        Ok(self)
     }
 
     /// Enables `native.db`. Each tenant is confined to partition keys starting `TEN#<tenant>#`.
     pub fn with_db(mut self, backend: Arc<dyn ItemBackend>) -> Self {
-        self.db = Some(backend);
+        let signer = Arc::new(integraal_wrappers::CallbackSigner::new(backend.clone()));
+        self.db = Some((backend, signer));
+        self
+    }
+
+    /// Enables `native.callback` (requires `with_db`): callback URLs are `<base_url>/cb/<tenant>/<id>`.
+    pub fn with_callback_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.callback_base_url = Some(base_url.into());
         self
     }
 
@@ -170,11 +201,19 @@ impl Engine {
         if let Some(max) = max_time {
             limits.timeout = limits.timeout.min(max);
         }
-        let data = self
-            .data
-            .as_ref()
-            .map(|(b, base)| DataScope::new(b.clone(), format!("{base}{}/", inv.tenant)).with_max_object_bytes(limits.max_object_bytes));
-        let db = self.db.as_ref().map(|b| DbScope::new(b.clone(), inv.tenant.as_str()));
+        let mut data = DataScopes::new();
+        for (name, access) in &config.data {
+            let (backend, base) = self
+                .data
+                .get(name)
+                .ok_or_else(|| Error::Config(format!("data bucket {name:?} is not configured on this deployment")))?;
+            let scope = DataScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
+                .with_max_object_bytes(limits.max_object_bytes)
+                .with_access(*access);
+            data.insert(name.clone(), scope);
+        }
+        let cb_url = self.callback_base_url.clone();
+        let db = self.db.as_ref().map(|(b, s)| DbScope::new(b.clone(), inv.tenant.as_str()).with_signer(s.clone()));
 
         // Luau states are not Send-safe to hold across awaits; run on a blocking thread.
         match inv.script.clone() {
@@ -182,7 +221,7 @@ impl Engine {
                 let key = ScriptKey::new(&inv.tenant, &script, inv.version.as_deref())?;
                 let source = self.loader.load(&key).await?;
                 let call = Call { tenant: inv.tenant, script, trigger: inv.trigger, event: inv.event };
-                tokio::task::spawn_blocking(move || run(&source.source, &call, &limits, data, db, &config)).await
+                tokio::task::spawn_blocking(move || run(&source.source, &call, &limits, data, db, cb_url, &config)).await
             }
             None => {
                 // No script named: the tenant's router picks one, and the chosen script runs in the same VM.
@@ -190,7 +229,7 @@ impl Engine {
                 let source = self.loader.load(&ScriptKey::new(&inv.tenant, &router, None)?).await?;
                 let (loader, handle) = (self.loader.clone(), tokio::runtime::Handle::current());
                 tokio::task::spawn_blocking(move || {
-                    run_routed(&source.source, router, &inv, &limits, data, db, &config, &loader, &handle)
+                    run_routed(&source.source, router, &inv, &limits, data, db, cb_url, &config, &loader, &handle)
                 })
                 .await
             }
@@ -207,7 +246,8 @@ struct Vm {
     script: ScriptName,
 }
 
-fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, data: Option<DataScope>, db: Option<DbScope>, config: &TenantConfig) -> Result<Vm, Error> {
+#[allow(clippy::too_many_arguments)]
+fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, data: DataScopes, db: Option<DbScope>, cb_url: Option<String>, config: &TenantConfig) -> Result<Vm, Error> {
     let http = config.http.expand(&config.vars).map_err(Error::Config)?;
     let lua = Lua::new();
     let deadline = Instant::now() + limits.timeout;
@@ -221,6 +261,7 @@ fn new_vm(version: u32, tenant: &str, script: &str, limits: &Limits, data: Optio
             script: script.clone(),
             data,
             db,
+            callback_base_url: cb_url,
             http,
             vars: config.vars.clone(),
             limits: HostLimits {
@@ -271,8 +312,8 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
     lua.from_value(out).map_err(|e| Error::Script(format!("handler result is not JSON-serializable: {e}")))
 }
 
-fn run(source: &str, call: &Call, limits: &Limits, data: Option<DataScope>, db: Option<DbScope>, config: &TenantConfig) -> Result<serde_json::Value, Error> {
-    let vm = new_vm(parse_runtime_version(source)?, &call.tenant, &call.script, limits, data, db, config)?;
+fn run(source: &str, call: &Call, limits: &Limits, data: DataScopes, db: Option<DbScope>, cb_url: Option<String>, config: &TenantConfig) -> Result<serde_json::Value, Error> {
+    let vm = new_vm(parse_runtime_version(source)?, &call.tenant, &call.script, limits, data, db, cb_url, config)?;
     call_in_vm(&vm, source, call)
 }
 
@@ -285,13 +326,14 @@ fn run_routed(
     router: String,
     inv: &Invocation,
     limits: &Limits,
-    data: Option<DataScope>,
+    data: DataScopes,
     db: Option<DbScope>,
+    cb_url: Option<String>,
     config: &TenantConfig,
     loader: &CachedLoader,
     handle: &tokio::runtime::Handle,
 ) -> Result<serde_json::Value, Error> {
-    let vm = new_vm(parse_runtime_version(router_src)?, &inv.tenant, &router, limits, data.clone(), db.clone(), config)?;
+    let vm = new_vm(parse_runtime_version(router_src)?, &inv.tenant, &router, limits, data.clone(), db.clone(), cb_url.clone(), config)?;
     let route_call = Call { tenant: inv.tenant.clone(), script: router, trigger: Trigger::Route, event: inv.event.clone() };
     let decision = call_in_vm(&vm, router_src, &route_call)?;
 
@@ -314,7 +356,7 @@ fn run_routed(
         call_in_vm(&vm, &target.source, &call)
     } else {
         let remaining = Limits { timeout: vm.deadline.saturating_duration_since(Instant::now()), ..limits.clone() };
-        run(&target.source, &call, &remaining, data, db, config)
+        run(&target.source, &call, &remaining, data, db, cb_url, config)
     }
 }
 
@@ -352,6 +394,13 @@ mod tests {
         store.put(&ScriptKey::new("acme", "s", None).unwrap(), src);
         let loader = Arc::new(CachedLoader::new(Shared(store), Duration::from_secs(60)));
         Engine::new(loader, limits)
+    }
+
+    fn engine_cfg(src: &str, limits: Limits, config: &str) -> Engine {
+        let store = Arc::new(MemoryStore::default());
+        store.put(&ScriptKey::new("acme", "s", None).unwrap(), src);
+        store.put(&ScriptKey::config("acme").unwrap(), config);
+        Engine::new(Arc::new(CachedLoader::new(Shared(store), Duration::from_secs(60))), limits)
     }
 
     fn inv(trigger: Trigger, event: serde_json::Value) -> Invocation {
@@ -407,27 +456,51 @@ mod tests {
         fn list(&self, p: &str, limit: usize) -> Result<Vec<String>, String> {
             Ok(self.0.lock().unwrap().keys().filter(|k| k.starts_with(p)).take(limit).cloned().collect())
         }
+        fn presign(&self, m: integraal_wrappers::PresignMethod, key: &str, ttl: Duration) -> Result<String, String> {
+            Ok(format!("mem://{key}?{m:?}&ttl={}", ttl.as_secs()))
+        }
     }
 
     #[tokio::test]
-    async fn data_is_confined_to_tenant_prefix() {
-        let backend = Arc::new(MemBackend::default());
-        backend.put("data/other/secret", b"x".to_vec()).unwrap();
-        let e = engine(
+    async fn data_buckets_are_confined_and_access_controlled() {
+        let (inbox, outbox) = (Arc::new(MemBackend::default()), Arc::new(MemBackend::default()));
+        inbox.put("data/other/secret", b"x".to_vec()).unwrap();
+        inbox.put("data/acme/drop.csv", b"a,b".to_vec()).unwrap();
+        let e = engine_cfg(
             r#"return { handle = function()
-                native.data.put("notes/a", "hello")
-                local escaped = pcall(native.data.get, "../other/secret")
-                return { got = native.data.get("notes/a"), keys = native.data.list("notes/"),
-                         missing = native.data.get("nope") == nil, escaped = escaped }
+                local out, inn = native.data.out, native.data["in"]
+                out.put("notes/a", "hello")
+                return {
+                    got = out.get("notes/a"), keys = out.list("notes/"), missing = out.get("nope") == nil,
+                    escaped = pcall(out.get, "../other/secret"),
+                    read_in = inn.get("drop.csv"), listed_in = inn.list(),
+                    put_in = pcall(inn.put, "x", "y"), delete_in = pcall(inn.delete, "drop.csv"),
+                    ungranted = pcall(function() return native.data.backup.get("x") end),
+                    get_url = inn.presign_get("drop.csv", 60), put_url = out.presign_put("up/new.csv"),
+                    put_url_in = pcall(inn.presign_put, "up/new.csv"),
+                }
             end }"#,
             Limits::default(),
+            r#"{"data":{"in":"read","out":"readwrite"}}"#,
         )
-        .with_data(backend.clone(), "data/");
+        .with_data("in", inbox.clone(), "data/")
+        .with_data("out", outbox.clone(), "data/")
+        .with_data("backup", Arc::new(MemBackend::default()), "data/");
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
-            json!({"got":"hello","keys":["notes/a"],"missing":true,"escaped":false})
+            json!({"got":"hello","keys":["notes/a"],"missing":true,"escaped":false,
+                   "read_in":"a,b","listed_in":["drop.csv"],"put_in":false,"delete_in":false,"ungranted":false,
+                   "get_url":"mem://data/acme/drop.csv?Get&ttl=60","put_url":"mem://data/acme/up/new.csv?Put&ttl=900",
+                   "put_url_in":false})
         );
-        assert!(backend.get("data/acme/notes/a").unwrap().is_some());
+        assert!(outbox.get("data/acme/notes/a").unwrap().is_some());
+        assert!(inbox.get("data/acme/drop.csv").unwrap().is_some(), "read-only bucket was modified");
+    }
+
+    #[tokio::test]
+    async fn granting_an_unconfigured_bucket_fails_the_invocation() {
+        let e = engine_cfg("return { handle = function() return 1 end }", Limits::default(), r#"{"data":{"nope":"read"}}"#);
+        assert!(matches!(e.invoke(inv(Trigger::Invoke, json!(null))).await, Err(Error::Config(_))));
     }
 
     #[derive(Default)]
@@ -443,6 +516,18 @@ mod tests {
         fn delete(&self, pk: &str, sk: &str) -> Result<(), String> {
             self.0.lock().unwrap().remove(&(pk.into(), sk.into()));
             Ok(())
+        }
+        fn take(&self, pk: &str, sk: &str) -> Result<Option<integraal_wrappers::Item>, String> {
+            Ok(self.0.lock().unwrap().remove(&(pk.into(), sk.into())))
+        }
+        fn put_if_absent(&self, pk: &str, item: integraal_wrappers::Item) -> Result<bool, String> {
+            let mut m = self.0.lock().unwrap();
+            let key = (pk.to_string(), item.sk.clone());
+            let absent = !m.contains_key(&key);
+            if absent {
+                m.insert(key, item);
+            }
+            Ok(absent)
         }
         fn query(&self, pk: &str, p: &str, limit: usize) -> Result<Vec<integraal_wrappers::Item>, String> {
             let m = self.0.lock().unwrap();
@@ -480,6 +565,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn callbacks_are_signed_single_use_and_tenant_scoped() {
+        use integraal_wrappers::Take;
+        let backend = Arc::new(MemItems::default());
+        let e = engine(
+            r#"return { handle = function()
+                local ok = pcall(native.callback.create, { script = "../x" })
+                return { url = native.callback.create({ script = "on-pay", state = { order = 7 }, ttl_s = 60 }), bad_script = ok }
+            end }"#,
+            Limits::default(),
+        )
+        .with_db(backend.clone())
+        .with_callback_base_url("https://hooks.example.com/");
+        let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert_eq!(out["bad_script"], json!(false));
+        let token = out["url"].as_str().unwrap().strip_prefix("https://hooks.example.com/cb/acme/").expect("url shape").to_string();
+        assert_eq!(token.len(), 80);
+
+        // the verifier (a different process, here a fresh scope) reads the same stored key
+        let acme = DbScope::new(backend.clone(), "acme");
+        let other = DbScope::new(backend.clone(), "other");
+        assert!(matches!(other.take_callback(&token).unwrap(), Take::Invalid), "wrong tenant");
+        let mut forged = token.clone().into_bytes();
+        forged[0] = if forged[0] == b'0' { b'1' } else { b'0' }; // different id, same tag
+        assert!(matches!(acme.take_callback(&String::from_utf8(forged).unwrap()).unwrap(), Take::Invalid));
+        let mut bad_exp = token.clone();
+        bad_exp.replace_range(32..48, "ffffffffffffffff");
+        assert!(matches!(acme.take_callback(&bad_exp).unwrap(), Take::Invalid), "expiry is signed");
+        assert!(matches!(acme.take_callback("nope").unwrap(), Take::Invalid));
+
+        let Take::Found(taken) = acme.take_callback(&token).unwrap() else { panic!("first take must succeed") };
+        assert_eq!(taken.callback.script.as_deref(), Some("on-pay"));
+        assert_eq!(taken.callback.state, json!({"order": 7}));
+        assert!(matches!(acme.take_callback(&token).unwrap(), Take::Gone), "second take must fail");
+
+        // a failed delivery can put it back with its original expiry, and it is single-use again
+        acme.restore_callback(taken).unwrap();
+        assert!(matches!(acme.take_callback(&token).unwrap(), Take::Found(_)));
+        assert!(matches!(acme.take_callback(&token).unwrap(), Take::Gone));
+
+        // the signing key exists once, outside every tenant partition
+        assert_eq!(backend.0.lock().unwrap().keys().filter(|(pk, _)| pk.starts_with("SYS#")).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_callback_is_rejected_without_a_lookup() {
+        use integraal_wrappers::Take;
+        let backend = Arc::new(MemItems::default());
+        let scope = DbScope::new(backend.clone(), "acme");
+        let token = scope.create_callback(None, json!(null), Duration::from_secs(5)).unwrap();
+        assert!(matches!(scope.take_callback(&token).unwrap(), Take::Found(_)));
+        let token = scope.create_callback(None, json!(null), Duration::from_secs(5)).unwrap();
+        tokio::time::sleep(Duration::from_millis(6100)).await;
+        backend.0.lock().unwrap().clear(); // even the rows and key are gone: only the signed expiry can answer
+        assert!(matches!(scope.take_callback(&token).unwrap(), Take::Expired));
+    }
+
+    #[tokio::test]
+    async fn callback_requires_configuration() {
+        let e = engine(r#"return { handle = function() return (pcall(native.callback.create)) end }"#, Limits::default())
+            .with_db(Arc::new(MemItems::default()));
+        assert_eq!(e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(), json!(false));
+    }
+
+    #[tokio::test]
     async fn http_requires_allowlist_from_tenant_config() {
         let store = Arc::new(MemoryStore::default());
         let script = r#"return { handle = function()
@@ -509,10 +658,10 @@ mod tests {
         assert!(doc.len() > 5 * 1024 * 1024);
         let backend = Arc::new(MemBackend::default());
         backend.put("data/acme/big.xml", doc.into_bytes()).unwrap();
-        let e = engine(
+        let e = engine_cfg(
             r#"return { handle = function()
                 local n, last, text = 0, nil, nil
-                for ev in native.xml.events(native.data.open("big.xml")) do
+                for ev in native.xml.events(native.data["in"].open("big.xml")) do
                     if ev.type == "start" and ev.tag == "entry" then n += 1; last = ev.attrs.id end
                     if ev.type == "text" then text = ev.text end
                 end
@@ -522,8 +671,9 @@ mod tests {
                 return { n = n, last = last, text = text, depths = depths, dtd = dtd }
             end }"#,
             Limits { timeout: Duration::from_secs(60), ..Limits::default() },
+            r#"{"data":{"in":"read"}}"#,
         )
-        .with_data(backend, "data/");
+        .with_data("in", backend, "data/");
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!({"n":200000,"last":"199999","text":"x & y","depths":["start0","start1","end1","end0"],"dtd":false})
@@ -571,14 +721,14 @@ mod tests {
             &ScriptKey::new("acme", "s", None).unwrap(),
             r#"return { handle = function()
                 local n = 0
-                for i = 1, 10 do if pcall(native.data.get, "k") then n += 1 end end
+                for i = 1, 10 do if pcall(native.data.out.get, "k") then n += 1 end end
                 return n
             end }"#,
         );
-        store.put(&ScriptKey::config("acme").unwrap(), r#"{"limits":{"max_data_ops":3}}"#);
+        store.put(&ScriptKey::config("acme").unwrap(), r#"{"data":{"out":"read"},"limits":{"max_data_ops":3}}"#);
         let backend = Arc::new(MemBackend::default());
         let e = Engine::new(Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)), Limits::default())
-            .with_data(backend, "data/");
+            .with_data("out", backend, "data/");
         assert_eq!(e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(), json!(3));
     }
 
@@ -586,14 +736,18 @@ mod tests {
     /// (annotations are stripped at compile time).
     #[tokio::test]
     async fn typed_example_scripts_run() {
+        let config = include_str!("../../../examples/acme/config.json");
         let backend = Arc::new(MemBackend::default());
         backend.put("data/acme/in.xml", b"<feed><entry/><entry/><entry/></feed>".to_vec()).unwrap();
-        let e = engine(include_str!("../../../examples/acme/feed/latest.luau"), Limits::default()).with_data(backend, "data/");
+        let e = engine_cfg(include_str!("../../../examples/acme/feed/latest.luau"), Limits::default(), config)
+            .with_data("in", backend, "data/")
+            .with_data("out", Arc::new(MemBackend::default()), "data/");
         let out = e.invoke(inv(Trigger::Queue, json!({"key": "in.xml"}))).await.unwrap();
         assert_eq!(out, json!({"entries": 3, "found": true}));
 
-        let e = engine(include_str!("../../../examples/acme/hello/latest.luau"), Limits::default())
-            .with_data(Arc::new(MemBackend::default()), "data/");
+        let e = engine_cfg(include_str!("../../../examples/acme/hello/latest.luau"), Limits::default(), config)
+            .with_data("in", Arc::new(MemBackend::default()), "data/")
+            .with_data("out", Arc::new(MemBackend::default()), "data/");
         let out = e.invoke(inv(Trigger::Http, json!({"x": 1}))).await.unwrap();
         assert_eq!(out, json!({"trigger": "http", "count": 1, "event": {"x": 1}}));
     }
@@ -637,18 +791,18 @@ mod tests {
     #[tokio::test]
     async fn router_and_target_share_one_budget() {
         let store = Arc::new(MemoryStore::default());
-        put(&store, "router", r#"return { on_route = function() native.data.get("a"); native.data.get("b"); return "t" end }"#);
+        put(&store, "router", r#"return { on_route = function() native.data.out.get("a"); native.data.out.get("b"); return "t" end }"#);
         put(
             &store,
             "t",
             r#"return { on_queue = function()
                 local ok = 0
-                for _ = 1, 5 do if pcall(native.data.get, "k") then ok += 1 end end
+                for _ = 1, 5 do if pcall(native.data.out.get, "k") then ok += 1 end end
                 return ok
             end }"#,
         );
-        store.put(&ScriptKey::config("acme").unwrap(), r#"{"router":"router","limits":{"max_data_ops":3}}"#);
-        let e = routed(&store).with_data(Arc::new(MemBackend::default()), "data/");
+        store.put(&ScriptKey::config("acme").unwrap(), r#"{"router":"router","data":{"out":"read"},"limits":{"max_data_ops":3}}"#);
+        let e = routed(&store).with_data("out", Arc::new(MemBackend::default()), "data/");
         // 3 allowed in total; the router used 2, so the target gets exactly 1
         assert_eq!(e.invoke(msg(json!({}))).await.unwrap(), json!(1));
     }

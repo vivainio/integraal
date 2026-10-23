@@ -1,8 +1,8 @@
 use aws_sdk_s3::{error::SdkError, operation::get_object::GetObjectError, Client};
-use integraal_wrappers::ObjectBackend;
+use integraal_wrappers::{ObjectBackend, PresignMethod};
 use std::io::Read;
 
-use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::{presigning::PresigningConfig, primitives::ByteStream};
 use tokio::runtime::Handle;
 
 /// S3-backed `ObjectBackend`. Blocks on the captured runtime handle, so it must
@@ -89,6 +89,16 @@ impl ObjectBackend for S3Backend {
     fn delete(&self, key: &str) -> Result<(), String> {
         self.handle.block_on(async {
             self.client.delete_object().bucket(&self.bucket).key(key).send().await.map(|_| ()).map_err(|e| e.to_string())
+        })
+    }
+
+    fn presign(&self, method: PresignMethod, key: &str, ttl: std::time::Duration) -> Result<String, String> {
+        self.handle.block_on(async {
+            let cfg = PresigningConfig::expires_in(ttl).map_err(|e| e.to_string())?;
+            match method {
+                PresignMethod::Get => self.client.get_object().bucket(&self.bucket).key(key).presigned(cfg).await.map(|r| r.uri().to_string()).map_err(|e| e.to_string()),
+                PresignMethod::Put => self.client.put_object().bucket(&self.bucket).key(key).presigned(cfg).await.map(|r| r.uri().to_string()).map_err(|e| e.to_string()),
+            }
         })
     }
 

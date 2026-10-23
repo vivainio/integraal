@@ -64,7 +64,7 @@ deployments.
 - `os`, `io` and `require` are not available; everything external goes through `native`.
 - Globals are read-only; keep state in locals.
 - Each invocation starts with an empty VM, so there is no state between calls. Persist with
-  `native.data`.
+  `native.data.out` (or another bucket your tenant is granted).
 
 ## Example: parse a large XML feed
 
@@ -72,7 +72,7 @@ deployments.
 --!strict
 --!runtime 1
 local function handle(ctx: Context, event: { key: string })
-  local stream = native.data.open(event.key)
+  local stream = native.data["in"].open(event.key)
   if not stream then
     return { entries = 0, found = false }
   end

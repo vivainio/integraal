@@ -22,16 +22,17 @@
 | `integraal-wrappers` | The versioned `native` API (`v1`): data, HTTP, XML, JSON, config. |
 | `integraal-core` | The engine: limits, tenant config, VM setup, handler dispatch. |
 | `integraal-lambda` | Lambda entrypoint (binary `bootstrap`). |
+| `integraal-webhook` | Webhook ingress Lambda: verifies callback tokens and enqueues to SQS. |
 | `integraal-server` | Fargate entrypoint: HTTP server and SQS poller. |
 
-## Two buckets, two trust levels
+## Script bucket and data buckets, different trust levels
 
 | Bucket | Contents | Who writes |
 | --- | --- | --- |
 | **Script bucket** (`SCRIPT_BUCKET`) | scripts and `<tenant>/config.json` | operator / deployment pipeline |
-| **Data bucket** (`DATA_BUCKET`) | tenant data under `DATA_PREFIX<tenant>/` | tenant scripts, via `native.data` |
+| **Data buckets** (`DATA_BUCKETS`, e.g. `in`, `out`, `backup`, `temp`) | tenant data under `DATA_PREFIX<tenant>/` | tenant scripts and third parties, as the tenant's `data` grants allow |
 
-Scripts can reach only the data bucket, and only their own prefix. Because policy lives in the
+Scripts can reach only the data buckets their config grants, and only their own prefix in each. Because policy lives in the
 script bucket, a tenant cannot widen its own HTTP allowlist or raise its own limits.
 
 ## Script caching

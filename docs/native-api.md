@@ -17,35 +17,48 @@ with `tenant` and `script`.
 ## `native.config`
 The tenant's `vars` from [`config.json`](tenant-config.md#vars), as a table.
 
-## `native.data`
-Object storage confined to `DATA_BUCKET/DATA_PREFIX<tenant>/`. Keys are **relative** to that prefix.
+## `native.data.<bucket>`
+Object storage, one table per bucket the tenant's [`data`](tenant-config.md#data) block grants.
+Everything is confined to `DATA_PREFIX<tenant>/` in that bucket and keys are **relative** to it.
+`in` is a Luau keyword, so write `native.data["in"].get(key)`; `native.data.out.get(key)` is fine.
+Using a bucket you were not granted raises an error.
 
-| Function | Result |
-| --- | --- |
-| `get(key)` | string, or `nil` if missing. Capped at `max_object_mb`. |
-| `put(key, body)` | writes an object. Capped at `max_object_mb`. |
-| `delete(key)` | deletes an object. |
-| `list(prefix?)` | array of relative keys, at most 1000. |
-| `open(key)` | a **stream** (see below), or `nil` if missing. Not subject to the object cap. |
+| Function | Needs | Result |
+| --- | --- | --- |
+| `get(key)` | read | string, or `nil` if missing. Capped at `max_object_mb`. |
+| `put(key, body)` | write | writes an object. Capped at `max_object_mb`. |
+| `delete(key)` | write | deletes an object. |
+| `list(prefix?)` | read | array of relative keys, at most 1000. |
+| `open(key)` | read | a **stream** (see below), or `nil` if missing. Not subject to the object cap. |
+| `presign_get(key, ttl_s?)` | read | URL that lets a third party download exactly that key. |
+| `presign_put(key, ttl_s?)` | write | URL that lets a third party upload exactly that key. |
+
+Presigned URLs default to 15 minutes and are capped at 1 hour. They are signed with the runtime
+role's credentials, so they stop working when those credentials expire (about 6 hours at most for
+role sessions, often sooner on Lambda), whatever `ttl_s` says. A presigned `PUT` does not limit the
+upload size.
 
 Keys may not be empty, start with `/`, contain `.` or `..` segments, backslashes or control
-characters, or exceed 512 bytes.
+characters, or exceed 512 bytes. Calls count against `max_data_ops`.
 
-## `native.db`
-Small items in a shared DynamoDB table, enabled by `DB_TABLE`. Every item is addressed by a
-partition name `pk` and an optional sort key `sk` (default `""`). The stored partition key is
-always `TEN#<tenant>#<pk>`, so a tenant can only reach its own rows. **Every write sets a 24-hour
-expiry** (refreshed on each `put`); expired items are never returned, even before DynamoDB removes them.
+## `native.callback`
+Single-use callback URLs: hand one to a third party, and when they call it, a script runs with the
+state you saved. Needs `native.db` (`DB_TABLE`) and `CALLBACK_BASE_URL`.
 
-| Function | Result |
-| --- | --- |
-| `get(pk, sk?)` | the stored value, or `nil` if missing or expired. |
-| `put(pk, sk?, value)` | stores any JSON-serializable value (at most 64 KB encoded). |
-| `delete(pk, sk?)` | removes the item. |
-| `query(pk, opts?)` | array of `{ sk, value }` ordered by `sk`; `opts.sk_prefix`, `opts.limit` (at most 100). |
+```lua
+local url = native.callback.create({ script = "on-payment", state = { order = 7 }, ttl_s = 3600 })
+-- https://hooks.example.com/cb/acme/<80-char signed token>
+```
 
-`pk` may not be empty; `pk` and `sk` are limited to 256 bytes and may not contain control
-characters. Calls count against `max_data_ops`.
+`script` is optional (without it the tenant's router picks one); `ttl_s` defaults to and is capped at
+24 hours; `state` is any JSON value stored in `native.db` (at most 64 KB). The first `POST` to the URL
+enqueues the request and runs the script as a `queue` trigger with
+`event = { method, path, query, headers, body, body_base64, state }`; any later call gets 404.
+
+The token is HMAC-signed (tenant, id and expiry), so forged, wrong-tenant and expired tokens are
+rejected without reading the table. The signing key is generated automatically on first use and
+kept in the table outside every tenant partition; to rotate it, delete the `SYS#callback-key` row
+(outstanding callbacks stop working). Calls count against `max_data_ops`.
 
 ## `native.http`
 Outbound HTTP, restricted to the tenant's [`http.allow`](tenant-config.md#httpallow) list.

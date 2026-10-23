@@ -41,6 +41,19 @@ declare extern type DbRow with
     value: any
 end
 
+-- Object functions for one bucket, scoped to the tenant's prefix. Which buckets exist, and whether
+-- they are read, write or readwrite, comes from the tenant's config.json `data` block.
+-- `in` is a Luau keyword: write native.data["in"].get(...).
+declare extern type DataBucket with
+    get: (key: string) -> string?
+    put: (key: string, body: string) -> ()
+    delete: (key: string) -> ()
+    list: (prefix: string?) -> { string }
+    open: (key: string) -> ByteStream?
+    presign_get: (key: string, ttl_s: number?) -> string
+    presign_put: (key: string, ttl_s: number?) -> string
+end
+
 declare native: {
     version: number,
     log: (level: "error" | "warn" | "info" | "debug", message: string) -> (),
@@ -52,18 +65,15 @@ declare native: {
     time: {
         now_ms: () -> number,
     },
-    data: {
-        get: (key: string) -> string?,
-        put: (key: string, body: string) -> (),
-        delete: (key: string) -> (),
-        list: (prefix: string?) -> { string },
-        open: (key: string) -> ByteStream?,
-    },
+    data: { [string]: DataBucket },
     db: {
         get: (pk: string, sk: string?) -> any,
         put: (pk: string, sk: string?, value: any) -> (),
         delete: (pk: string, sk: string?) -> (),
         query: (pk: string, opts: { sk_prefix: string?, limit: number? }?) -> { DbRow },
+    },
+    callback: {
+        create: (opts: { script: string?, state: any, ttl_s: number? }?) -> string,
     },
     http: {
         request: ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, stream: true }) -> HttpStreamResponse)

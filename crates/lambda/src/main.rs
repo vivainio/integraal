@@ -16,16 +16,14 @@ async fn main() -> Result<(), Error> {
     let store = S3Store::from_env(bucket, prefix).await;
     let loader = Arc::new(CachedLoader::new(store, Duration::from_secs(30)));
     let engine = Engine::new(loader, Limits::default());
-    let engine = match std::env::var("DATA_BUCKET") {
-        Ok(bucket) => engine.with_data(
-            Arc::new(integraal_core::S3Backend::from_env(bucket).await),
-            std::env::var("DATA_PREFIX").unwrap_or_default(),
-        ),
-        Err(_) => engine,
-    };
+    let engine = engine.with_data_from_env().await?;
 
     let engine = match std::env::var("DB_TABLE") {
         Ok(table) => engine.with_db(Arc::new(integraal_core::DynamoBackend::from_env(table).await)),
+        Err(_) => engine,
+    };
+    let engine = match std::env::var("CALLBACK_BASE_URL") {
+        Ok(url) => engine.with_callback_base_url(url),
         Err(_) => engine,
     };
 

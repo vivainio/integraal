@@ -6,9 +6,10 @@
 | --- | --- | --- |
 | `SCRIPT_BUCKET` | both | bucket holding scripts and `config.json` (required) |
 | `SCRIPT_PREFIX` | both | optional key prefix, concatenated as-is (end it with `/`) |
-| `DATA_BUCKET` | both | enables `native.data` |
-| `DATA_PREFIX` | both | base prefix; must end with `/`. Tenant data lives at `<DATA_PREFIX><tenant>/` |
+| `DATA_BUCKETS` | both | named data buckets, `name=bucket,name=bucket` (e.g. `in=acme-in,out=acme-out,backup=acme-bak,temp=acme-tmp`); names are letters, digits and `_`. Enables `native.data.<name>` |
+| `DATA_PREFIX` | both | base prefix applied in every data bucket; must end with `/`. Tenant data lives at `<DATA_PREFIX><tenant>/` |
 | `DB_TABLE` | both | enables `native.db` (DynamoDB table, see below) |
+| `CALLBACK_BASE_URL` | both | public base URL of the webhook Lambda; enables `native.callback` |
 | `SQS_QUEUE_URL` | server | enables the SQS poller |
 | `PORT` | server | HTTP port (default `8080`) |
 | `MAX_TIMEOUT_MS` / `MAX_MEMORY_MB` | both | operator ceilings for tenant limits |
@@ -21,20 +22,27 @@
 <SCRIPT_BUCKET>/<tenant>/<script>/latest.luau      mutable, revalidated
 <SCRIPT_BUCKET>/<tenant>/<script>/<version>.luau   immutable
 <SCRIPT_BUCKET>/<tenant>/config.json               operator-owned policy
-<DATA_BUCKET>/<DATA_PREFIX><tenant>/...            tenant data
+<each DATA_BUCKETS bucket>/<DATA_PREFIX><tenant>/...   tenant data
 ```
 
 ## IAM
 
 - Runtime role: `s3:GetObject` on the script bucket; `s3:GetObject`, `PutObject`, `DeleteObject`
-  and `ListBucket` on the data bucket; `sqs:ReceiveMessage`/`DeleteMessage` on the queue (server).
-- `dynamodb:GetItem`, `PutItem`, `DeleteItem` and `Query` on the `DB_TABLE` table.
+  and `ListBucket` on each data bucket (scope per bucket, e.g. no `DeleteObject` on `backup`; presigned URLs are signed with this role's credentials, so they only work for operations it allows); `sqs:ReceiveMessage`/`DeleteMessage` on the queue (server).
+- `dynamodb:GetItem`, `PutItem`, `DeleteItem` (conditional writes included) and `Query` on the `DB_TABLE` table.
 - Give tenants no direct access to the script bucket.
 
 ## DynamoDB table
 `native.db` needs one shared table with string partition key `pk`, string sort key `sk`, and
 **TTL enabled on the attribute `ttl`**. Items hold the value in `v`. All tenants share the table;
 isolation comes from the enforced `TEN#<tenant>#` partition key prefix.
+
+## Webhook Lambda
+`integraal-webhook` (binary `bootstrap`, behind a Function URL) receives `POST /cb/<tenant>/<token>`,
+verifies and consumes the callback, and sends it to `SQS_QUEUE_URL` for the Fargate poller. It runs
+no scripts. Env: `DB_TABLE`, `SQS_QUEUE_URL`. IAM: `dynamodb:GetItem`/`PutItem`/`DeleteItem` on the
+table and `sqs:SendMessage` on the queue. Replies: 202 queued, 404 invalid/unknown/used, 410 expired,
+413 body over 200 KB, 500 enqueue failed (the callback is restored so the sender can retry).
 
 ## Lambda
 

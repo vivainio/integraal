@@ -1,4 +1,4 @@
-use aws_sdk_dynamodb::{types::AttributeValue, Client};
+use aws_sdk_dynamodb::{error::SdkError, types::{AttributeValue, ReturnValue}, Client};
 use integraal_wrappers::{Item, ItemBackend};
 use tokio::runtime::Handle;
 
@@ -77,6 +77,43 @@ impl ItemBackend for DynamoBackend {
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
+        })
+    }
+
+    fn put_if_absent(&self, pk: &str, item: Item) -> Result<bool, String> {
+        self.handle.block_on(async {
+            let res = self
+                .client
+                .put_item()
+                .table_name(&self.table)
+                .item("pk", s(pk))
+                .item("sk", s(&item.sk))
+                .item("v", s(&item.value))
+                .item("ttl", AttributeValue::N(item.ttl.to_string()))
+                .condition_expression("attribute_not_exists(pk)")
+                .send()
+                .await;
+            match res {
+                Ok(_) => Ok(true),
+                Err(SdkError::ServiceError(e)) if e.err().is_conditional_check_failed_exception() => Ok(false),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+    }
+
+    fn take(&self, pk: &str, sk: &str) -> Result<Option<Item>, String> {
+        self.handle.block_on(async {
+            let out = self
+                .client
+                .delete_item()
+                .table_name(&self.table)
+                .key("pk", s(pk))
+                .key("sk", s(sk))
+                .return_values(ReturnValue::AllOld)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(out.attributes().and_then(parse))
         })
     }
 

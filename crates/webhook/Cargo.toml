@@ -1,0 +1,16 @@
+[package]
+name = "integraal-webhook"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+integraal-core.workspace = true
+integraal-loader.workspace = true
+integraal-wrappers.workspace = true
+aws-config.workspace = true
+aws-sdk-sqs.workspace = true
+lambda_runtime = "0.13"
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

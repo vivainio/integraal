@@ -30,6 +30,21 @@ The file is re-fetched by ETag at most every 30 s, so edits apply within about h
 Name of the script whose `on_route` handler chooses a script for messages that don't name one;
 see [Routing](triggers.md#routing).
 
+## `data`
+Which data buckets the tenant may use, and how. Names refer to the deployment's `DATA_BUCKETS`;
+a tenant gets nothing it isn't listed for, and naming a bucket the deployment doesn't have fails
+the invocation.
+
+```json
+{ "data": { "in": "read", "out": "readwrite", "backup": "write" } }
+```
+
+| Mode | Allows |
+| --- | --- |
+| `read` | `get`, `open`, `list`, `presign_get` |
+| `write` | `put`, `delete`, `presign_put` |
+| `readwrite` | all of the above |
+
 ## `vars`
 Arbitrary JSON, exposed to scripts as `native.config`. String values can be interpolated into
 `http.allow` as `${name}`; an undefined or non-string reference fails the invocation instead of
@@ -57,7 +72,7 @@ Every field is optional and unknown keys are rejected (so typos can't silently l
 | `timeout_ms` | 10 000 | 60 000 | Wall-clock budget for the invocation. |
 | `memory_mb` | 64 | 256 | Luau heap limit. |
 | `max_http_response_mb` | 5 | 100 | Largest non-streaming HTTP body. |
-| `max_object_mb` | 5 | 100 | Largest `native.data.get`/`put` object. |
+| `max_object_mb` | 5 | 100 | Largest `native.data.<bucket>.get`/`put` object. |
 | `max_stream_mb` | 4096 | 4096 | Total bytes one stream parse may read. |
 | `max_http_requests` | 100 | 1000 | `native.http` calls per invocation. |
 | `max_data_ops` | 1000 | 10 000 | `native.data` calls per invocation. |

@@ -4,7 +4,7 @@
 //!        POST /v1/{tenant}            (script chosen by the tenant's routes / router)
 //! Queue: SQS message body is `{tenant, script?, version?, event}`; no `script` means routed
 //!
-//! Env: SCRIPT_BUCKET, [SCRIPT_PREFIX], [DATA_BUCKET, DATA_PREFIX], [DB_TABLE], [SQS_QUEUE_URL], [PORT=8080], [AWS_ENDPOINT_URL]
+//! Env: SCRIPT_BUCKET, [SCRIPT_PREFIX], [DATA_BUCKET, DATA_PREFIX], [DB_TABLE, CALLBACK_BASE_URL], [SQS_QUEUE_URL], [PORT=8080], [AWS_ENDPOINT_URL]
 
 use std::{sync::Arc, time::Duration};
 
@@ -24,16 +24,14 @@ async fn main() -> anyhow::Result<()> {
 
     let store = S3Store::from_env(std::env::var("SCRIPT_BUCKET")?, std::env::var("SCRIPT_PREFIX").unwrap_or_default()).await;
     let engine = Engine::new(Arc::new(CachedLoader::new(store, Duration::from_secs(30))), Limits::default());
-    let engine = match std::env::var("DATA_BUCKET") {
-        Ok(bucket) => engine.with_data(
-            Arc::new(integraal_core::S3Backend::from_env(bucket).await),
-            std::env::var("DATA_PREFIX").unwrap_or_default(),
-        ),
-        Err(_) => engine,
-    };
+    let engine = engine.with_data_from_env().await.map_err(anyhow::Error::msg)?;
 
     let engine = match std::env::var("DB_TABLE") {
         Ok(table) => engine.with_db(Arc::new(integraal_core::DynamoBackend::from_env(table).await)),
+        Err(_) => engine,
+    };
+    let engine = match std::env::var("CALLBACK_BASE_URL") {
+        Ok(url) => engine.with_callback_base_url(url),
         Err(_) => engine,
     };
 

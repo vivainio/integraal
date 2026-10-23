@@ -1,1 +1,1 @@
-{"router":"router","http":{"allow":["https://api.example.com/v1/"]}}
+{"router":"router","data":{"in":"read","out":"readwrite"},"http":{"allow":["https://api.example.com/v1/"]}}

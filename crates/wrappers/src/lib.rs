@@ -4,10 +4,10 @@
 //! Each version lives in its own module and is only ever extended, so
 //! existing tenant scripts keep working while newer versions ship.
 //!
-//! v1: `native.log`, `native.json`, `native.time`, and `native.data`
-//! (`get`/`put`/`delete`/`list` on the tenant's own S3 prefix), and
+//! v1: `native.log`, `native.json`, `native.time`, and `native.data.<bucket>`
+//! (`get`/`put`/`delete`/`list`/`open` on the tenant's own prefix of each bucket its config grants), and
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
-//! `native.config` (the tenant's `vars`), and `native.db` (small key-value items
+//! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
 //! under the tenant's own partition keys, each expiring after 24 hours).
 
 mod data;
@@ -18,8 +18,8 @@ mod xml;
 
 pub use xml::{ByteStream, MAX_STREAM_BYTES};
 pub use http::{AllowRule, HttpPolicy};
-pub use data::{DataScope, ObjectBackend, MAX_LIST_KEYS, MAX_OBJECT_BYTES};
-pub use db::{DbScope, Item, ItemBackend, DB_TTL, MAX_ITEM_BYTES, MAX_QUERY_ITEMS};
+pub use data::{Access, DataScope, DataScopes, PresignMethod, MAX_PRESIGN_TTL, ObjectBackend, MAX_LIST_KEYS, MAX_OBJECT_BYTES};
+pub use db::{Callback, CallbackSigner, DbScope, Take, Taken, Item, ItemBackend, DB_TTL, MAX_ITEM_BYTES, MAX_QUERY_ITEMS};
 
 use std::{
     sync::atomic::{AtomicU32, Ordering},
@@ -93,10 +93,12 @@ pub type ScriptName = std::sync::Arc<std::sync::Mutex<String>>;
 pub struct HostContext {
     pub tenant: String,
     pub script: ScriptName,
-    /// Tenant-scoped object storage; `native.data` errors when absent.
-    pub data: Option<DataScope>,
+    /// Tenant-scoped object storage by bucket name, as granted by the tenant config; exposed as `native.data.<name>`.
+    pub data: DataScopes,
     /// Tenant-scoped small item store with 24h expiry; `native.db` errors when absent.
     pub db: Option<DbScope>,
+    /// Public base URL of the webhook ingress; `native.callback` errors when absent.
+    pub callback_base_url: Option<String>,
     /// Outbound HTTP allowlist from the tenant config (empty denies all).
     pub http: HttpPolicy,
     /// Tenant `vars` from config.json, exposed read-only as `native.config`.

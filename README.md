@@ -22,13 +22,14 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 
 ## Native API (`--!runtime 1`)
 `native.log`, `native.json.{encode,decode}`, `native.time.now_ms`,
-`native.data.{get,put,delete,list}` (confined to `DATA_BUCKET/DATA_PREFIX<tenant>/`),
+`native.data.<bucket>.{get,put,delete,list,open,presign_get,presign_put}` for each bucket in `DATA_BUCKETS` that the tenant's `config.json` `data` block grants (confined to `DATA_PREFIX<tenant>/`; `in` is a Luau keyword, so write `native.data["in"]`),
 `native.db.{get,put,delete,query}` (small items under `TEN#<tenant>#` partition keys, 24h TTL on every write; needs `DB_TABLE`),
+`native.callback.create` (signed single-use callback URLs, served by the webhook Lambda; needs `CALLBACK_BASE_URL`),
 `native.http.{request,get}` (only URLs in `config.json` `http.allow`; no redirects, no private IPs).
-`native.data.open(key)` and `native.http.request{stream=true}` return byte streams; `native.xml.events(string_or_stream, {trim=true})` is a streaming pull parser over them (no size cap beyond 4 GiB; DTDs rejected).
+`native.data.<bucket>.open(key)` and `native.http.request{stream=true}` return byte streams; `native.xml.events(string_or_stream, {trim=true})` is a streaming pull parser over them (no size cap beyond 4 GiB; DTDs rejected).
 
 ## Config
-`SCRIPT_BUCKET`, `SCRIPT_PREFIX`, `DATA_BUCKET`, `DATA_PREFIX`, `DB_TABLE`, `SQS_QUEUE_URL`, `PORT`, `AWS_ENDPOINT_URL`.
+`SCRIPT_BUCKET`, `SCRIPT_PREFIX`, `DATA_BUCKETS`, `DATA_PREFIX`, `DB_TABLE`, `CALLBACK_BASE_URL`, `SQS_QUEUE_URL`, `PORT`, `AWS_ENDPOINT_URL`.
 
 ## Local testing
 Uses [roto](https://github.com/vivainio/roto) as the AWS simulator: see `dev/local.sh`.
