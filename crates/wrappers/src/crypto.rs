@@ -107,6 +107,40 @@ impl MasterKeys {
         Self::new([(1, key)], 1).expect("1 is present")
     }
 
+    /// Seals `plain` for one vault entry with the active key; bound to tenant and name.
+    pub(crate) fn seal_secret(
+        &self,
+        tenant: &str,
+        name: &str,
+        plain: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let key = self
+            .get(self.active)?
+            .expand("integraal/v1/vault", tenant, name);
+        encrypt(
+            self.active,
+            &key,
+            plain,
+            format!("vault/{tenant}/{name}").as_bytes(),
+        )
+    }
+
+    /// Opens a blob from `seal_secret` with whichever configured key sealed it.
+    pub(crate) fn open_secret(
+        &self,
+        tenant: &str,
+        name: &str,
+        blob: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let id = blob_key_id(blob)?;
+        let key = self.get(id)?.expand("integraal/v1/vault", tenant, name);
+        decrypt(&key, blob, format!("vault/{tenant}/{name}").as_bytes())
+    }
+
+    pub(crate) fn is_active(&self, blob: &[u8]) -> bool {
+        blob_key_id(blob).is_ok_and(|id| id == self.active)
+    }
+
     fn ids(&self) -> impl Iterator<Item = u8> + '_ {
         self.keys.keys().copied()
     }
@@ -118,7 +152,7 @@ impl MasterKeys {
     }
 }
 
-fn check_name(name: &str) -> Result<(), String> {
+pub(crate) fn check_name(name: &str) -> Result<(), String> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name

@@ -17,6 +17,7 @@ mod db;
 mod http;
 mod throttle;
 mod v1;
+mod vault;
 mod xml;
 
 pub use bucket::{
@@ -30,6 +31,7 @@ pub use db::{
 };
 pub use http::{AllowRule, HttpPolicy};
 pub use throttle::{Slot, Throttle, ThrottleRule};
+pub use vault::{Vault, VaultEntry, MAX_SECRET_BYTES, MIN_SECRET_BYTES};
 pub use xml::{ByteStream, MAX_STREAM_BYTES};
 
 use std::{
@@ -118,6 +120,8 @@ pub struct HostContext {
     pub throttle: Option<std::sync::Arc<Throttle>>,
     /// Outbound HTTP allowlist from the tenant config (empty denies all).
     pub http: HttpPolicy,
+    /// Credential vault for `{{vault:NAME}}` in `native.http`; such requests error when absent.
+    pub vault: Option<std::sync::Arc<Vault>>,
     /// Operator master keys behind `native.crypto.encrypt`/`decrypt`/`hmac_sha256`; those error when absent.
     pub master_keys: Option<MasterKeys>,
     /// Tenant `vars` from config.json, exposed read-only as `native.config`.

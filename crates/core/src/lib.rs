@@ -12,6 +12,7 @@ pub use engine::{TenantConfig, TenantLimits};
 pub use config::GlobalConfig;
 pub use dynamo_db::DynamoBackend;
 pub use engine::{Engine, Limits};
+pub use integraal_wrappers::{Vault, VaultEntry};
 pub use s3_data::S3Backend;
 pub use s3_events::S3Events;
 

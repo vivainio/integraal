@@ -4,6 +4,8 @@
 //!        POST /v1/{tenant}            (script chosen by the tenant's routes / router)
 //! Queue: SQS message body is `{tenant, script?, version?, event}`; no `script` means routed
 //!
+//! Admin: on its own port when `admin` is configured (see `admin_router`): manage the credential vault.
+//!
 //! Config: `--config <path>` or `./integraal.json` (see `GlobalConfig`); AWS credentials/region come from the usual AWS variables.
 
 use std::time::Duration;
@@ -11,12 +13,12 @@ use std::time::Duration;
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use integraal_core::{
     s3_events::{classify, disposition, Disposition, Message},
-    Engine, Error, GlobalConfig, Invocation, S3Events, Trigger,
+    Engine, Error, GlobalConfig, Invocation, S3Events, Trigger, Vault,
 };
 use serde_json::{json, Value};
 
@@ -41,6 +43,23 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    if let Some((port, token)) = cfg.admin().map_err(anyhow::Error::msg)? {
+        let vault = engine
+            .vault()
+            .expect("config validation requires db and crypto");
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+        tracing::info!(%port, "admin listening");
+        tokio::spawn(async move {
+            let app = admin_router(AdminState {
+                vault,
+                token: token.into(),
+            });
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!(error = %e, "admin server stopped");
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/{tenant}/{script}", post(http_invoke))
@@ -55,6 +74,139 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+#[derive(Clone)]
+struct AdminState {
+    vault: Vault,
+    token: std::sync::Arc<str>,
+}
+
+/// Credential vault API. Every request needs `Authorization: Bearer <admin token>`.
+///
+/// - `GET    /admin/vault/{tenant}`            names and allowed URLs (never values)
+/// - `PUT    /admin/vault/{tenant}/{name}`     `{"value": "...", "allow": ["https://api.example.com/v1/"]}`
+/// - `DELETE /admin/vault/{tenant}/{name}`
+/// - `POST   /admin/vault/{tenant}/rekey`      re-seal one tenant's entries under the active master key
+/// - `POST   /admin/rekey`                     the same for every tenant that uses the vault
+fn admin_router(state: AdminState) -> Router {
+    Router::new()
+        .route("/admin/vault/{tenant}", get(admin_list))
+        .route("/admin/vault/{tenant}/rekey", post(admin_rekey))
+        .route("/admin/rekey", post(admin_rekey_all))
+        .route(
+            "/admin/vault/{tenant}/{name}",
+            put(admin_put).delete(admin_delete),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_auth,
+        ))
+        .with_state(state)
+}
+
+async fn admin_auth(
+    State(state): State<AdminState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use subtle::ConstantTimeEq;
+    let given = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let ok: bool = given.as_bytes().ct_eq(state.token.as_bytes()).into();
+    if ok {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PutSecret {
+    value: String,
+    allow: Vec<String>,
+}
+
+type AdminResult = (StatusCode, Json<Value>);
+
+/// Vault calls block on DynamoDB, so they run off the async threads.
+async fn vault_call<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ok: impl FnOnce(T) -> AdminResult,
+) -> AdminResult {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(Ok(v)) => ok(v),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn admin_list(State(s): State<AdminState>, Path(tenant): Path<String>) -> AdminResult {
+    vault_call(
+        move || s.vault.list(&tenant),
+        |v| (StatusCode::OK, Json(json!({ "entries": v }))),
+    )
+    .await
+}
+
+async fn admin_put(
+    State(s): State<AdminState>,
+    Path((tenant, name)): Path<(String, String)>,
+    Json(body): Json<PutSecret>,
+) -> AdminResult {
+    tracing::info!(%tenant, %name, "vault secret written");
+    vault_call(
+        move || s.vault.put(&tenant, &name, &body.value, &body.allow),
+        |()| (StatusCode::OK, Json(json!({ "ok": true }))),
+    )
+    .await
+}
+
+async fn admin_delete(
+    State(s): State<AdminState>,
+    Path((tenant, name)): Path<(String, String)>,
+) -> AdminResult {
+    tracing::info!(%tenant, %name, "vault secret deleted");
+    vault_call(
+        move || s.vault.delete(&tenant, &name),
+        |()| (StatusCode::OK, Json(json!({ "ok": true }))),
+    )
+    .await
+}
+
+async fn admin_rekey(State(s): State<AdminState>, Path(tenant): Path<String>) -> AdminResult {
+    tracing::info!(%tenant, "vault rekeyed");
+    vault_call(
+        move || s.vault.rekey(&tenant),
+        |n| (StatusCode::OK, Json(json!({ "rekeyed": n }))),
+    )
+    .await
+}
+
+async fn admin_rekey_all(State(s): State<AdminState>) -> AdminResult {
+    tracing::info!("vault rekeyed for all tenants");
+    vault_call(
+        move || s.vault.rekey_all(),
+        |(tenants, entries)| {
+            (
+                StatusCode::OK,
+                Json(json!({ "tenants": tenants, "rekeyed": entries })),
+            )
+        },
+    )
+    .await
 }
 
 async fn http_invoke(

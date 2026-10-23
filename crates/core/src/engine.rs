@@ -7,7 +7,7 @@ use std::{
 use integraal_loader::{CachedLoader, LoadError, ScriptKey};
 use integraal_wrappers::{
     install, parse_runtime_version, Access, BucketScope, BucketScopes, DbScope, HostContext,
-    HostLimits, HttpPolicy, ItemBackend, MasterKeys, ObjectBackend, ScriptName, Throttle,
+    HostLimits, HttpPolicy, ItemBackend, MasterKeys, ObjectBackend, ScriptName, Throttle, Vault,
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
@@ -168,6 +168,7 @@ struct Services {
     cb_url: Option<String>,
     throttle: Option<Arc<Throttle>>,
     master_keys: Option<MasterKeys>,
+    vault: Option<Arc<Vault>>,
 }
 
 impl Engine {
@@ -222,6 +223,13 @@ impl Engine {
         self
     }
 
+    /// The credential vault, once both `with_db` and `with_master_keys` are set. Operators write to it
+    /// (the server's admin API); scripts can only reference secrets from `native.http` requests.
+    pub fn vault(&self) -> Option<Vault> {
+        let (backend, _) = self.db.as_ref()?;
+        Some(Vault::new(backend.clone(), self.master_keys.clone()?))
+    }
+
     /// Limits outbound HTTP per URL prefix, across all tenants in this process (Fargate; not used on Lambda).
     pub fn with_throttle(mut self, throttle: Throttle) -> Self {
         self.throttle = Some(Arc::new(throttle));
@@ -271,6 +279,7 @@ impl Engine {
             cb_url: self.callback_base_url.clone(),
             throttle: self.throttle.clone(),
             master_keys: self.master_keys.clone(),
+            vault: self.vault().map(Arc::new),
         };
 
         // Luau states are not Send-safe to hold across awaits; run on a blocking thread.
@@ -351,6 +360,7 @@ fn new_vm(
             callback_base_url: svc.cb_url.clone(),
             throttle: svc.throttle.clone(),
             master_keys: svc.master_keys.clone(),
+            vault: svc.vault.clone(),
             http,
             vars: config.vars.clone(),
             limits: HostLimits {
@@ -1092,6 +1102,66 @@ mod tests {
         );
         let allowed = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         assert!(!allowed["err"].as_str().unwrap().contains("allowlist"));
+    }
+
+    #[tokio::test]
+    async fn vault_secrets_are_injected_only_where_allowed_and_never_readable() {
+        let script = r#"return { handle = function()
+            local try = function(url, headers)
+                local ok, err = pcall(native.http.get, url, headers)
+                return tostring(err)
+            end
+            local h = { authorization = "Bearer {{vault:key}}" }
+            return {
+                other = try("https://other.invalid/x", h),
+                missing = try("https://api.invalid/x", { a = "{{vault:nope}}" }),
+                allowed = try("https://api.invalid/x", h),
+                has_read = native.vault ~= nil,
+            }
+        end }"#;
+        let config = r#"{"http":{"allow":["https://api.invalid/","https://other.invalid/"]}}"#;
+        let keys = integraal_wrappers::MasterKeys::single(
+            integraal_wrappers::MasterKey::from_bytes([9; 32]),
+        );
+
+        // no vault configured
+        let e = engine_cfg(script, Limits::default(), config);
+        let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert!(
+            out["other"].as_str().unwrap().contains("not configured"),
+            "{out}"
+        );
+
+        let e = engine_cfg(script, Limits::default(), config)
+            .with_db(Arc::new(MemItems::default()))
+            .with_master_keys(keys);
+        e.vault()
+            .unwrap()
+            .put(
+                "acme",
+                "key",
+                "sk_live_abcdef",
+                &["https://api.invalid/".into()],
+            )
+            .unwrap();
+        let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert!(
+            out["other"].as_str().unwrap().contains("may not be sent"),
+            "{out}"
+        );
+        assert!(
+            out["missing"].as_str().unwrap().contains("does not exist"),
+            "{out}"
+        );
+        // passes the vault check and goes on to fail at the (unresolvable) network
+        let allowed = out["allowed"].as_str().unwrap();
+        assert!(allowed.contains("http request failed"), "{out}");
+        assert!(!out.to_string().contains("sk_live_abcdef"));
+        assert_eq!(
+            out["has_read"],
+            json!(false),
+            "scripts have no way to read secrets"
+        );
     }
 
     #[tokio::test]

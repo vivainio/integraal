@@ -14,6 +14,7 @@ process at startup.
   "db":        { "table": "integraal" },
   "callbacks": { "base_url": "https://hooks.example.com" },
   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
+  "admin":     { "port": 9090, "token_env": "INTEGRAAL_ADMIN_TOKEN" },
   "queue":     { "url": "https://sqs.eu-west-1.amazonaws.com/123456789012/integraal" },
   "server":    { "port": 8080 },
   "throttle":  [{ "url": "https://api.partner.com/v1/", "max_concurrent": 2, "per_second": 5 }],
@@ -31,6 +32,7 @@ process at startup.
 | `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |
 | `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
 | `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
+| `admin.port`, `admin.token_env` | server | operator API for the [credential vault](#vault) on its own port. Requires `db` and `crypto` |
 | `queue.url` | server, webhook | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `buckets.map` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it |
 | `server.port` | server | HTTP port (default `8080`) |
 | `throttle` | server | outbound HTTP limits, see [Throttling](http.md#throttling) |
@@ -39,6 +41,38 @@ process at startup.
 
 Only the standard AWS SDK variables remain in the environment: credentials, region and
 `AWS_ENDPOINT_URL` (to point at a simulator such as roto).
+
+## Credential vault {#vault}
+
+Secrets (API keys, client secrets) that scripts may send in outbound HTTP but never read; see
+[`native.http`](native-api.md#credential-vault). They are stored one row each in the `db.table`
+under a partition scripts cannot address (`VAULT#<tenant>`), sealed with a key derived from the
+[master keys](#crypto) and bound to the tenant and name. Needs `db` and `crypto`.
+
+Operators manage them through the server's admin API, enabled by `admin`. It listens on its own
+port: keep that port out of the load balancer and the security group, and reach it from a
+bastion or an internal network. `admin.token_env` names the environment variable holding the
+bearer token (at least 24 characters, e.g. `openssl rand -hex 32`).
+
+```sh
+curl -X PUT  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d '{"value":"sk_live_...","allow":["https://api.stripe.com/v1/"]}' \
+     http://server:9090/admin/vault/acme/stripe
+curl         -H "Authorization: Bearer $TOKEN" http://server:9090/admin/vault/acme      # names + allow, no values
+curl -X DELETE -H "Authorization: Bearer $TOKEN" http://server:9090/admin/vault/acme/stripe
+curl -X POST   -H "Authorization: Bearer $TOKEN" http://server:9090/admin/rekey          # after a master key rotation
+```
+
+`allow` (1-16 prefixes, same syntax as `http.allow`) limits where that secret can ever be sent,
+independently of the tenant's own allowlist. Names are 1-64 characters (letters, digits, `-`, `_`,
+`.`) and values 8 bytes to 16 KB. Writes and deletes are logged with tenant and name, never the value.
+
+**Rotation.** A small index (`SYS#vault-index`, one row per tenant that has stored a secret) lets
+`POST /admin/rekey` re-seal every tenant's entries under the active master key; it is idempotent, so
+repeat it after a failure. `POST /admin/vault/{tenant}/rekey` does one tenant. Once it reports
+nothing left to re-seal, the old master key can be removed. The index and the per-tenant lists
+are read in one query each, so rotation covers up to 999 tenants and 999 secrets per tenant and
+fails loudly beyond that.
 
 ## Bucket layout
 

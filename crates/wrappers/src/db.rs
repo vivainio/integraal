@@ -159,7 +159,7 @@ pub enum Take {
 
 const KEY_PK: &str = "SYS#callback-key";
 /// Far-future expiry: DynamoDB TTL only deletes items whose `ttl` has passed.
-const KEY_TTL: u64 = 253_402_300_799;
+pub(crate) const KEY_TTL: u64 = 253_402_300_799;
 
 /// HMAC key for callback tokens. Nobody configures it: the first process to need it
 /// generates a random key and stores it in the table outside any `TEN#` partition

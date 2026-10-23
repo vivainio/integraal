@@ -11,6 +11,7 @@
 //!   "db":        { "table": "integraal" },
 //!   "callbacks": { "base_url": "https://hooks.example.com" },
 //!   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
+//!   "admin":     { "port": 9090, "token_env": "INTEGRAAL_ADMIN_TOKEN" },
 //!   "queue":     { "url": "https://sqs.eu-west-1.amazonaws.com/123/integraal" },
 //!   "server":    { "port": 8080 },
 //!   "throttle":  [{ "url": "https://api.partner.com/v1/", "max_concurrent": 2, "per_second": 5 }],
@@ -44,6 +45,9 @@ pub struct GlobalConfig {
     /// Master key for `native.crypto`.
     #[serde(default)]
     pub crypto: Option<CryptoConfig>,
+    /// Operator API on its own port (server only); see the server crate.
+    #[serde(default)]
+    pub admin: Option<AdminConfig>,
     /// SQS queue: the server polls it, the webhook Lambda sends to it.
     #[serde(default)]
     pub queue: Option<QueueConfig>,
@@ -90,6 +94,16 @@ pub struct DbConfig {
 #[serde(deny_unknown_fields)]
 pub struct CallbacksConfig {
     pub base_url: String,
+}
+
+/// The credential vault's operator API. It listens on its own port so the load balancer need
+/// not route to it; clients authenticate with `Authorization: Bearer <token>`, the token being
+/// read from the environment variable named here. Needs `db` and `crypto`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminConfig {
+    pub port: u16,
+    pub token_env: String,
 }
 
 /// Master keys are secrets, so the file only names the environment variables that hold them
@@ -195,6 +209,14 @@ impl GlobalConfig {
                 return Err(format!("crypto.active {} is not in crypto.keys", c.active));
             }
         }
+        if let Some(a) = &self.admin {
+            if a.token_env.is_empty() || a.port == self.server.port {
+                return Err("admin needs token_env and a port different from server.port".into());
+            }
+            if self.db.is_none() || self.crypto.is_none() {
+                return Err("admin needs db and crypto (the vault lives in the table, sealed with the master keys)".into());
+            }
+        }
         if self.db.as_ref().is_some_and(|d| d.table.is_empty())
             || self.queue.as_ref().is_some_and(|q| q.url.is_empty())
         {
@@ -207,6 +229,19 @@ impl GlobalConfig {
     /// The `tracing` filter to install.
     pub fn log_filter(&self) -> &str {
         self.log.as_deref().unwrap_or("info")
+    }
+
+    /// The admin API's port and bearer token, or `None` when it is not configured.
+    pub fn admin(&self) -> Result<Option<(u16, String)>, String> {
+        let Some(a) = &self.admin else {
+            return Ok(None);
+        };
+        let token = std::env::var(&a.token_env)
+            .map_err(|_| format!("admin.token_env: ${} is not set", a.token_env))?;
+        if token.len() < 24 {
+            return Err(format!("${} must be at least 24 characters", a.token_env));
+        }
+        Ok(Some((a.port, token)))
     }
 
     /// The throttle for the Fargate server, or `None` when no rules are configured.
@@ -269,7 +304,7 @@ mod tests {
             "scripts": {"bucket": "s", "prefix": "p/"},
             "buckets": {"prefix": "tenants/", "map": {"In": "data-in", "Out": "data-out"}},
             "db": {"table": "t"}, "callbacks": {"base_url": "https://h.example.com"},
-            "queue": {"url": "https://sqs/q"}, "crypto": {"keys": {"1": "K1", "2": "K2"}, "active": 2}, "server": {"port": 9000},
+            "queue": {"url": "https://sqs/q"}, "admin": {"port": 9090, "token_env": "T"}, "crypto": {"keys": {"1": "K1", "2": "K2"}, "active": 2}, "server": {"port": 9000},
             "throttle": [{"url": "https://api.partner.com/", "max_concurrent": 2}],
             "ceiling": {"timeout_ms": 5000, "memory_mb": 32}, "log": "debug"
         }"#;
