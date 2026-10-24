@@ -60,8 +60,8 @@ impl Env {
             .unwrap_or_default();
         let body = opts.get::<Option<mlua::LuaString>>("body")?;
         let basic = crate::v1::basic_auth_opt(opts)?;
-        let expand =
-            Expand::parse(opts.get::<Option<Vec<String>>>("vault")?).map_err(mlua::Error::runtime)?;
+        let expand = Expand::parse(opts.get::<Option<Vec<String>>>("vault")?)
+            .map_err(mlua::Error::runtime)?;
 
         let mut used: Vec<crate::vault::Secret> = Vec::new();
         let mut lookup = |reference: &str| -> Result<Vec<u8>, String> {
@@ -91,7 +91,8 @@ impl Env {
                     let v = crate::vault::substitute(v.as_bytes(), &mut lookup)?;
                     Ok((
                         k.clone(),
-                        String::from_utf8(v).map_err(|_| "vault secret is not valid in a header")?,
+                        String::from_utf8(v)
+                            .map_err(|_| "vault secret is not valid in a header")?,
                     ))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -111,7 +112,10 @@ impl Env {
         })();
         let scrub = |msg: String| {
             let values: Vec<Vec<u8>> = used.iter().map(|s| s.value.clone()).collect();
-            err(String::from_utf8_lossy(&crate::vault::redact(msg.as_bytes(), &values)))
+            err(String::from_utf8_lossy(&crate::vault::redact(
+                msg.as_bytes(),
+                &values,
+            )))
         };
         let (url, headers, body, token) = expanded.map_err(scrub)?;
         let url = self.policy.check(&method, &url).map_err(scrub)?;
