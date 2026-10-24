@@ -51,8 +51,10 @@ untrusted input in a body cannot be tricked into pulling in a secret by an input
 The host substitutes just before sending. The final URL must pass the tenant's `http.allow`
 **and** match the `allow` list stored with every secret used, otherwise the call raises an error that
 does not contain the value (errors from the HTTP layer are scrubbed too). There is no function that
-returns a secret. Requests using secrets cannot use `stream = true`, and any occurrence of a
-substituted value of 8 bytes or more in the response body or headers is replaced with `[redacted]`.
+returns a secret. Any occurrence of a substituted value of 8 bytes or more in the response body or
+headers is replaced with `[redacted]`. Requests using secrets cannot use `stream = true`, because a
+stream cannot be scanned, unless the operator stored every secret used with `stream_unmasked` (see
+[Credential vault](deployment.md#vault)). Response headers are still redacted then; the streamed body is not.
 This is best effort: a service that transforms the value, for instance base64, can still reflect it,
 so give secrets narrow `allow` prefixes. A secret in the URL ends up in the target service's logs, so
 prefer headers when the API allows. Each placeholder counts against `max_data_ops`.

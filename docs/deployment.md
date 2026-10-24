@@ -67,7 +67,9 @@ curl -X POST   -H "Authorization: Bearer $TOKEN" http://server:9090/admin/rekey 
 ```
 
 `allow` (1-16 prefixes, same syntax as `http.allow`) limits where that secret can ever be sent,
-independently of the tenant's own allowlist. A value is any JSON (not `null`) up to 16 KB, so one secret can hold
+independently of the tenant's own allowlist. `"stream_unmasked": true` (default `false`) lets requests using
+the secret set `stream = true`; the streamed body is then not scanned for the value, so set it only
+when the service at the `allow` URLs never echoes request data, and keep the prefixes narrow. A value is any JSON (not `null`) up to 16 KB, so one secret can hold
 several related fields; scripts address a field as `{{vault:name.field.path}}`. Names are 1-64
 characters (letters, digits, `-`, `_`; no `.`, which separates the path). Writes and deletes are logged with tenant and name, never the value.
 

@@ -32,11 +32,14 @@ const MAX_ALLOW: usize = 16;
 pub struct VaultEntry {
     pub name: String,
     pub allow: Vec<String>,
+    pub stream_unmasked: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Stored {
     allow: Vec<String>,
+    #[serde(default)]
+    stream_unmasked: bool,
     sealed: String,
 }
 
@@ -74,12 +77,15 @@ impl Vault {
 
     /// Stores or replaces a secret. `allow` lists the URL prefixes it may be sent to, in the same
     /// syntax as `http.allow` (`https://api.example.com/v1/`, `https://*.example.com`); it may not be empty.
+    /// `stream_unmasked` lets requests using the secret stream their response body, which then is not
+    /// scanned for the value: only for services that never echo what they were sent.
     pub fn put(
         &self,
         tenant: &str,
         name: &str,
         value: &serde_json::Value,
         allow: &[String],
+        stream_unmasked: bool,
     ) -> Result<(), String> {
         check_tenant(tenant)?;
         check_secret_name(name)?;
@@ -105,7 +111,7 @@ impl Vault {
                 ttl: KEY_TTL,
             },
         )?;
-        self.store(tenant, name, allow.to_vec(), &sealed)
+        self.store(tenant, name, allow.to_vec(), stream_unmasked, &sealed)
     }
 
     fn store(
@@ -113,10 +119,12 @@ impl Vault {
         tenant: &str,
         name: &str,
         allow: Vec<String>,
+        stream_unmasked: bool,
         sealed: &[u8],
     ) -> Result<(), String> {
         let value = serde_json::to_string(&Stored {
             allow,
+            stream_unmasked,
             sealed: STANDARD.encode(sealed),
         })
         .map_err(|e| e.to_string())?;
@@ -147,6 +155,7 @@ impl Vault {
                 Ok(VaultEntry {
                     name: i.sk,
                     allow: s.allow,
+                    stream_unmasked: s.stream_unmasked,
                 })
             })
             .collect()
@@ -168,7 +177,13 @@ impl Vault {
             }
             let plain = self.keys.open_secret(tenant, &item.sk, &blob)?;
             let sealed = self.keys.seal_secret(tenant, &item.sk, &plain)?;
-            self.store(tenant, &item.sk, stored.allow, &sealed)?;
+            self.store(
+                tenant,
+                &item.sk,
+                stored.allow,
+                stored.stream_unmasked,
+                &sealed,
+            )?;
             n += 1;
         }
         Ok(n)
@@ -251,6 +266,7 @@ impl Vault {
             name: name.to_string(),
             value,
             allow: stored.allow,
+            stream_unmasked: stored.stream_unmasked,
         })
     }
 }
@@ -260,6 +276,8 @@ pub(crate) struct Secret {
     name: String,
     pub value: Vec<u8>,
     allow: Vec<String>,
+    /// The owner vouches that the service never echoes the value, so the body may stream unscanned.
+    pub stream_unmasked: bool,
 }
 
 impl Secret {
@@ -433,6 +451,7 @@ mod tests {
             "stripe",
             &json!("sk_live_123456"),
             &["https://api.stripe.com/v1/".into()],
+            false,
         )
         .unwrap();
 
@@ -472,15 +491,53 @@ mod tests {
     fn put_validates() {
         let v = Vault::new(Arc::new(Mem::default()), keys(&[1], 1));
         let ok = ["https://a.example.com/".to_string()];
-        assert!(v.put("t", "n", &json!("long enough value"), &[]).is_err());
         assert!(v
-            .put("t", "n", &json!("long enough value"), &["not a url".into()])
+            .put("t", "n", &json!("long enough value"), &[], false)
             .is_err());
         assert!(v
-            .put("t", "bad name", &json!("long enough value"), &ok)
+            .put(
+                "t",
+                "n",
+                &json!("long enough value"),
+                &["not a url".into()],
+                false
+            )
             .is_err());
-        assert!(v.put("a/b", "n", &json!("long enough value"), &ok).is_err());
-        assert!(v.put("t", "n", &json!("long enough value"), &ok).is_ok());
+        assert!(v
+            .put("t", "bad name", &json!("long enough value"), &ok, false)
+            .is_err());
+        assert!(v
+            .put("a/b", "n", &json!("long enough value"), &ok, false)
+            .is_err());
+        assert!(v
+            .put("t", "n", &json!("long enough value"), &ok, false)
+            .is_ok());
+    }
+
+    #[test]
+    fn stream_unmasked_is_stored_listed_and_survives_rekey() {
+        let mem = Arc::new(Mem::default());
+        let old = Vault::new(mem.clone(), keys(&[1], 1));
+        let allow = ["https://api.example.com/".to_string()];
+        old.put("t", "open", &json!("secret-value-1"), &allow, true)
+            .unwrap();
+        old.put("t", "closed", &json!("secret-value-2"), &allow, false)
+            .unwrap();
+        let flags = |v: &Vault| {
+            v.list("t")
+                .unwrap()
+                .into_iter()
+                .map(|e| (e.name, e.stream_unmasked))
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![("closed".to_string(), false), ("open".to_string(), true)];
+        assert_eq!(flags(&old), expected);
+        assert!(old.lookup("t", "open").unwrap().stream_unmasked);
+        assert!(!old.lookup("t", "closed").unwrap().stream_unmasked);
+
+        let new = Vault::new(mem, keys(&[1, 2], 2));
+        assert_eq!(new.rekey("t").unwrap(), 2);
+        assert_eq!(flags(&new), expected);
     }
 
     #[test]
@@ -493,9 +550,10 @@ mod tests {
             "oauth",
             &json!({"client": {"id": "abc", "secret": "s3cr3t-value"}, "scopes": ["read", "write"], "ttl": 3600, "on": true}),
             &allow,
+            false,
         )
         .unwrap();
-        v.put("t", "plain", &json!("just-a-string"), &allow)
+        v.put("t", "plain", &json!("just-a-string"), &allow, false)
             .unwrap();
 
         let get = |r: &str| v.resolve("t", r, &u);
@@ -526,7 +584,7 @@ mod tests {
         let mem = Arc::new(Mem::default());
         let allow = ["https://api.example.com/".to_string()];
         Vault::new(mem.clone(), keys(&[1], 1))
-            .put("t", "k", &json!("secret-value-1"), &allow)
+            .put("t", "k", &json!("secret-value-1"), &allow, false)
             .unwrap();
 
         let rotated = Vault::new(mem.clone(), keys(&[1, 2], 2));
@@ -554,13 +612,13 @@ mod tests {
         let mem = Arc::new(Mem::default());
         let allow = ["https://api.example.com/".to_string()];
         let old = Vault::new(mem.clone(), keys(&[1], 1));
-        old.put("a", "k1", &json!("secret-value-1"), &allow)
+        old.put("a", "k1", &json!("secret-value-1"), &allow, false)
             .unwrap();
-        old.put("a", "k2", &json!("secret-value-2"), &allow)
+        old.put("a", "k2", &json!("secret-value-2"), &allow, false)
             .unwrap();
-        old.put("b", "k1", &json!("secret-value-3"), &allow)
+        old.put("b", "k1", &json!("secret-value-3"), &allow, false)
             .unwrap();
-        old.put("gone", "k1", &json!("secret-value-4"), &allow)
+        old.put("gone", "k1", &json!("secret-value-4"), &allow, false)
             .unwrap();
         old.delete("gone", "k1").unwrap();
 

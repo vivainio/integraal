@@ -111,7 +111,7 @@ struct AdminState {
 /// Credential vault API. Every request needs `Authorization: Bearer <admin token>`.
 ///
 /// - `GET    /admin/vault/{tenant}`            names and allowed URLs (never values)
-/// - `PUT    /admin/vault/{tenant}/{name}`     `{"value": <any JSON>, "allow": ["https://api.example.com/v1/"]}`
+/// - `PUT    /admin/vault/{tenant}/{name}`     `{"value": <any JSON>, "allow": ["https://api.example.com/v1/"], "stream_unmasked": false}`
 /// - `DELETE /admin/vault/{tenant}/{name}`
 /// - `POST   /admin/vault/{tenant}/rekey`      re-seal one tenant's entries under the active master key
 /// - `POST   /admin/rekey`                     the same for every tenant that uses the vault
@@ -160,6 +160,8 @@ async fn admin_auth(
 struct PutSecret {
     value: Value,
     allow: Vec<String>,
+    #[serde(default)]
+    stream_unmasked: bool,
 }
 
 type AdminResult = (StatusCode, Json<Value>);
@@ -194,7 +196,15 @@ async fn admin_put(
 ) -> AdminResult {
     tracing::info!(%tenant, %name, "vault secret written");
     vault_call(
-        move || s.vault.put(&tenant, &name, &body.value, &body.allow),
+        move || {
+            s.vault.put(
+                &tenant,
+                &name,
+                &body.value,
+                &body.allow,
+                body.stream_unmasked,
+            )
+        },
         |()| (StatusCode::OK, Json(json!({ "ok": true }))),
     )
     .await

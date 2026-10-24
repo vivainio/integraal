@@ -484,7 +484,6 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             };
             Ok((url, headers, body))
         })();
-        let secrets_in_use = !used.is_empty();
         // Whatever fails from here on is reported with secret values scrubbed out.
         let scrub = |msg: String| {
             let values: Vec<Vec<u8>> = used.iter().map(|s| s.value.clone()).collect();
@@ -498,7 +497,9 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
         for secret in &used {
             secret.check(&url).map_err(scrub)?;
         }
-        if stream && secrets_in_use {
+        // A stream cannot be scanned for secrets, so it is allowed only when the owner of every
+        // secret used has vouched that the service never echoes it.
+        if stream && used.iter().any(|s| !s.stream_unmasked) {
             return Err(mlua::Error::runtime(
                 "requests using vault secrets cannot stream the response",
             ));
