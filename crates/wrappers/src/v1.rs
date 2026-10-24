@@ -56,7 +56,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     native.set("bucket", buckets_api(lua, host, budget.clone())?)?;
     native.set(
         "batch",
-        crate::batch::api(lua, host.batch.clone(), budget.clone(), &host.limits)?,
+        crate::batch::api(lua, host, budget.clone())?,
     )?;
     native.set(
         "ndjson",

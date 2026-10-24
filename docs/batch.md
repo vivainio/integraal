@@ -144,6 +144,58 @@ A continuation may submit another job instead of finishing: copy what it needs i
 `state()`, `continue_with` the next script, and delete the old job's keys. Use a second stage only
 when a later query needs an earlier result; independent queries belong in one job.
 
+## Slow HTTP requests: `job:http` {#http}
+
+A request that may take longer than the invocation can wait is submitted as a job. The invocation
+ends, the host performs the request in the background, and the continuation runs when the response
+is in.
+
+```lua
+function on_invoke(ctx, ev)
+  local job = native.batch.new()
+  job:http("charge", {                                   -- same options as native.http.request
+    method = "POST",
+    url = native.config.api_base .. "charges",
+    headers = { authorization = "Bearer {{vault:stripe.key}}" },
+    body = native.json.encode(ev.order),
+    vault = { "header" },
+  })
+  job:state({ order = ev.order.id })
+  job:continue_with("charged")
+  return job:submit()
+end
+
+function on_queue(ctx, ev)                               -- script "charged"
+  local job = native.batch.hydrate(ev, { allow_failure = true })
+  if not job then return end
+  if not job.ok then error(job.error) end                -- the request could not be completed
+  local r = job.results.charge                           -- { status, headers, parts }
+  local body = native.json.decode(job:body("charge"))
+  return { delete = job:keys() }
+end
+```
+
+- The request is checked when `job:http` is called: `http.allow`, vault `allow` lists and the
+  `max_http_requests` count apply exactly as for `native.http`, so a request that could never be
+  sent fails in the submitting script.
+- **The request is never written to the bucket**, so vault secrets stay in memory. Only the response
+  is: the body as `jobs/<job>/<name>.0000.body`, and status and headers in `done.json`, which is
+  written last and triggers the continuation like a partner's `done.json`. Vault values are redacted
+  from the response as for `native.http`.
+- A response with any status counts as an answer (`ok = true`; check `results.<name>.status`). `ok = false`
+  with an `error` means no response arrived: connection failure, timeout (15 minutes per request), or the
+  response could not be stored.
+- A job holds several `job:http` calls, which run concurrently, and the continuation runs once when
+  all are done. A job cannot also have `query`/`input` for a partner.
+- [Throttling](http.md#throttling) applies; a request waits for its slot (up to an hour) in the
+  background instead of using up a script's time budget. Redirects are not followed. The body is
+  capped at `max_http_response_mb`.
+- **Fargate only.** The server performs the request in a thread, which Lambda cannot do because the
+  sandbox freezes when the invocation returns; there `job:http` raises an error. The request lives
+  only in the process: if the task stops before it finishes (a deploy, a crash), the job never gets a
+  `done.json` and no retry happens. Treat the same way as a partner that never answers
+  ([Not covered](#not-covered)), and keep the calls idempotent.
+
 ## Tenant config and deployment
 
 Tenant `config.json`: `"batch": true` enables `native.batch` for the tenant (otherwise the script gets an

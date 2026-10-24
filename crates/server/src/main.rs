@@ -30,7 +30,11 @@ async fn main() -> anyhow::Result<()> {
     let _telemetry = integraal_core::telemetry::init("integraal-server", cfg.log_filter())
         .map_err(anyhow::Error::msg)?;
 
-    let mut engine = cfg.engine().await.map_err(anyhow::Error::msg)?;
+    let mut engine = cfg
+        .engine()
+        .await
+        .map_err(anyhow::Error::msg)?
+        .with_background_http();
     if let Some(throttle) = cfg.throttle().map_err(anyhow::Error::msg)? {
         engine = engine.with_throttle(throttle);
     }

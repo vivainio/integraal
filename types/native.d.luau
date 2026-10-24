@@ -67,6 +67,9 @@ end
 declare extern type BatchJob with
     -- Adds a named query for the partner; returns the name, which `rows`/`open` take later.
     query: (self, name: string, query: string, params: any?) -> string
+    -- A request the host performs itself after `submit`, however long it takes (Fargate only). The
+    -- result is read with `results[name]` (status, headers) and `body(name)`.
+    http: (self, name: string, opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, vault: { string }? }) -> string
     -- Attaches a file (or one more part of the same input) to the request: a string or a stream.
     input: (self, name: string, content: string | ByteStream, opts: { ext: string? }?) -> string
     -- Attaches rows, as NDJSON cut into parts: an array or an iterator function.
@@ -84,7 +87,9 @@ declare extern type BatchResult with
     ok: boolean
     error: string?
     state: any
-    results: { [string]: { rows: number?, parts: number } }
+    results: { [string]: { rows: number?, parts: number, status: number?, headers: { [string]: string }? } }
+    -- Body of a `job:http` response, as a string (capped at max_object_mb).
+    body: (self, name: string) -> string
     parts: (self, name: string) -> number
     -- Stream of one part (1-based), gunzipped if needed, checked against the manifest at its end.
     open: (self, name: string, part: number?) -> ByteStream

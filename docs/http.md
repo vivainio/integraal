@@ -22,6 +22,8 @@ With `stream = true`, `r.body` is a [stream](streams-xml.md#streams).
 Always denied, even if allowlisted: non-HTTP(S) schemes, URLs with credentials, and literal
 private/loopback/link-local IP addresses.
 
+For requests that may be slow, see [`job:http`](batch.md#http), which runs the call in the background and resumes a continuation with the response.
+
 Calls count against `max_http_requests`; sizes and timeouts are set in [Limits](limits.md).
 
 ## Credential vault {#credential-vault}

@@ -28,8 +28,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     gzip::Capped,
     ndjson::Rows,
+    http_job::{self, Prepared},
     xml::{ByteStream, Limited},
-    BucketScope, Budget, Deadline, HostLimits,
+    BucketScope, Budget, Deadline, HostContext,
 };
 
 /// The `bucket` name carried by events and `delete` entries for the batch bucket. It is not a valid
@@ -81,6 +82,8 @@ struct Ctx {
     max_stream: u64,
     max_line: usize,
     deadline: Deadline,
+    /// Present only where requests can outlive the invocation (the Fargate server).
+    http: Option<http_job::Env>,
 }
 
 impl Ctx {
@@ -95,18 +98,21 @@ impl Ctx {
     }
 }
 
-pub fn api(
-    lua: &Lua,
-    batch: Option<BucketScope>,
-    budget: Arc<Budget>,
-    limits: &HostLimits,
-) -> mlua::Result<Table> {
+pub fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
+    let limits = &host.limits;
     let ctx = Arc::new(Ctx {
-        batch,
+        batch: host.batch.clone(),
         budget,
         max_stream: limits.max_stream_bytes,
         max_line: limits.max_object_bytes,
         deadline: limits.deadline.clone(),
+        http: host.background_http.then(|| http_job::Env {
+            tenant: host.tenant.clone(),
+            policy: host.http.clone(),
+            vault: host.vault.clone(),
+            throttle: host.throttle.clone(),
+            max_body: limits.max_http_response_bytes,
+        }),
     });
     let batch = lua.create_table()?;
 
@@ -170,7 +176,82 @@ struct Draft {
     queries: Vec<(String, String, Json)>,
     state: Json,
     script: Option<String>,
+    http: Vec<(String, Prepared)>,
     submitted: bool,
+}
+
+impl Draft {
+    fn name_taken(&self, name: &str) -> bool {
+        self.queries.iter().any(|(n, _, _)| n == name) || self.http.iter().any(|(n, _)| n == name)
+    }
+}
+
+/// Runs the job's requests on their own threads and, when all have finished, commits the results:
+/// bodies first, then `done.json`. A request that fails fails the job with `ok: false`.
+fn spawn_http(env: http_job::Env, scope: BucketScope, id: String, reqs: Vec<(String, Prepared)>) {
+    let span = tracing::Span::current();
+    let spawned = std::thread::Builder::new()
+        .name(format!("batch-http-{id}"))
+        .spawn(move || {
+            let _e = span.enter();
+            let done = run_http(&env, &scope, &id, reqs).unwrap_or_else(|e| {
+                tracing::warn!(job = %id, error = %e, "batch http job failed");
+                json!({"ok": false, "error": e})
+            });
+            let key = format!("{}done.json", job_dir(&id));
+            let body = serde_json::to_vec(&done).expect("done.json serializes");
+            if let Err(e) = scope.put(&key, body) {
+                tracing::error!(job = %id, error = %e, "could not write done.json for batch http job");
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "could not start batch http thread");
+    }
+}
+
+fn run_http(
+    env: &http_job::Env,
+    scope: &BucketScope,
+    id: &str,
+    reqs: Vec<(String, Prepared)>,
+) -> Result<Json, String> {
+    let responses: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = reqs
+            .iter()
+            .map(|(_, p)| s.spawn(|| http_job::execute(env.throttle.as_deref(), env.max_body, p)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err("http worker panicked".to_string()))
+            })
+            .collect()
+    });
+    let mut results = serde_json::Map::new();
+    for ((name, _), resp) in reqs.iter().zip(responses) {
+        let resp = resp.map_err(|e| format!("{name}: {e}"))?;
+        let key = format!("{name}.0000.body");
+        let mut w = scope
+            .create(&format!("{}{key}", job_dir(id)))
+            .map_err(|e| format!("{name}: {e}"))?;
+        w.write(&resp.body).map_err(|e| format!("{name}: {e}"))?;
+        w.commit().map_err(|e| format!("{name}: {e}"))?;
+        results.insert(
+            name.clone(),
+            json!({
+                "status": resp.status,
+                "headers": resp.headers,
+                "parts": [{
+                    "key": key,
+                    "bytes": resp.body.len(),
+                    "sha256": crate::db::hex(&Sha256::digest(&resp.body)),
+                    "raw": true,
+                }],
+            }),
+        );
+    }
+    Ok(json!({"ok": true, "results": results}))
 }
 
 struct Job {
@@ -205,13 +286,39 @@ impl UserData for Job {
                 if d.queries.len() >= MAX_QUERIES {
                     return Err(err(format!("more than {MAX_QUERIES} queries in one job")));
                 }
-                if d.queries.iter().any(|(n, _, _)| *n == name) {
+                if d.name_taken(&name) {
                     return Err(err(format!("duplicate result name {name:?}")));
                 }
                 d.queries.push((name.clone(), query, params));
                 Ok(name)
             },
         );
+        // A request the host performs itself once the job is submitted, however long it takes: only
+        // the response is written to the bucket, and the continuation runs when it arrives. Takes
+        // the options of `native.http.request` (without `stream`). The request is checked now.
+        methods.add_method("http", |_, this, (name, opts): (String, Table)| {
+            let env = this.ctx.http.as_ref().ok_or_else(|| {
+                err("job:http is only available on the Fargate server, not on Lambda")
+            })?;
+            if !token_ok(&name, 64) {
+                return Err(err(format!(
+                    "invalid result name {name:?} (letters, digits, - and _; at most 64)"
+                )));
+            }
+            let mut d = this.draft.lock().unwrap();
+            if d.submitted {
+                return Err(err("batch job was already submitted"));
+            }
+            if d.queries.len() + d.http.len() >= MAX_QUERIES {
+                return Err(err(format!("more than {MAX_QUERIES} queries in one job")));
+            }
+            if d.name_taken(&name) {
+                return Err(err(format!("duplicate result name {name:?}")));
+            }
+            let prepared = env.prepare(&this.ctx.budget, &opts)?;
+            d.http.push((name.clone(), prepared));
+            Ok(name)
+        });
         // Attaches data to the request as a file (or, called again with the same name, another part
         // of that input): a string or a stream, copied in chunks. Written now; the partner only
         // looks once `submit` writes `request.json`, which lists these files.
@@ -354,8 +461,13 @@ impl UserData for Job {
             if d.submitted {
                 return Err(err("batch job was already submitted"));
             }
-            if d.queries.is_empty() {
+            if d.queries.is_empty() && d.http.is_empty() {
                 return Err(err("a batch job needs at least one query"));
+            }
+            if !d.http.is_empty() && !(d.queries.is_empty() && d.inputs.is_empty()) {
+                return Err(err(
+                    "a job with job:http requests cannot also have queries or inputs for a partner",
+                ));
             }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -365,7 +477,9 @@ impl UserData for Job {
                 "v": FORMAT,
                 "job": this.id,
                 "continue": d.script,
-                "queries": d.queries.iter().map(|(n, _, _)| n).collect::<Vec<_>>(),
+                "queries": d.queries.iter().map(|(n, _, _)| n.as_str())
+                    .chain(d.http.iter().map(|(n, _)| n.as_str()))
+                    .collect::<Vec<_>>(),
                 "created_ms": now,
                 "state": d.state,
             });
@@ -383,16 +497,30 @@ impl UserData for Job {
                     .map(|(name, query, params)| json!({"name": name, "query": query, "params": params}))
                     .collect::<Vec<_>>(),
             });
-            for (key, body) in [
-                (state_key(&this.id), state),
-                (format!("{}request.json", job_dir(&this.id)), request),
-            ] {
+            let writes = if d.http.is_empty() {
+                vec![
+                    (state_key(&this.id), state),
+                    (format!("{}request.json", job_dir(&this.id)), request),
+                ]
+            } else {
+                vec![(state_key(&this.id), state)]
+            };
+            for (key, body) in writes {
                 this.ctx.op()?;
                 this.scope
                     .put(&key, serde_json::to_vec(&body).map_err(err)?)
                     .map_err(err)?;
             }
             d.submitted = true;
+            if !d.http.is_empty() {
+                let env = this.ctx.http.clone().expect("job:http needs the executor");
+                spawn_http(
+                    env,
+                    this.scope.clone(),
+                    this.id.clone(),
+                    std::mem::take(&mut d.http),
+                );
+            }
             Ok(this.id.clone())
         });
         methods.add_meta_method(MetaMethod::ToString, |_, t, ()| {
@@ -555,12 +683,17 @@ fn route(lua: &Lua, ctx: &Ctx, event: &Table) -> mlua::Result<Value> {
 }
 
 struct Part {
+    /// Written by the host, not a partner: read as is, never gunzipped.
+    raw: bool,
     key: String,
     bytes: Option<u64>,
     sha256: Option<String>,
 }
 
 struct Output {
+    /// Set for `job:http` results.
+    status: Option<u64>,
+    headers: Option<Json>,
     rows: Option<u64>,
     parts: Vec<Part>,
 }
@@ -639,6 +772,7 @@ fn hydrate(lua: &Lua, ctx: &Arc<Ctx>, event: &Table, allow_failure: bool) -> mlu
                             ))
                         })?;
                     Ok(Part {
+                        raw: p.get("raw").and_then(Json::as_bool).unwrap_or(false),
                         key: key.to_string(),
                         bytes: p.get("bytes").and_then(Json::as_u64),
                         sha256: p.get("sha256").and_then(Json::as_str).map(str::to_string),
@@ -648,6 +782,8 @@ fn hydrate(lua: &Lua, ctx: &Arc<Ctx>, event: &Table, allow_failure: bool) -> mlu
             outputs.insert(
                 name.clone(),
                 Arc::new(Output {
+                    status: r.get("status").and_then(Json::as_u64),
+                    headers: r.get("headers").cloned(),
                     rows: r.get("rows").and_then(Json::as_u64),
                     parts,
                 }),
@@ -739,7 +875,7 @@ fn open_part(
         }
     }
     let stream = io::Cursor::new(head[..n].to_vec()).chain(raw);
-    Ok(if head[..n] == [0x1f, 0x8b] {
+    Ok(if !part.raw && head[..n] == [0x1f, 0x8b] {
         Box::new(Capped {
             inner: MultiGzDecoder::new(BufReader::new(stream)),
             left: ctx.max_stream,
@@ -781,6 +917,12 @@ impl UserData for Hydrated {
                 let r = lua.create_table()?;
                 r.set("rows", o.rows)?;
                 r.set("parts", o.parts.len())?;
+                if let Some(status) = o.status {
+                    r.set("status", status)?;
+                }
+                if let Some(h) = &o.headers {
+                    r.set("headers", lua.to_value(h)?)?;
+                }
                 out.set(name.as_str(), r)?;
             }
             Ok(out)
@@ -790,6 +932,27 @@ impl UserData for Hydrated {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("parts", |_, this, name: String| {
             Ok(this.output(&name)?.parts.len())
+        });
+
+        // The body of a `job:http` response as a string (capped at max_object_bytes).
+        methods.add_method("body", |lua, this, name: String| {
+            let out = this.output(&name)?;
+            let p = out
+                .parts
+                .first()
+                .ok_or_else(|| err(format!("batch {}: result {name:?} has no body", this.id)))?;
+            let mut buf = Vec::new();
+            open_part(&this.ctx, &this.scope, &this.id, p)?
+                .take(this.ctx.max_line as u64 + 1)
+                .read_to_end(&mut buf)
+                .map_err(err)?;
+            if buf.len() > this.ctx.max_line {
+                return Err(err(format!(
+                    "batch {}: body of {name:?} is larger than {} bytes; use :open",
+                    this.id, this.ctx.max_line
+                )));
+            }
+            lua.create_string(&buf)
         });
 
         // Stream of one part (1-based, default 1), gunzipped if it is gzip and checked against the

@@ -192,6 +192,7 @@ pub struct Engine {
     callback_base_url: Option<String>,
     queue: Option<Arc<dyn QueueBackend>>,
     throttle: Option<Arc<Throttle>>,
+    background_http: bool,
     master_keys: Option<MasterKeys>,
 }
 
@@ -204,6 +205,7 @@ pub(crate) struct Services {
     cb_url: Option<String>,
     queue: Option<Arc<dyn QueueBackend>>,
     throttle: Option<Arc<Throttle>>,
+    background_http: bool,
     master_keys: Option<MasterKeys>,
     vault: Option<Arc<Vault>>,
     /// Source for `require`; absent in VMs that run no tenant code of their own.
@@ -222,6 +224,7 @@ impl Engine {
             callback_base_url: None,
             queue: None,
             throttle: None,
+            background_http: false,
             master_keys: None,
         }
     }
@@ -291,6 +294,13 @@ impl Engine {
     /// Limits outbound HTTP per URL prefix, across all tenants in this process (Fargate; not used on Lambda).
     pub fn with_throttle(mut self, throttle: Throttle) -> Self {
         self.throttle = Some(Arc::new(throttle));
+        self
+    }
+
+    /// Lets `native.batch` jobs carry `job:http` requests that the process performs after the
+    /// invocation ends (Fargate; not used on Lambda, whose sandbox freezes between invocations).
+    pub fn with_background_http(mut self) -> Self {
+        self.background_http = true;
         self
     }
 
@@ -397,6 +407,7 @@ impl Engine {
             cb_url: self.callback_base_url.clone(),
             queue,
             throttle: self.throttle.clone(),
+            background_http: self.background_http,
             master_keys: self.master_keys.clone(),
             vault: self.vault().map(Arc::new),
             modules: Some(crate::modules::ModuleHost {
@@ -463,6 +474,7 @@ impl Services {
             cb_url: None,
             queue: None,
             throttle: None,
+            background_http: false,
             master_keys: None,
             vault: None,
             modules: None,
@@ -508,6 +520,7 @@ pub(crate) fn new_vm(
             queue: svc.queue.clone(),
             callback_base_url: svc.cb_url.clone(),
             throttle: svc.throttle.clone(),
+            background_http: svc.background_http,
             master_keys: svc.master_keys.clone(),
             vault: svc.vault.clone(),
             http,
@@ -2891,6 +2904,132 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least one query"));
+    }
+
+    /// A one-shot HTTP server that answers after `delay`; returns its port.
+    fn slow_server(delay: Duration, body: &'static str) -> u16 {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = c.read(&mut buf);
+            std::thread::sleep(delay);
+            let _ = write!(
+                c,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        port
+    }
+
+    fn http_batch_world(port: u16, background: bool) -> (Engine, Arc<MemBackend>) {
+        let store = Arc::new(MemoryStore::default());
+        put(
+            &store,
+            "start",
+            r#"return { on_invoke = function(ctx, ev)
+                local job = native.batch.new({ id = "h1" })
+                job:http("resp", { url = ev.url, headers = { accept = "text/plain" } })
+                job:state({ ref = 9 })
+                job:continue_with("after")
+                return job:submit()
+            end }"#,
+        );
+        put(
+            &store,
+            "after",
+            r#"return { on_queue = function(ctx, ev)
+                local job = native.batch.hydrate(ev, { allow_failure = true })
+                if not job.ok then return { failed = job.error } end
+                local r = job.results.resp
+                return { status = r.status, ctype = r.headers["content-type"],
+                         body = job:body("resp"), state = job.state }
+            end }"#,
+        );
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            &format!(r#"{{"batch":true,"http":{{"allow":["http://localhost:{port}/"]}}}}"#),
+        );
+        let backend = Arc::new(MemBackend::default());
+        let mut e = routed(&store).with_batch_bucket(backend.clone(), "data/");
+        if background {
+            e = e.with_background_http();
+        }
+        (e, backend)
+    }
+
+    #[tokio::test]
+    async fn batch_http_returns_control_and_delivers_the_response() {
+        let port = slow_server(Duration::from_millis(800), "slow hello");
+        let (e, backend) = http_batch_world(port, true);
+        let mut submit = msg(json!({"url": format!("http://localhost:{port}/x")}));
+        submit.script = Some("start".into());
+        submit.trigger = Trigger::Invoke;
+        let started = std::time::Instant::now();
+        assert_eq!(e.invoke(submit).await.unwrap(), json!("h1"));
+        assert!(started.elapsed() < Duration::from_millis(700), "submit waited for the response");
+        // The request itself is never written; only the state is.
+        assert!(backend.get("data/acme/jobs/h1/request.json").unwrap().is_none());
+        assert!(backend.get("data/acme/state/h1.json").unwrap().is_some());
+
+        let done = "data/acme/jobs/h1/done.json";
+        for _ in 0..100 {
+            if backend.get(done).unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(backend.get(done).unwrap().is_some(), "no done.json");
+        let mut after = msg(json!({"bucket": "$batch", "key": "jobs/h1/done.json"}));
+        after.script = Some("after".into());
+        let out = e.invoke(after).await.unwrap();
+        assert_eq!(
+            out,
+            json!({"status": 200, "ctype": "text/plain", "body": "slow hello", "state": {"ref": 9}})
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_http_failure_and_lambda_refusal() {
+        // Nothing listens on this port: the job completes with ok = false.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let (e, backend) = http_batch_world(port, true);
+        let mut submit = msg(json!({"url": format!("http://localhost:{port}/x")}));
+        submit.script = Some("start".into());
+        submit.trigger = Trigger::Invoke;
+        e.invoke(submit).await.unwrap();
+        let done = "data/acme/jobs/h1/done.json";
+        for _ in 0..100 {
+            if backend.get(done).unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let mut after = msg(json!({"bucket": "$batch", "key": "jobs/h1/done.json"}));
+        after.script = Some("after".into());
+        let out = e.invoke(after).await.unwrap();
+        assert!(out["failed"].as_str().unwrap().contains("http request failed"), "{out}");
+
+        // Without the Fargate server's background executor, job:http is refused.
+        let (e, _) = http_batch_world(port, false);
+        let mut submit = msg(json!({"url": format!("http://localhost:{port}/x")}));
+        submit.script = Some("start".into());
+        submit.trigger = Trigger::Invoke;
+        let err = e.invoke(submit).await.unwrap_err().to_string();
+        assert!(err.contains("only available on the Fargate server"), "{err}");
+        // A URL outside the allowlist fails at submit, in the script.
+        let (e, _) = http_batch_world(port, true);
+        let mut submit = msg(json!({"url": "https://elsewhere.example/x"}));
+        submit.script = Some("start".into());
+        submit.trigger = Trigger::Invoke;
+        let err = e.invoke(submit).await.unwrap_err().to_string();
+        assert!(err.contains("allowlist"), "{err}");
     }
 
     #[tokio::test]

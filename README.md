@@ -30,7 +30,7 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 `native.queue.send` (new work for the tenant on the job queue),
 `native.callback.create` (signed single-use callback URLs, served by the webhook Lambda; needs `callbacks.base_url`),
 `native.http.{request,get}` (only URLs in `config.json` `http.allow`; no redirects, no private IPs).
-`native.batch` (jobs handed to a partner through a dedicated bucket: `new`/`submit`, then `route`/`hydrate` in the continuation; results are multi-part NDJSON checked against a manifest) and `native.ndjson.rows`,
+`native.batch` (jobs handed to a partner through a dedicated bucket: `new`/`submit`, then `route`/`hydrate` in the continuation; results are multi-part NDJSON checked against a manifest) and `native.ndjson.rows` (batch jobs can also carry slow HTTP requests the Fargate server performs in the background),
 `native.bucket.<name>.open(key)` and `native.http.request{stream=true}` return byte streams; `native.xml.events(string_or_stream, {trim=true})` is a streaming pull parser over them (no size cap beyond 4 GiB; DTDs rejected); `native.zip.entries(string_or_stream)` iterates a zip archive's entries the same way, each openable as a stream; `native.zip.writer(sink)` with `native.bucket.<name>.create(key)` streams a zip into a bucket. `native.gzip` compresses and decompresses the same way. `native.sql.open()` is a scratch SQLite database for the run that can be saved to a bucket and loaded again by a later invocation.
 
 ## Config

@@ -18,6 +18,7 @@ mod db;
 mod deadline;
 mod gzip;
 mod http;
+mod http_job;
 mod lock;
 mod ndjson;
 mod queue;
@@ -138,6 +139,9 @@ pub struct HostContext {
     pub callback_base_url: Option<String>,
     /// Operator-set limits on outbound HTTP, shared by everything in this process (Fargate only).
     pub throttle: Option<std::sync::Arc<Throttle>>,
+    /// Whether this process outlives invocations, so `native.batch` jobs may carry `job:http`
+    /// requests (Fargate only).
+    pub background_http: bool,
     /// Outbound HTTP allowlist from the tenant config (empty denies all).
     pub http: HttpPolicy,
     /// Credential vault for `{{vault:NAME}}` in `native.http`; such requests error when absent.
