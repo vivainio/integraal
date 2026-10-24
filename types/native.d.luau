@@ -27,7 +27,7 @@ declare extern type XmlEvent with
 end
 
 declare extern type XmlNode with
-    kind: (self) -> "document" | "element" | "text" | "comment" | "attribute"
+    kind: (self) -> "document" | "element" | "text" | "comment" | "processing-instruction" | "attribute"
     name: (self) -> string
     local_name: (self) -> string
     namespace: (self) -> string
@@ -39,8 +39,8 @@ declare extern type XmlNode with
     root: (self) -> XmlNode?
     parent: (self) -> XmlNode?
     -- Node-sets come back as arrays in document order; other results as string, number or boolean.
-    xpath: (self, expr: string, vars: { [string]: string | number | boolean }?) -> any
-    first: (self, expr: string, vars: { [string]: string | number | boolean }?) -> any
+    xpath: (self, expr: string, ns: { [string]: string }?) -> any
+    first: (self, expr: string, ns: { [string]: string }?) -> any
     xml: (self) -> string
 end
 

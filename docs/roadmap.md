@@ -19,5 +19,7 @@ deletes are implemented; the rest of the pipeline is not.
 - DNS-aware SSRF protection for `native.http` (hostnames resolving to private addresses).
 
 ## Native API
+- XPath variable binding for `native.xml.parse` (`$name` references, so script data never has to be
+  concatenated into an expression); waits on [uppsala#65](https://github.com/kushaldas/uppsala/pull/65).
 - Streaming writers (`native.bucket.writer`) for large outputs.
 - `native.secrets` backed by Secrets Manager / SSM.

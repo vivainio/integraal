@@ -37,13 +37,14 @@ For a full example see [Writing scripts](writing-scripts.md#example-parse-a-larg
 ## `native.xml.parse(source, opts?)`
 Builds an in-memory tree from a string or stream and returns the **document node**. Use it for
 documents that fit in memory (partner messages, small feeds), where the pull parser is too low
-level; `trim = true` drops whitespace-only text and trims the rest, as for `events`. The size is
-capped by the object size limit (see [Limits](limits.md)) and the tree by 2 million nodes; DTDs
-are rejected and nesting is limited to 256 levels. Processing instructions are dropped.
+level; `trim = true` drops whitespace-only text and trims the rest, as for `events`. The whole
+document is read first, capped by the object size limit (see [Limits](limits.md)); DTDs are
+rejected and nesting is limited to 256 levels. The tree and XPath engine are the
+[`uppsala`](https://crates.io/crates/uppsala) crate.
 
 ```lua
 local doc = native.xml.parse(body, { trim = true })
-for _, item in ipairs(doc:xpath("/feed/item[@kind=$k]", { k = "a" })) do
+for _, item in ipairs(doc:xpath("/feed/item[@kind='a']")) do
   native.log("info", item:attr("id") .. " " .. item:child("name"):text())
 end
 local total = doc:xpath("sum(//price)")
@@ -51,25 +52,26 @@ local total = doc:xpath("sum(//price)")
 
 | node method | |
 | --- | --- |
-| `kind()` | `"document"`, `"element"`, `"text"`, `"comment"` or `"attribute"` |
+| `kind()` | `"document"`, `"element"`, `"text"` (also CDATA), `"comment"`, `"processing-instruction"` or `"attribute"` |
 | `name()`, `local_name()`, `namespace()` | qualified name, name without prefix, resolved namespace URI (`""` if none) |
 | `text()` | all descendant text, concatenated (the attribute value for attributes) |
-| `attr(name)`, `attrs()` | an attribute value or `nil`; all attributes as a table (including `xmlns` declarations) |
-| `children(name?)`, `child(name)` | element children, optionally by name; the first one with that name |
-| `root()`, `parent()` | the document element (from the document node); the parent node |
-| `xpath(expr, vars?)` | evaluates an XPath 1.0 expression relative to the node |
-| `first(expr, vars?)` | like `xpath`, but a node-set yields only its first node (or `nil`) |
+| `attr(name)`, `attrs()` | an attribute value or `nil` by qualified name; all attributes as a table (namespace declarations are not attributes) |
+| `children(name?)`, `child(name)` | element children, optionally by qualified name; the first one with that name |
+| `root()`, `parent()` | the document element; the parent node |
+| `xpath(expr, ns?)` | evaluates an XPath 1.0 expression relative to the node |
+| `first(expr, ns?)` | like `xpath`, but a node-set yields only its first node (or `nil`) |
 | `xml()` | serializes the node and its subtree |
 
 Nodes compare with `==`. `xpath` returns an array of nodes in document order for a node-set, and a
-Lua string, number or boolean for other results. `vars` binds `$name` references, which is the safe
-way to put script data into an expression (never concatenate it).
+Lua string, number or boolean for other results.
 
-XPath support is the full 1.0 core: all axes except `namespace`, predicates, unions, the operators
-and the core function library (`id()` and `lang()` aside). Name tests compare qualified names as
-written in the document, so `m:price` matches an element with that prefix and `item` matches an
-unprefixed element even under a default namespace; use `*[local-name()='price']` to ignore
-prefixes. Evaluation has a step budget and respects the invocation deadline.
+XPath 1.0 is evaluated strictly. In particular an unprefixed name test only matches elements in **no
+namespace**, so for a document with a default namespace (`<feed xmlns="urn:f">`) bind a prefix of your
+choice with `ns` and use it: `doc:xpath("//f:item", { f = "urn:f" })`. Prefixes declared on the
+document element can be used as written, and `*[local-name()='item']` ignores namespaces entirely.
+Evaluation has a node-visit budget, so a pathological expression fails with an error instead of
+running for long. XPath variables (`$name`) cannot be bound yet, so build expressions from trusted
+text only and compare returned values in Lua.
 
 ## `native.xml.writer(sink?, opts?)`
 Generates XML. Text and attribute values are escaped, names and characters are validated and the
