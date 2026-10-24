@@ -34,6 +34,80 @@ the event types listed above, so check `ev.type` first.
 
 For a full example see [Writing scripts](writing-scripts.md#example-parse-a-large-xml-feed).
 
+## `native.xml.parse(source, opts?)`
+Builds an in-memory tree from a string or stream and returns the **document node**. Use it for
+documents that fit in memory (partner messages, small feeds), where the pull parser is too low
+level; `trim = true` drops whitespace-only text and trims the rest, as for `events`. The size is
+capped by the object size limit (see [Limits](limits.md)) and the tree by 2 million nodes; DTDs
+are rejected and nesting is limited to 256 levels. Processing instructions are dropped.
+
+```lua
+local doc = native.xml.parse(body, { trim = true })
+for _, item in ipairs(doc:xpath("/feed/item[@kind=$k]", { k = "a" })) do
+  native.log("info", item:attr("id") .. " " .. item:child("name"):text())
+end
+local total = doc:xpath("sum(//price)")
+```
+
+| node method | |
+| --- | --- |
+| `kind()` | `"document"`, `"element"`, `"text"`, `"comment"` or `"attribute"` |
+| `name()`, `local_name()`, `namespace()` | qualified name, name without prefix, resolved namespace URI (`""` if none) |
+| `text()` | all descendant text, concatenated (the attribute value for attributes) |
+| `attr(name)`, `attrs()` | an attribute value or `nil`; all attributes as a table (including `xmlns` declarations) |
+| `children(name?)`, `child(name)` | element children, optionally by name; the first one with that name |
+| `root()`, `parent()` | the document element (from the document node); the parent node |
+| `xpath(expr, vars?)` | evaluates an XPath 1.0 expression relative to the node |
+| `first(expr, vars?)` | like `xpath`, but a node-set yields only its first node (or `nil`) |
+| `xml()` | serializes the node and its subtree |
+
+Nodes compare with `==`. `xpath` returns an array of nodes in document order for a node-set, and a
+Lua string, number or boolean for other results. `vars` binds `$name` references, which is the safe
+way to put script data into an expression (never concatenate it).
+
+XPath support is the full 1.0 core: all axes except `namespace`, predicates, unions, the operators
+and the core function library (`id()` and `lang()` aside). Name tests compare qualified names as
+written in the document, so `m:price` matches an element with that prefix and `item` matches an
+unprefixed element even under a default namespace; use `*[local-name()='price']` to ignore
+prefixes. Evaluation has a step budget and respects the invocation deadline.
+
+## `native.xml.writer(sink?, opts?)`
+Generates XML. Text and attribute values are escaped, names and characters are validated and the
+writer refuses to produce anything but a well-formed document (balanced tags, one root). With a
+sink from `native.bucket.<name>.create(key)` it streams straight into a bucket; with no sink the
+document is built in memory, capped at the object size limit, and `finish()` returns it.
+
+| method | |
+| --- | --- |
+| `w:start(tag, attrs?)` | opens an element; attributes are written in name order |
+| `w:close()` | closes the innermost open element (`<a/>` when it is empty) |
+| `w:text(s)` / `w:cdata(s)` / `w:comment(s)` | content; `]]>` inside CDATA is split safely; a comment cannot contain `--` |
+| `w:element(tag, attrs?, text?)` | a complete element with optional text |
+| `w:finish()` | checks that every element is closed; returns the document for in-memory writers |
+
+Options: `declaration = false` omits the `<?xml version="1.0" encoding="UTF-8"?>` line;
+`indent = 2` pretty-prints (elements with text content are kept inline).
+
+```lua
+local w = native.xml.writer({ indent = 2 })
+w:start("orders", { xmlns = "urn:acme:orders" })
+for _, o in ipairs(orders) do
+  w:start("order", { id = o.id })
+  w:element("customer", nil, o.customer)   -- "A & B" is written as A &amp; B
+  w:close()
+end
+w:close()
+local xml = w:finish()
+
+-- or stream a large export into a bucket
+local out = native.bucket.Out.create("orders.xml")
+local w2 = native.xml.writer(out)
+... w2:finish()
+out:close()
+```
+Namespaces are not tracked: declare them with `xmlns` / `xmlns:p` attributes and write prefixed names
+yourself. Characters XML forbids (most control characters) raise an error rather than being dropped.
+
 ## `native.zip.entries(source)`
 Iterates a zip archive (a string or a stream) in one forward pass, so an archive larger than memory
 is fine. Each step yields an entry with `name`, `size` (uncompressed; `nil` when the archive only

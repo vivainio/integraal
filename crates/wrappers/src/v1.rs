@@ -93,6 +93,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
         crate::xml::api(
             lua,
             host.limits.max_stream_bytes,
+            host.limits.max_object_bytes,
             host.limits.deadline.clone(),
         )?,
     )?;

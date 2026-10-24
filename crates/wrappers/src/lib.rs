@@ -29,6 +29,9 @@ mod throttle;
 mod v1;
 mod vault;
 mod xml;
+mod xml_dom;
+mod xml_writer;
+mod xpath;
 mod zip;
 mod zip_writer;
 

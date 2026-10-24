@@ -19,6 +19,5 @@ deletes are implemented; the rest of the pipeline is not.
 - DNS-aware SSRF protection for `native.http` (hostnames resolving to private addresses).
 
 ## Native API
-- XML DOM with XPath 1.0 selectors, and an XML generator with escaping.
 - Streaming writers (`native.bucket.writer`) for large outputs.
 - `native.secrets` backed by Secrets Manager / SSM.

@@ -26,6 +26,34 @@ declare extern type XmlEvent with
     depth: number
 end
 
+declare extern type XmlNode with
+    kind: (self) -> "document" | "element" | "text" | "comment" | "attribute"
+    name: (self) -> string
+    local_name: (self) -> string
+    namespace: (self) -> string
+    text: (self) -> string
+    attr: (self, name: string) -> string?
+    attrs: (self) -> { [string]: string }
+    children: (self, name: string?) -> { XmlNode }
+    child: (self, name: string) -> XmlNode?
+    root: (self) -> XmlNode?
+    parent: (self) -> XmlNode?
+    -- Node-sets come back as arrays in document order; other results as string, number or boolean.
+    xpath: (self, expr: string, vars: { [string]: string | number | boolean }?) -> any
+    first: (self, expr: string, vars: { [string]: string | number | boolean }?) -> any
+    xml: (self) -> string
+end
+
+declare extern type XmlWriter with
+    start: (self, tag: string, attrs: { [string]: string | number | boolean }?) -> ()
+    close: (self) -> ()
+    text: (self, text: string) -> ()
+    cdata: (self, text: string) -> ()
+    comment: (self, text: string) -> ()
+    element: (self, tag: string, attrs: { [string]: string | number | boolean }?, text: (string | number)?) -> ()
+    finish: (self) -> string?
+end
+
 -- Streaming upload from `Bucket.create`; the object appears on `close`.
 declare extern type Sink with
     write: (self, data: string) -> ()
@@ -181,6 +209,9 @@ declare native: {
     },
     xml: {
         events: (source: string | ByteStream, opts: { trim: boolean? }?) -> () -> XmlEvent?,
+        parse: (source: string | ByteStream, opts: { trim: boolean? }?) -> XmlNode,
+        writer: ((sink: Sink?, opts: { declaration: boolean?, indent: number? }?) -> XmlWriter)
+            & ((opts: { declaration: boolean?, indent: number? }) -> XmlWriter),
     },
     sql: {
         open: () -> SqlDatabase,

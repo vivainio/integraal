@@ -54,7 +54,7 @@ impl<R: Read> Read for Limited<R> {
     }
 }
 
-struct State {
+pub(crate) struct State {
     reader: Reader<BufReader<Limited<Box<dyn Read + Send>>>>,
     buf: Vec<u8>,
     depth: usize,
@@ -65,43 +65,70 @@ struct State {
     done: bool,
 }
 
-pub fn api(lua: &Lua, max_stream_bytes: u64, deadline: Deadline) -> mlua::Result<Table> {
+impl State {
+    pub(crate) fn new(
+        reader: Box<dyn Read + Send>,
+        max_bytes: u64,
+        deadline: Deadline,
+        trim: bool,
+    ) -> Self {
+        let mut r = Reader::from_reader(BufReader::new(Limited {
+            inner: reader,
+            left: max_bytes,
+            deadline,
+        }));
+        r.config_mut().check_end_names = true;
+        State {
+            reader: r,
+            buf: Vec::new(),
+            depth: 0,
+            trim,
+            pending_end: None,
+            queued: None,
+            done: false,
+        }
+    }
+}
+
+/// A string or a stream argument as a reader.
+pub(crate) fn source_reader(source: Value, who: &str) -> mlua::Result<Box<dyn Read + Send>> {
+    match source {
+        Value::String(s) => Ok(Box::new(io::Cursor::new(s.as_bytes().to_vec()))),
+        Value::UserData(ud) => take_stream(&ud),
+        _ => Err(mlua::Error::runtime(format!(
+            "{who} expects a string or a stream"
+        ))),
+    }
+}
+
+pub fn api(
+    lua: &Lua,
+    max_stream_bytes: u64,
+    max_object_bytes: usize,
+    deadline: Deadline,
+) -> mlua::Result<Table> {
     let xml = lua.create_table()?;
+    let events_deadline = deadline.clone();
     xml.set(
         "events",
         lua.create_function(move |lua, (source, opts): (Value, Option<Table>)| {
-            let reader: Box<dyn Read + Send> = match source {
-                Value::String(s) => Box::new(io::Cursor::new(s.as_bytes().to_vec())),
-                Value::UserData(ud) => take_stream(&ud)?,
-                _ => {
-                    return Err(mlua::Error::runtime(
-                        "native.xml.events expects a string or a stream",
-                    ))
-                }
-            };
+            let reader = source_reader(source, "native.xml.events")?;
             let trim = opts
                 .map(|o| o.get::<Option<bool>>("trim"))
                 .transpose()?
                 .flatten()
                 .unwrap_or(false);
-            let mut r = Reader::from_reader(BufReader::new(Limited {
-                inner: reader,
-                left: max_stream_bytes,
-                deadline: deadline.clone(),
-            }));
-            r.config_mut().check_end_names = true;
-            let state = Mutex::new(State {
-                reader: r,
-                buf: Vec::new(),
-                depth: 0,
+            let state = Mutex::new(State::new(
+                reader,
+                max_stream_bytes,
+                events_deadline.clone(),
                 trim,
-                pending_end: None,
-                queued: None,
-                done: false,
-            });
+            ));
             lua.create_function(move |lua, ()| next_event(lua, &mut state.lock().unwrap()))
         })?,
     )?;
+    crate::xml_dom::api(lua, &xml, max_object_bytes, deadline.clone())?;
+    crate::xml_writer::api(lua, &xml, max_object_bytes, deadline)?;
     Ok(xml)
 }
 
@@ -118,7 +145,7 @@ fn xml_err(e: impl std::fmt::Display) -> mlua::Error {
 }
 
 /// Owned, Lua-free form of a parser event so text runs can be coalesced.
-enum Ev {
+pub(crate) enum Ev {
     Start {
         tag: String,
         attrs: Vec<(String, String)>,
@@ -185,7 +212,7 @@ fn read_raw(st: &mut State) -> mlua::Result<Ev> {
 }
 
 /// Next logical event: adjacent text and entity references are merged into one text run.
-fn read_logical(st: &mut State) -> mlua::Result<Ev> {
+pub(crate) fn read_logical(st: &mut State) -> mlua::Result<Ev> {
     if let Some(ev) = st.queued.take() {
         return Ok(ev);
     }
