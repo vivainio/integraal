@@ -92,6 +92,9 @@ fn to_sql(v: Value) -> mlua::Result<rusqlite::types::Value> {
             Ok(t) => S::Text(t.to_string()),
             Err(_) => S::Blob(s.as_bytes().to_vec()),
         },
+        Value::UserData(u) if mlua_decimal::as_decimal(&u).is_some() => {
+            S::Text(mlua_decimal::as_decimal(&u).unwrap().to_string())
+        }
         other => {
             return Err(mlua::Error::runtime(format!(
                 "cannot bind a {} to an SQL parameter",

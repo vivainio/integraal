@@ -24,6 +24,7 @@ declares:
 | --- | --- | --- |
 | `native` | global | every function in the [Native API](native-api.md) with exact signatures |
 | `Context` | type | `tenant`, `script`, `trigger`, `runtime` – the first handler argument |
+| `Decimal`, `D` | type, global | exact base-10 numbers from [mlua-decimal](https://github.com/vivainio/mlua-decimal): `D"12.50"`; bind one to `native.sql` as a parameter (stored as text) |
 | `ByteStream` | type | what `native.bucket.<bucket>.open` and streaming HTTP return |
 | `XmlEvent` | type | `native.xml.events` items |
 | `HttpResponse`, `HttpStreamResponse` | type | `native.http` results; `request{stream=true}` is typed as the stream variant |

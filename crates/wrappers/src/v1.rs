@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::{Budget, HostContext};
 
 pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
+    mlua_decimal::install(lua)?;
     let budget = Arc::new(Budget::new(&host.limits));
     let native = lua.create_table()?;
     native.set("version", 1)?;

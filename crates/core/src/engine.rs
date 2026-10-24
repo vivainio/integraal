@@ -945,6 +945,18 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn decimal_global_is_exact() {
+        let e = engine(
+            "return { handle = function() return tostring(D\"0.1\" + D\"0.2\") end }",
+            Limits::default(),
+        );
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!("0.3")
+        );
+    }
+
     /// Spans must be exported and must follow the script onto the blocking VM thread, or every
     /// log line and wrapper span inside a script would be orphaned from its invocation.
     #[tokio::test]
@@ -1654,6 +1666,7 @@ mod tests {
                 "key",
                 &json!({"api": {"token": "sk_live_abcdef"}}),
                 &["https://api.invalid/".into()],
+                false,
             )
             .unwrap();
         let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
