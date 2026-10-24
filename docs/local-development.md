@@ -28,6 +28,21 @@ cargo test --workspace
 
 The engine tests use in-memory stores, so they need no AWS or simulator.
 
+### Mega integration test
+
+`e2e/` holds a black-box test that exercises every [integration pattern](patterns.md) against a real
+`integraal-server`, with roto standing in for AWS. It needs `roto-server` on your `PATH`:
+
+```bash
+uv run --project e2e pytest e2e
+```
+
+The outside world is played by **megalith**, a small mock HTTP service (`e2e/megalith.py`). It
+stands in for the hypothetical system that integraal acts as the integration layer for: the
+back-office or partner system that integraal calls, that sends callbacks, and that works batch jobs.
+Megalith records every request it gets and answers from a canned table, so tests can assert on what
+integraal sent (headers, bodies, concurrency) as well as on what came back.
+
 ## Previewing these docs
 
 ```bash

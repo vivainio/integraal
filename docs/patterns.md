@@ -3,6 +3,10 @@
 A quick map of every way work gets into integraal, and every way a script talks to the outside
 world. Each pattern links to its full page.
 
+The [mega integration test](local-development.md#mega-integration-test) exercises all of them
+together. Its outside world is **megalith**, a stand-in for the hypothetical system integraal acts
+as the integration layer for.
+
 ## Getting work in
 
 ### Synchronous call (Lambda invoke)
