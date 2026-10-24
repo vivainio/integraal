@@ -9,11 +9,12 @@
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
 //! under the tenant's own partition keys, each expiring after 24 hours), and `native.crypto`
-//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets).
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets).
 
 mod bucket;
 mod crypto;
 mod db;
+mod deadline;
 mod gzip;
 mod http;
 mod sink;
@@ -34,6 +35,7 @@ pub use db::{
     Callback, CallbackSigner, DbScope, Item, ItemBackend, Take, Taken, DB_TTL, MAX_ITEM_BYTES,
     MAX_QUERY_ITEMS,
 };
+pub use deadline::Deadline;
 pub use http::{AllowRule, HttpPolicy};
 pub use throttle::{Slot, Throttle, ThrottleRule};
 pub use vault::{Vault, VaultEntry, MAX_SECRET_BYTES, MIN_SECRET_BYTES};
@@ -41,7 +43,7 @@ pub use xml::{ByteStream, MAX_STREAM_BYTES};
 
 use std::{
     sync::atomic::{AtomicU32, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use mlua::Lua;
@@ -62,7 +64,7 @@ pub enum WrapperError {
 /// Resolved per-invocation limits enforced by the wrappers.
 #[derive(Debug, Clone)]
 pub struct HostLimits {
-    pub deadline: Instant,
+    pub deadline: Deadline,
     pub max_http_response_bytes: u64,
     pub max_object_bytes: usize,
     pub max_stream_bytes: u64,
@@ -74,7 +76,7 @@ pub struct HostLimits {
 
 /// Call counters and the deadline, shared by every native function of one invocation.
 pub(crate) struct Budget {
-    pub deadline: Instant,
+    pub deadline: Deadline,
     http_left: AtomicU32,
     data_left: AtomicU32,
 }
@@ -82,16 +84,14 @@ pub(crate) struct Budget {
 impl Budget {
     fn new(l: &HostLimits) -> Self {
         Self {
-            deadline: l.deadline,
+            deadline: l.deadline.clone(),
             http_left: l.max_http_requests.into(),
             data_left: l.max_data_ops.into(),
         }
     }
 
-    fn take(counter: &AtomicU32, what: &str, deadline: Instant) -> Result<(), String> {
-        if Instant::now() >= deadline {
-            return Err("__timeout__".into());
-        }
+    fn take(counter: &AtomicU32, what: &str, deadline: &Deadline) -> Result<(), String> {
+        deadline.check().map_err(str::to_string)?;
         counter
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
             .map(|_| ())
@@ -99,11 +99,11 @@ impl Budget {
     }
 
     pub fn take_http(&self) -> Result<(), String> {
-        Self::take(&self.http_left, "http", self.deadline)
+        Self::take(&self.http_left, "http", &self.deadline)
     }
 
     pub fn take_data(&self) -> Result<(), String> {
-        Self::take(&self.data_left, "data", self.deadline)
+        Self::take(&self.data_left, "data", &self.deadline)
     }
 }
 

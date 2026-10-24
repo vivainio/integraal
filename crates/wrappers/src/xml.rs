@@ -4,9 +4,9 @@
 use std::{
     io::{self, BufReader, Read},
     sync::Mutex,
-    time::Instant,
 };
 
+use crate::Deadline;
 use mlua::{AnyUserData, Lua, MetaMethod, Table, UserData, Value};
 use quick_xml::{events::Event, Reader};
 
@@ -38,14 +38,12 @@ impl UserData for ByteStream {
 pub(crate) struct Limited<R> {
     pub inner: R,
     pub left: u64,
-    pub deadline: Instant,
+    pub deadline: Deadline,
 }
 
 impl<R: Read> Read for Limited<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if Instant::now() >= self.deadline {
-            return Err(io::Error::other("__timeout__"));
-        }
+        self.deadline.check().map_err(io::Error::other)?;
         if self.left == 0 {
             return Err(io::Error::other("input exceeds stream limit"));
         }
@@ -67,7 +65,7 @@ struct State {
     done: bool,
 }
 
-pub fn api(lua: &Lua, max_stream_bytes: u64, deadline: Instant) -> mlua::Result<Table> {
+pub fn api(lua: &Lua, max_stream_bytes: u64, deadline: Deadline) -> mlua::Result<Table> {
     let xml = lua.create_table()?;
     xml.set(
         "events",
@@ -89,7 +87,7 @@ pub fn api(lua: &Lua, max_stream_bytes: u64, deadline: Instant) -> mlua::Result<
             let mut r = Reader::from_reader(BufReader::new(Limited {
                 inner: reader,
                 left: max_stream_bytes,
-                deadline,
+                deadline: deadline.clone(),
             }));
             r.config_mut().check_end_names = true;
             let state = Mutex::new(State {

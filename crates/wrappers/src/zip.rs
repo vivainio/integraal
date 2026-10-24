@@ -8,9 +8,9 @@
 use std::{
     io::{self, BufRead, BufReader, Read},
     sync::{Arc, Mutex},
-    time::Instant,
 };
 
+use crate::Deadline;
 use flate2::{Decompress, FlushDecompress, Status};
 use mlua::{Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
 
@@ -102,7 +102,11 @@ fn advance(inner: &mut Inner) -> io::Result<Option<Header>> {
     let h = read_n(&mut inner.src, 26)?;
     let flags = u16le(&h[2..]);
     let method = u16le(&h[4..]);
-    let (crc, mut comp, mut size) = (u32le(&h[10..]), u32le(&h[14..]) as u64, u32le(&h[18..]) as u64);
+    let (crc, mut comp, mut size) = (
+        u32le(&h[10..]),
+        u32le(&h[14..]) as u64,
+        u32le(&h[18..]) as u64,
+    );
     let (nlen, elen) = (u16le(&h[22..]) as usize, u16le(&h[24..]) as usize);
     if nlen > MAX_NAME {
         return Err(bad("entry name too long"));
@@ -139,7 +143,9 @@ fn advance(inner: &mut Inner) -> io::Result<Option<Header>> {
 
     let sized = !descriptor;
     if !sized && !deflated {
-        return Err(bad("stored entries with a trailing data descriptor are not supported"));
+        return Err(bad(
+            "stored entries with a trailing data descriptor are not supported",
+        ));
     }
     Ok(Some(Header {
         name,
@@ -233,7 +239,9 @@ fn read_body(inner: &mut Inner, b: &mut Body, buf: &mut [u8]) -> io::Result<usiz
     b.out += n as u64;
     b.crc.update(&buf[..n]);
     if (n as u64) > inner.out_left {
-        return Err(io::Error::other("zip: uncompressed data exceeds stream limit"));
+        return Err(io::Error::other(
+            "zip: uncompressed data exceeds stream limit",
+        ));
     }
     inner.out_left -= n as u64;
     if b.finished {
@@ -353,12 +361,14 @@ pub fn api(
     lua: &Lua,
     max_stream_bytes: u64,
     max_object_bytes: usize,
-    deadline: Instant,
+    deadline: Deadline,
 ) -> mlua::Result<Table> {
     let zip = lua.create_table()?;
+    let entries_deadline = deadline.clone();
     zip.set(
         "entries",
         lua.create_function(move |lua, source: Value| {
+            let deadline = entries_deadline.clone();
             let reader: Box<dyn Read + Send> = match source {
                 Value::String(s) => Box::new(io::Cursor::new(s.as_bytes().to_vec())),
                 Value::UserData(ud) => take_stream(&ud)?,
@@ -372,7 +382,7 @@ pub fn api(
                 src: BufReader::new(Limited {
                     inner: reader,
                     left: max_stream_bytes,
-                    deadline,
+                    deadline: deadline.clone(),
                 }),
                 out_left: max_stream_bytes,
                 cur: None,

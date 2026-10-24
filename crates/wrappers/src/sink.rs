@@ -4,9 +4,9 @@
 use std::{
     io,
     sync::{Arc, Mutex},
-    time::Instant,
 };
 
+use crate::Deadline;
 use mlua::{AnyUserData, LuaString, MetaMethod, UserData, UserDataMethods};
 
 use crate::ObjectWriter;
@@ -15,7 +15,7 @@ struct State {
     w: Option<Box<dyn ObjectWriter>>,
     written: u64,
     left: u64,
-    deadline: Instant,
+    deadline: Deadline,
 }
 
 /// Shared handle to an upload; the script's userdata and a zip writer can both hold one.
@@ -23,7 +23,7 @@ struct State {
 pub struct Sink(Arc<Mutex<State>>);
 
 impl Sink {
-    pub fn new(w: Box<dyn ObjectWriter>, max_bytes: u64, deadline: Instant) -> Self {
+    pub fn new(w: Box<dyn ObjectWriter>, max_bytes: u64, deadline: Deadline) -> Self {
         Self(Arc::new(Mutex::new(State {
             w: Some(w),
             written: 0,
@@ -38,9 +38,7 @@ impl Sink {
 
     pub fn write_bytes(&self, data: &[u8]) -> Result<(), String> {
         let mut st = self.0.lock().unwrap();
-        if Instant::now() >= st.deadline {
-            return Err("__timeout__".into());
-        }
+        st.deadline.check().map_err(str::to_string)?;
         if data.len() as u64 > st.left {
             return Err("sink exceeds the stream size limit".into());
         }

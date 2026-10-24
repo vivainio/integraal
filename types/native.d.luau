@@ -147,6 +147,9 @@ declare native: {
         compress: (data: string) -> string,
         decompress: (data: string) -> string,
     },
+    deadline: {
+        with: <T...>(ms: number, fn: () -> T...) -> T...,
+    },
     zip: {
         entries: (source: string | ByteStream) -> () -> ZipEntry?,
         writer: (sink: Sink?) -> ZipWriter,

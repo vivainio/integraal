@@ -10,12 +10,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Instant,
 };
 
-use mlua::{
-    AnyUserData, Lua, LuaSerdeExt, MetaMethod, Table, UserData, UserDataMethods, Value,
-};
+use crate::Deadline;
+use mlua::{AnyUserData, Lua, LuaSerdeExt, MetaMethod, Table, UserData, UserDataMethods, Value};
 use rusqlite::{
     config::DbConfig,
     hooks::{AuthAction, AuthContext, Authorization},
@@ -24,21 +22,18 @@ use rusqlite::{
     Connection, ErrorCode,
 };
 
-use crate::{
-    sink::Sink,
-    xml::take_stream,
-};
+use crate::{sink::Sink, xml::take_stream};
 
 /// `query` materializes its result; past this many rows the script must narrow it (LIMIT, paging).
 const MAX_ROWS: usize = 100_000;
 const MAGIC: &[u8] = b"SQLite format 3\0";
 const SAVE_CHUNK: usize = 1024 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Caps {
     max_sql_bytes: u64,
     max_object_bytes: usize,
-    deadline: Instant,
+    deadline: Deadline,
 }
 
 struct Db {
@@ -71,8 +66,8 @@ fn lock_down(conn: &Connection, caps: Caps, gate: Arc<AtomicBool>) -> rusqlite::
     conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, strlen)?;
     conn.set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, strlen)?;
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
-    let deadline = caps.deadline;
-    conn.progress_handler(1000, Some(move || Instant::now() >= deadline))?;
+    let deadline = caps.deadline.clone();
+    conn.progress_handler(1000, Some(move || deadline.check().is_err()))?;
     conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
         _ if gate.load(Ordering::Relaxed) => Authorization::Allow,
         AuthAction::Attach { .. } | AuthAction::Detach { .. } | AuthAction::Pragma { .. } => {
@@ -128,9 +123,7 @@ fn row_table(lua: &Lua, stmt_cols: &[String], row: &rusqlite::Row<'_>) -> mlua::
 
 impl Db {
     fn with<T>(&self, f: impl FnOnce(&Connection) -> mlua::Result<T>) -> mlua::Result<T> {
-        if Instant::now() >= self.caps.deadline {
-            return Err(mlua::Error::runtime("__timeout__"));
-        }
+        self.caps.deadline.check().map_err(mlua::Error::runtime)?;
         let g = self.conn.lock().unwrap();
         f(g.as_ref()
             .ok_or_else(|| mlua::Error::runtime("sql database is closed"))?)
@@ -148,7 +141,13 @@ impl Db {
         f(&data.map_err(sql_err)?)
     }
 
-    fn rows(&self, lua: &Lua, sql: &str, p: Vec<rusqlite::types::Value>, max: usize) -> mlua::Result<Table> {
+    fn rows(
+        &self,
+        lua: &Lua,
+        sql: &str,
+        p: Vec<rusqlite::types::Value>,
+        max: usize,
+    ) -> mlua::Result<Table> {
         self.with(|c| {
             let mut stmt = c.prepare(sql).map_err(sql_err)?;
             let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -181,7 +180,8 @@ impl UserData for Db {
                 if p.is_empty() {
                     c.execute_batch(&sql).map_err(sql_err)?;
                 } else {
-                    c.execute(&sql, rusqlite::params_from_iter(p)).map_err(sql_err)?;
+                    c.execute(&sql, rusqlite::params_from_iter(p))
+                        .map_err(sql_err)?;
                 }
                 Ok(c.changes())
             })
@@ -244,7 +244,7 @@ fn open(caps: Caps, load: Option<Vec<u8>>) -> mlua::Result<Db> {
             .map_err(|e| mlua::Error::runtime(format!("sql: not a valid database file: {e}")))?;
     }
     let gate = Arc::new(AtomicBool::new(false));
-    lock_down(&conn, caps, gate.clone()).map_err(sql_err)?;
+    lock_down(&conn, caps.clone(), gate.clone()).map_err(sql_err)?;
     Ok(Db {
         conn: Mutex::new(Some(conn)),
         open_gate: gate,
@@ -256,7 +256,7 @@ pub fn api(
     lua: &Lua,
     max_sql_bytes: u64,
     max_object_bytes: usize,
-    deadline: Instant,
+    deadline: Deadline,
 ) -> mlua::Result<Table> {
     let caps = Caps {
         max_sql_bytes,
@@ -265,7 +265,13 @@ pub fn api(
     };
     let sql = lua.create_table()?;
     sql.set("null", lua.null())?;
-    sql.set("open", lua.create_function(move |_, ()| open(caps, None))?)?;
+    sql.set(
+        "open",
+        lua.create_function({
+            let caps = caps.clone();
+            move |_, ()| open(caps.clone(), None)
+        })?,
+    )?;
     // Opens a database file saved earlier, from a string or a stream (e.g. `bucket.open(key)`).
     sql.set(
         "load",
@@ -292,7 +298,7 @@ pub fn api(
             if !bytes.starts_with(MAGIC) {
                 return Err(mlua::Error::runtime("sql: not a SQLite database file"));
             }
-            open(caps, Some(bytes))
+            open(caps.clone(), Some(bytes))
         })?,
     )?;
     Ok(sql)

@@ -147,7 +147,8 @@ impl ObjectWriter for S3Writer {
     fn commit(mut self: Box<Self>) -> Result<(), String> {
         let tail = std::mem::take(&mut self.buf);
         if self.upload_id.is_none() {
-            let (client, bucket, key) = (self.client.clone(), self.bucket.clone(), self.key.clone());
+            let (client, bucket, key) =
+                (self.client.clone(), self.bucket.clone(), self.key.clone());
             return self.handle.block_on(async move {
                 client
                     .put_object()
@@ -195,7 +196,8 @@ impl Drop for S3Writer {
     fn drop(&mut self) {
         // Spawned rather than blocked on: a drop may happen on a runtime thread.
         if let Some(id) = self.upload_id.take() {
-            let (client, bucket, key) = (self.client.clone(), self.bucket.clone(), self.key.clone());
+            let (client, bucket, key) =
+                (self.client.clone(), self.bucket.clone(), self.key.clone());
             self.handle.spawn(async move {
                 let _ = client
                     .abort_multipart_upload()

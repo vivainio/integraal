@@ -6,8 +6,9 @@ use std::{
 
 use integraal_loader::{CachedLoader, LoadError, ScriptKey};
 use integraal_wrappers::{
-    install, parse_runtime_version, Access, BucketScope, BucketScopes, DbScope, HostContext,
-    HostLimits, HttpPolicy, ItemBackend, MasterKeys, ObjectBackend, ScriptName, Throttle, Vault,
+    install, parse_runtime_version, Access, BucketScope, BucketScopes, DbScope, Deadline,
+    HostContext, HostLimits, HttpPolicy, ItemBackend, MasterKeys, ObjectBackend, ScriptName,
+    Throttle, Vault,
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
@@ -349,7 +350,8 @@ fn new_vm(
 ) -> Result<Vm, Error> {
     let http = config.http.expand(&config.vars).map_err(Error::Config)?;
     let lua = Lua::new();
-    let deadline = Instant::now() + limits.timeout;
+    let hard = Instant::now() + limits.timeout;
+    let deadline = Deadline::new(hard);
     lua.set_memory_limit(limits.memory_bytes)
         .map_err(internal)?;
     let script = Arc::new(Mutex::new(script.to_string()));
@@ -369,7 +371,7 @@ fn new_vm(
             http,
             vars: config.vars.clone(),
             limits: HostLimits {
-                deadline,
+                deadline: deadline.clone(),
                 max_http_response_bytes: limits.max_http_response_bytes,
                 max_object_bytes: limits.max_object_bytes,
                 max_stream_bytes: limits.max_stream_bytes,
@@ -381,17 +383,15 @@ fn new_vm(
         },
     )?;
     lua.sandbox(true).map_err(internal)?;
-    lua.set_interrupt(move |_| {
-        if Instant::now() >= deadline {
-            Err(mlua::Error::runtime("__timeout__"))
-        } else {
-            Ok(VmState::Continue)
-        }
+    let watch = deadline;
+    lua.set_interrupt(move |_| match watch.check() {
+        Ok(()) => Ok(VmState::Continue),
+        Err(marker) => Err(mlua::Error::runtime(marker)),
     });
     Ok(Vm {
         lua,
         version,
-        deadline,
+        deadline: hard,
         script,
         buckets: vm_buckets,
     })
@@ -695,7 +695,11 @@ mod tests {
                 .map(|v| Box::new(std::io::Cursor::new(v)) as Box<dyn std::io::Read + Send>))
         }
         fn create(&self, k: &str) -> Result<Box<dyn integraal_wrappers::ObjectWriter>, String> {
-            struct W(Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>, String, Vec<u8>);
+            struct W(
+                Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+                String,
+                Vec<u8>,
+            );
             impl integraal_wrappers::ObjectWriter for W {
                 fn write(&mut self, d: &[u8]) -> Result<(), String> {
                     self.2.extend_from_slice(d);
@@ -1306,7 +1310,9 @@ mod tests {
         let mut out = Vec::new();
         for (name, data) in files {
             out.extend(0x0403_4b50u32.to_le_bytes());
-            out.extend([20, 0, 8, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            out.extend([
+                20, 0, 8, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
             out.extend((name.len() as u16).to_le_bytes());
             out.extend([0, 0]);
             out.extend(name.as_bytes());
@@ -1359,7 +1365,11 @@ mod tests {
             json!({"seen":["a.txt","skipped.bin","dir/b.xml","d/","stored.txt"],"a":"hello+plain","n":50000,"reuse":true})
         );
 
-        let streamed = make_streamed_zip(&[("one", b"first"), ("two", &[7u8; 100_000]), ("three", b"last")]);
+        let streamed = make_streamed_zip(&[
+            ("one", b"first"),
+            ("two", &[7u8; 100_000]),
+            ("three", b"last"),
+        ]);
         let script = r#"return { handle = function()
             local seen = {}
             for entry in native.zip.entries(native.bucket.In.open("z.zip")) do
@@ -1395,7 +1405,9 @@ mod tests {
         use std::io::Read;
         let big = "<r>".to_string() + &"<i>v</i>".repeat(100_000) + "</r>";
         let input = Arc::new(MemBackend::default());
-        input.put("in/acme/src.xml", big.clone().into_bytes()).unwrap();
+        input
+            .put("in/acme/src.xml", big.clone().into_bytes())
+            .unwrap();
         let output = Arc::new(MemBackend::default());
         let e = engine_cfg(
             r#"return { handle = function()
@@ -1440,10 +1452,16 @@ mod tests {
         let mut ar = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         assert_eq!(ar.len(), 4);
         let mut text = String::new();
-        ar.by_name("dir/copy.xml").unwrap().read_to_string(&mut text).unwrap();
+        ar.by_name("dir/copy.xml")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
         assert_eq!(text, big);
         text.clear();
-        ar.by_name("parts.txt").unwrap().read_to_string(&mut text).unwrap();
+        ar.by_name("parts.txt")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
         assert_eq!(text, "ab");
         assert!(ar.by_name("empty/").unwrap().is_dir());
     }
@@ -1491,7 +1509,10 @@ mod tests {
         .with_bucket("In", input, "in/")
         .with_bucket("Out", output.clone(), "out/");
         let res = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
-        assert_eq!(res, json!({"n":2,"small":true,"back":3000,"mem":"hi","bad":false}));
+        assert_eq!(
+            res,
+            json!({"n":2,"small":true,"back":3000,"mem":"hi","bad":false})
+        );
         let mut text = String::new();
         flate2::read::GzDecoder::new(&output.get("out/acme/o.gz").unwrap().unwrap()[..])
             .read_to_string(&mut text)
@@ -1534,8 +1555,12 @@ mod tests {
                 }
             end }"#;
         let mk = |store: Arc<MemBackend>| {
-            engine_cfg(script, Limits::default(), r#"{"buckets":{"Temp":"readwrite"}}"#)
-                .with_bucket("Temp", store, "tmp/")
+            engine_cfg(
+                script,
+                Limits::default(),
+                r#"{"buckets":{"Temp":"readwrite"}}"#,
+            )
+            .with_bucket("Temp", store, "tmp/")
         };
         let first = mk(store.clone())
             .invoke(inv(Trigger::Queue, json!({})))
@@ -1543,8 +1568,14 @@ mod tests {
             .unwrap();
         assert_eq!(first, json!({"bytes": true}));
         // A later invocation, with a fresh engine, picks the file up from the bucket.
-        let out = mk(store).invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
-        assert_eq!(out["top"], json!([{"id":"id1000","amount":1500},{"id":"id999","amount":1498.5}]));
+        let out = mk(store)
+            .invoke(inv(Trigger::Invoke, json!(null)))
+            .await
+            .unwrap();
+        assert_eq!(
+            out["top"],
+            json!([{"id":"id1000","amount":1500},{"id":"id999","amount":1498.5}])
+        );
         assert_eq!(out["n"], json!(1001));
         assert_eq!(out["total"], json!(750_751));
         for k in ["dup_rejected", "attach", "pragma", "bad"] {
@@ -1564,7 +1595,10 @@ mod tests {
                 end)
                 return { full = full }
             end }"#,
-            Limits { max_sql_bytes: 1024 * 1024, ..Limits::default() },
+            Limits {
+                max_sql_bytes: 1024 * 1024,
+                ..Limits::default()
+            },
             "{}",
         );
         assert_eq!(
@@ -1576,12 +1610,104 @@ mod tests {
                 local db = native.sql.open()
                 db:exec("with recursive r(n) as (select 1 union all select n + 1 from r) select count(*) from r")
             end }"#,
-            Limits { timeout: Duration::from_millis(300), ..Limits::default() },
+            Limits {
+                timeout: Duration::from_millis(300),
+                ..Limits::default()
+            },
         );
         assert!(matches!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await,
             Err(Error::Timeout)
         ));
+    }
+
+    #[tokio::test]
+    async fn deadline_blocks_interrupt_and_nest() {
+        let e = engine(
+            r#"return { handle = function()
+                local out = {}
+                -- passes results and errors through when the time is not up
+                out.value = { native.deadline.with(1000, function() return 1, "two" end) }
+                local ok, err = pcall(native.deadline.with, 1000, function() error("boom") end)
+                out.plain_err = tostring(err):find("boom") ~= nil
+
+                -- a loop that outlives its block is interrupted; the caller can catch it
+                local ok1, err1 = pcall(native.deadline.with, 50, function() while true do end end)
+                out.expired = not ok1 and tostring(err1):find("deadline exceeded") ~= nil
+
+                -- a pcall inside the block cannot swallow the interrupt
+                local ok2, err2 = pcall(native.deadline.with, 50, function()
+                    while true do pcall(function() while true do end end) end
+                end)
+                out.swallow = not ok2 and tostring(err2):find("deadline exceeded") ~= nil
+
+                -- nested: the inner block ends first and only it is reported
+                local inner
+                local ok3 = pcall(native.deadline.with, 5000, function()
+                    inner = select(2, pcall(native.deadline.with, 50, function() while true do end end))
+                    return "outer finished"
+                end)
+                out.inner = ok3 and tostring(inner):find("deadline exceeded") ~= nil
+
+                -- nested the other way: the outer block ends first and unwinds past the inner
+                local ok4, err4 = pcall(native.deadline.with, 50, function()
+                    native.deadline.with(5000, function() while true do end end)
+                    return "unreachable"
+                end)
+                out.outer = not ok4 and tostring(err4):find("deadline exceeded") ~= nil
+
+                -- the limit is gone after the block
+                out.after = native.deadline.with(5000, function() return "ok" end)
+                local t = 0
+                for i = 1, 200000 do t = t + 1 end
+                out.free = t
+                return out
+            end }"#,
+            Limits::default(),
+        );
+        let out = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert_eq!(out["value"], json!([1, "two"]));
+        for k in ["plain_err", "expired", "swallow", "inner", "outer"] {
+            assert_eq!(out[k], json!(true), "{k}: {out}");
+        }
+        assert_eq!(out["after"], json!("ok"));
+        assert_eq!(out["free"], json!(200000));
+    }
+
+    #[tokio::test]
+    async fn deadline_blocks_cannot_outlast_the_invocation() {
+        let e = engine(
+            "return { handle = function()
+                pcall(native.deadline.with, 60000, function() while true do end end)
+                return 1
+            end }",
+            Limits {
+                timeout: Duration::from_millis(100),
+                ..Limits::default()
+            },
+        );
+        assert!(matches!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await,
+            Err(Error::Timeout)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deadline_block_interrupts_native_calls() {
+        let e = engine(
+            r#"return { handle = function()
+                local db = native.sql.open()
+                local ok, err = pcall(native.deadline.with, 100, function()
+                    db:exec("with recursive r(n) as (select 1 union all select n + 1 from r) select count(*) from r")
+                end)
+                return { ok = ok, err = tostring(err):find("deadline exceeded") ~= nil }
+            end }"#,
+            Limits::default(),
+        );
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!({"ok": false, "err": true})
+        );
     }
 
     #[tokio::test]

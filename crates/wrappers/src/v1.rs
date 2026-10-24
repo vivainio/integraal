@@ -58,8 +58,16 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     native.set("callback", callback_api(lua, host, budget.clone())?)?;
     native.set("http", http_api(lua, host, budget)?)?;
     native.set(
+        "deadline",
+        crate::deadline::api(lua, host.limits.deadline.clone())?,
+    )?;
+    native.set(
         "xml",
-        crate::xml::api(lua, host.limits.max_stream_bytes, host.limits.deadline)?,
+        crate::xml::api(
+            lua,
+            host.limits.max_stream_bytes,
+            host.limits.deadline.clone(),
+        )?,
     )?;
     native.set(
         "zip",
@@ -67,7 +75,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             lua,
             host.limits.max_stream_bytes,
             host.limits.max_object_bytes,
-            host.limits.deadline,
+            host.limits.deadline.clone(),
         )?,
     )?;
     native.set(
@@ -76,7 +84,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             lua,
             host.limits.max_stream_bytes,
             host.limits.max_object_bytes,
-            host.limits.deadline,
+            host.limits.deadline.clone(),
         )?,
     )?;
     native.set(
@@ -85,7 +93,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             lua,
             host.limits.max_sql_bytes,
             host.limits.max_object_bytes,
-            host.limits.deadline,
+            host.limits.deadline.clone(),
         )?,
     )?;
     native.set(
@@ -111,7 +119,10 @@ fn buckets_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Resu
         let scope = scope
             .clone()
             .with_max_object_bytes(host.limits.max_object_bytes);
-        data.set(name.as_str(), bucket_api(lua, scope, budget.clone(), &host.limits)?)?;
+        data.set(
+            name.as_str(),
+            bucket_api(lua, scope, budget.clone(), &host.limits)?,
+        )?;
     }
     let mt = lua.create_table()?;
     mt.set(
@@ -171,12 +182,12 @@ fn bucket_api(
 
     // Streaming upload; the object appears when the sink is closed.
     let n = need.clone();
-    let (max_stream, deadline) = (limits.max_stream_bytes, limits.deadline);
+    let (max_stream, deadline) = (limits.max_stream_bytes, limits.deadline.clone());
     bucket.set(
         "create",
         lua.create_function(move |lua, key: String| {
             let w = n()?.create(&key).map_err(err)?;
-            lua.create_userdata(crate::sink::Sink::new(w, max_stream, deadline))
+            lua.create_userdata(crate::sink::Sink::new(w, max_stream, deadline.clone()))
         })?,
     )?;
 
@@ -373,9 +384,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                            stream: bool,
                            expand: crate::vault::Expand| {
         budget.take_http().map_err(mlua::Error::runtime)?;
-        let remaining = budget
-            .deadline
-            .saturating_duration_since(std::time::Instant::now());
+        let remaining = budget.deadline.remaining();
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .max_redirects(0) // a redirect could leave the allowlist; scripts follow explicitly
             .http_status_as_error(false)
@@ -455,7 +464,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
         // Held until the response is fully read (or, when streaming, until the stream is dropped).
         let slot = throttle
             .as_ref()
-            .map(|t| t.acquire(&url, budget.deadline))
+            .map(|t| t.acquire(&url, budget.deadline.effective()))
             .transpose()
             .map_err(mlua::Error::runtime)?;
         let mut req = ureq::http::Request::builder()

@@ -6,9 +6,9 @@
 use std::{
     io::{self, BufReader, Read, Write},
     sync::Mutex,
-    time::Instant,
 };
 
+use crate::Deadline;
 use flate2::{bufread::MultiGzDecoder, write::GzEncoder, Compression};
 use mlua::{AnyUserData, Lua, LuaString, MetaMethod, Table, UserData, UserDataMethods, Value};
 
@@ -110,7 +110,7 @@ pub fn api(
     lua: &Lua,
     max_stream_bytes: u64,
     max_object_bytes: usize,
-    deadline: Instant,
+    deadline: Deadline,
 ) -> mlua::Result<Table> {
     let gz = lua.create_table()?;
 
@@ -122,7 +122,7 @@ pub fn api(
             let input = BufReader::new(Limited {
                 inner: r,
                 left: max_stream_bytes,
-                deadline,
+                deadline: deadline.clone(),
             });
             let dec = Capped {
                 inner: MultiGzDecoder::new(input),
@@ -160,7 +160,9 @@ pub fn api(
                 .map_err(mlua::Error::external)?;
             let out = enc.finish().map_err(mlua::Error::external)?;
             if out.len() > max_object_bytes {
-                return Err(mlua::Error::runtime("gzip output exceeds the object size limit"));
+                return Err(mlua::Error::runtime(
+                    "gzip output exceeds the object size limit",
+                ));
             }
             lua.create_string(&out)
         })?,

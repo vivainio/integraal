@@ -8,16 +8,14 @@
 use std::{
     io::Read,
     sync::Mutex,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::Deadline;
 use flate2::{Compress, Compression, FlushCompress, Status};
 use mlua::{Lua, LuaString, MetaMethod, Table, UserData, UserDataMethods, Value};
 
-use crate::{
-    sink::Sink,
-    xml::take_stream,
-};
+use crate::{sink::Sink, xml::take_stream};
 
 const SIG_LOCAL: u32 = 0x0403_4b50;
 const SIG_CENTRAL: u32 = 0x0201_4b50;
@@ -71,7 +69,10 @@ impl Writer {
             Target::Sink(s) => s.write_bytes(data)?,
             Target::Mem { buf, cap } => {
                 if buf.len() + data.len() > *cap {
-                    return Err("zip exceeds the object size limit; write into a bucket sink to stream it".into());
+                    return Err(
+                        "zip exceeds the object size limit; write into a bucket sink to stream it"
+                            .into(),
+                    );
                 }
                 buf.extend_from_slice(data);
             }
@@ -130,7 +131,10 @@ impl Writer {
 
     fn write(&mut self, mut data: &[u8]) -> Result<(), String> {
         self.live()?;
-        let mut cur = self.cur.take().ok_or("no open zip entry; call add(name) first")?;
+        let mut cur = self
+            .cur
+            .take()
+            .ok_or("no open zip entry; call add(name) first")?;
         cur.crc.update(data);
         cur.size += data.len() as u64;
         let mut out = vec![0u8; CHUNK];
@@ -293,7 +297,7 @@ fn dos_now() -> (u16, u16) {
 
 struct ZipWriter {
     w: Mutex<Writer>,
-    deadline: Instant,
+    deadline: Deadline,
 }
 
 impl ZipWriter {
@@ -306,51 +310,59 @@ impl UserData for ZipWriter {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // `add(name)` opens an entry for `write`; `add(name, data)` writes a whole entry from a
         // string or a stream and closes it.
-        methods.add_method("add", |_, this, (name, content): (String, Option<Value>)| {
-            this.with(|w| w.begin(&name))?;
-            let whole = !matches!(content, None | Some(Value::Nil));
-            match content {
-                None | Some(Value::Nil) => {}
-                Some(Value::String(s)) => this.with(|w| w.write(&s.as_bytes()))?,
-                Some(Value::UserData(ud)) => {
-                    let mut r: Box<dyn Read + Send> = take_stream(&ud)?;
-                    let mut buf = vec![0u8; CHUNK];
-                    loop {
-                        if Instant::now() >= this.deadline {
-                            return Err(mlua::Error::runtime("__timeout__"));
+        methods.add_method(
+            "add",
+            |_, this, (name, content): (String, Option<Value>)| {
+                this.with(|w| w.begin(&name))?;
+                let whole = !matches!(content, None | Some(Value::Nil));
+                match content {
+                    None | Some(Value::Nil) => {}
+                    Some(Value::String(s)) => this.with(|w| w.write(&s.as_bytes()))?,
+                    Some(Value::UserData(ud)) => {
+                        let mut r: Box<dyn Read + Send> = take_stream(&ud)?;
+                        let mut buf = vec![0u8; CHUNK];
+                        loop {
+                            this.deadline.check().map_err(mlua::Error::runtime)?;
+                            let n = r.read(&mut buf).map_err(mlua::Error::external)?;
+                            if n == 0 {
+                                break;
+                            }
+                            this.with(|w| w.write(&buf[..n]))?;
                         }
-                        let n = r.read(&mut buf).map_err(mlua::Error::external)?;
-                        if n == 0 {
-                            break;
-                        }
-                        this.with(|w| w.write(&buf[..n]))?;
+                    }
+                    Some(_) => {
+                        return Err(mlua::Error::runtime(
+                            "zip entry content must be a string or a stream",
+                        ))
                     }
                 }
-                Some(_) => {
-                    return Err(mlua::Error::runtime(
-                        "zip entry content must be a string or a stream",
-                    ))
+                if whole {
+                    this.with(|w| w.end_entry())?;
                 }
-            }
-            if whole {
-                this.with(|w| w.end_entry())?;
-            }
-            Ok(())
-        });
+                Ok(())
+            },
+        );
         methods.add_method("write", |_, this, data: LuaString| {
             this.with(|w| w.write(&data.as_bytes()))
         });
         // Writes the central directory. Returns the archive for in-memory writers; with a sink,
         // close the sink afterwards to commit the upload.
-        methods.add_method("finish", |lua, this, ()| match this.with(|w| w.finish())? {
-            Some(bytes) => Ok(Value::String(lua.create_string(&bytes)?)),
-            None => Ok(Value::Nil),
+        methods.add_method("finish", |lua, this, ()| {
+            match this.with(|w| w.finish())? {
+                Some(bytes) => Ok(Value::String(lua.create_string(&bytes)?)),
+                None => Ok(Value::Nil),
+            }
         });
         methods.add_meta_method(MetaMethod::ToString, |_, _, ()| Ok("ZipWriter"));
     }
 }
 
-pub fn api(lua: &Lua, zip: &Table, max_object_bytes: usize, deadline: Instant) -> mlua::Result<()> {
+pub fn api(
+    lua: &Lua,
+    zip: &Table,
+    max_object_bytes: usize,
+    deadline: Deadline,
+) -> mlua::Result<()> {
     zip.set(
         "writer",
         lua.create_function(move |_, sink: Option<mlua::AnyUserData>| {
@@ -372,7 +384,7 @@ pub fn api(lua: &Lua, zip: &Table, max_object_bytes: usize, deadline: Instant) -
                     cur: None,
                     finished: false,
                 }),
-                deadline,
+                deadline: deadline.clone(),
             })
         })?,
     )
