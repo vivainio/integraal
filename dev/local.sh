@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Local end-to-end run against roto (https://github.com/vivainio/roto).
 # Prereq: `uv tool install roto-aws` and `roto-server --port 5070` running.
+# For dev/alb.sh also pass `--lua-services <roto>/services --alb-port 8888` to roto-server.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Only the AWS SDK variables are environment; everything else is in dev/local.json.
-export AWS_ENDPOINT_URL=http://localhost:5070 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
+# AWS_DEFAULT_REGION is for the awscli v1 that uvx installs, which ignores AWS_REGION.
+export AWS_ENDPOINT_URL=http://localhost:5070 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
 DB_TABLE=integraal
 
 uvx --from awscli aws s3 mb s3://scripts
