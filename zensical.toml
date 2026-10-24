@@ -29,6 +29,7 @@ nav = [
     { "Queue" = "queue.md" },
     { "Callbacks" = "callbacks.md" },
     { "Batch jobs" = "batch.md" },
+    { "Barriers" = "barrier.md" },
     { "Crypto" = "crypto.md" },
     { "Outbound HTTP" = "http.md" },
     { "Streams and XML" = "streams-xml.md" },

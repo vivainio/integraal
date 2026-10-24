@@ -9,8 +9,9 @@
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
 //! under the tenant's own partition keys, each expiring after a week), and `native.crypto`
-//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets), and `native.queue` (send new work to the job queue).
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets), and `native.queue` (send new work to the job queue), and `native.barrier` (wait for a known set of acknowledgements, then continue once).
 
+mod barrier;
 mod batch;
 mod bucket;
 mod crypto;
@@ -34,6 +35,7 @@ mod xml_writer;
 mod zip;
 mod zip_writer;
 
+pub use barrier::{AckOutcome, Barriers, CreateSpec, MAX_BARRIER_MEMBERS};
 pub use batch::{fail_inflight_http, BATCH_BUCKET};
 pub use bucket::{
     Access, BucketScope, BucketScopes, ObjectBackend, ObjectWriter, PresignMethod, MAX_LIST_KEYS,

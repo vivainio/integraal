@@ -148,7 +148,7 @@ impl Vault {
     pub fn list(&self, tenant: &str) -> Result<Vec<VaultEntry>, String> {
         check_tenant(tenant)?;
         self.backend
-            .query(&pk(tenant), "", 1000)?
+            .query(&pk(tenant), "", "", 1000)?
             .into_iter()
             .map(|i| {
                 let s: Stored = serde_json::from_str(&i.value).map_err(|e| e.to_string())?;
@@ -164,7 +164,7 @@ impl Vault {
     /// Re-seals every entry of the tenant that is not under the active master key; returns how many.
     pub fn rekey(&self, tenant: &str) -> Result<usize, String> {
         check_tenant(tenant)?;
-        let items = self.backend.query(&pk(tenant), "", MAX_ROWS)?;
+        let items = self.backend.query(&pk(tenant), "", "", MAX_ROWS)?;
         if items.len() >= MAX_ROWS {
             return Err(format!("tenant {tenant:?} has {MAX_ROWS} or more vault entries; rotation cannot cover them"));
         }
@@ -191,7 +191,7 @@ impl Vault {
 
     /// Tenants that have stored secrets (they may since have deleted them all).
     pub fn tenants(&self) -> Result<Vec<String>, String> {
-        let rows = self.backend.query(INDEX_PK, "", MAX_ROWS)?;
+        let rows = self.backend.query(INDEX_PK, "", "", MAX_ROWS)?;
         if rows.len() >= MAX_ROWS {
             return Err(format!(
                 "{MAX_ROWS} or more tenants use the vault; rotation cannot cover them"
@@ -420,7 +420,8 @@ mod tests {
             "svc.pass" => Ok(b"p:w".to_vec()),
             _ => Err("no".to_string()),
         };
-        let t = basic_auth_token("{{vault:svc.user}}", "{{vault:svc.pass}}", true, resolve).unwrap();
+        let t =
+            basic_auth_token("{{vault:svc.user}}", "{{vault:svc.pass}}", true, resolve).unwrap();
         assert_eq!(t, "YWxpY2U6cDp3"); // alice:p:w
         let t = basic_auth_token("bob", "{{vault:svc.pass}}", false, resolve).unwrap();
         assert_eq!(t, "Ym9iOnt7dmF1bHQ6c3ZjLnBhc3N9fQ==");
@@ -460,13 +461,19 @@ mod tests {
         fn add(&self, _: &str, _: &str, _: i64, _: u64, _: u64) -> Result<i64, String> {
             unimplemented!()
         }
-        fn query(&self, pk: &str, prefix: &str, limit: usize) -> Result<Vec<Item>, String> {
+        fn query(
+            &self,
+            pk: &str,
+            prefix: &str,
+            after: &str,
+            limit: usize,
+        ) -> Result<Vec<Item>, String> {
             Ok(self
                 .0
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|((p, s), _)| p == pk && s.starts_with(prefix))
+                .filter(|((p, s), _)| p == pk && s.starts_with(prefix) && s.as_str() > after)
                 .map(|(_, i)| i.clone())
                 .take(limit)
                 .collect())

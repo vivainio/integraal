@@ -12,6 +12,13 @@ deletes are implemented; the rest of the pipeline is not.
   `native.dead(reason)`, `native.drop()`; `ctx.attempt` for backoff.
 - Idempotency keyed on `(key, etag, script)`; per-tenant event-rate and concurrency caps.
 
+## Barriers
+- A timer trigger that runs a script when a barrier's `deadline_s` passes unresolved (today
+  `native.barrier.status` reports `overdue`, but something has to ask).
+- Growing a barrier after `create` (`add` and a `seal`), for work lists larger than one invocation's
+  `max_data_ops`.
+- `reconcile`: ack members whose bucket object already exists, to recover a lost notification.
+
 ## Engine
 - Cache compiled Luau bytecode per `(script hash, runtime)`.
 - Per-script limit overrides; per-tenant concurrency caps on Fargate.

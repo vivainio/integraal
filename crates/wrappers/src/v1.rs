@@ -55,10 +55,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     native.set("time", time)?;
 
     native.set("bucket", buckets_api(lua, host, budget.clone())?)?;
-    native.set(
-        "batch",
-        crate::batch::api(lua, host, budget.clone())?,
-    )?;
+    native.set("batch", crate::batch::api(lua, host, budget.clone())?)?;
     native.set(
         "ndjson",
         crate::ndjson::api(
@@ -74,6 +71,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
         crate::queue::api(lua, &host.tenant, host.queue.clone(), budget.clone())?,
     )?;
     native.set("callback", callback_api(lua, host, budget.clone())?)?;
+    native.set("barrier", crate::barrier::api(lua, host, budget.clone())?)?;
     native.set(
         "lock",
         crate::lock::api(

@@ -16,7 +16,7 @@ Every field is optional and unknown keys are rejected (so typos can't silently l
 | `max_stream_mb` | 4096 | 4096 | Total bytes one stream parse may read. |
 | `max_sql_mb` | 64 | 512 | Size of one `native.sql` database (and the largest file `native.sql.load` accepts). |
 | `max_http_requests` | 100 | 1000 | `native.http` calls per invocation. |
-| `max_data_ops` | 1000 | 10 000 | `native.bucket`, `native.db`, `native.callback` and `db`-scope `native.lock` calls per invocation, plus one per 10 messages of `native.queue.send`. |
+| `max_data_ops` | 1000 | 10 000 | `native.bucket`, `native.db`, `native.callback`, `native.barrier` and `db`-scope `native.lock` calls per invocation, plus one per 10 messages of `native.queue.send`. |
 | `max_http_timeout_ms` | 10 000 | 30 000 | Per HTTP request timeout. |
 
 Requested values are **clamped to the operator ceiling**; a tenant can never exceed it. Exceeding a

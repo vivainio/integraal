@@ -163,6 +163,35 @@ flowchart LR
 Split work into parts that run in parallel, then do one final step when every part is done.
 There are two ways, depending on who does the parallel work.
 
+### Acknowledgements arrive from outside
+You put documents in a bucket, the other end acks them over any channel (S3 marker objects, queue
+messages, a callback), and something must happen when the last ack is in. That is a
+[barrier](barrier.md): the work list is the set of bucket keys you sent, each ack records an outcome,
+and the ack that resolves the last member sends the continuation.
+
+```mermaid
+flowchart LR
+    S["sender<br/>barrier.create, bucket.In.put x N"] --> P(("partner"))
+    P -->|"ack: S3 object, queue message, callback"| R["router → ack script<br/>barrier.ack(id, key, outcome)"]
+    R -->|"last member resolved"| F["continuation<br/>barrier.hydrate"]
+    R -. not yet .-> X[end]
+```
+
+```lua
+-- send
+local id = native.barrier.create({ id = batch, members = names, continue_with = "finalize",
+                                   state = { ref = ev.ref }, deadline_s = 3600 })
+for _, name in names do native.bucket.In.put(batch .. "/" .. name, docs[name]) end
+
+-- ack (routed from an S3 event on "Acks/<batch>/<name>.json")
+native.barrier.ack(batch, name, { ok = true })
+
+-- finalize
+local b = native.barrier.hydrate(ev)
+if not b then return end
+for member, outcome in b:results() do ... end
+```
+
 ### Partner does the parallel work
 One [batch job](batch.md) with several independent queries: the partner runs them however it likes,
 and `done.json` is the barrier. The continuation sees every result at once.
@@ -204,6 +233,10 @@ if native.db.put_if_absent("flow-seen", ev.flow .. "/" .. ev.shard, true) then  
 end
 ```
 
+For a known list of members (documents you sent, files you expect back) use a
+[barrier](barrier.md) instead of this recipe: it records an outcome per member, can say which are
+still missing, and has no counter that a crash can leave short.
+
 Two things the recipe does not do for you:
 
 - **A shard that fails for good.** On its last attempt (`ctx.attempt` equal to the queue's
@@ -233,4 +266,5 @@ Many parts at once can flood the queue for everyone else; per-tenant concurrency
 | Crunch large files | Streams, zip, gzip, SQL |
 | Avoid concurrent runs | Locks |
 | Split work and join the results | Scatter and gather (`queue.send` plus `db.add`), or one batch job with several queries |
+| Do something when every document has been acked | Barrier |
 | Run something once despite redelivery | `db.put_if_absent` |

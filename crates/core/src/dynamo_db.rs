@@ -255,7 +255,13 @@ impl ItemBackend for DynamoBackend {
     }
 
     #[tracing::instrument(name = "dynamodb.query", skip_all, fields(table = %self.table))]
-    fn query(&self, pk: &str, sk_prefix: &str, limit: usize) -> Result<Vec<Item>, String> {
+    fn query(
+        &self,
+        pk: &str,
+        sk_prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<Item>, String> {
         self.handle.block_on(async {
             let mut q = self
                 .client
@@ -271,6 +277,11 @@ impl ItemBackend for DynamoBackend {
                     .expression_attribute_values(":pk", s(pk))
                     .expression_attribute_values(":p", s(sk_prefix))
             };
+            if !after.is_empty() {
+                q = q
+                    .exclusive_start_key("pk", s(pk))
+                    .exclusive_start_key("sk", s(after));
+            }
             let out = q.send().await.map_err(|e| e.to_string())?;
             Ok(out.items().iter().filter_map(parse).collect())
         })

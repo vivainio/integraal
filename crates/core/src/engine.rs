@@ -1342,11 +1342,12 @@ mod tests {
             &self,
             pk: &str,
             p: &str,
+            after: &str,
             limit: usize,
         ) -> Result<Vec<integraal_wrappers::Item>, String> {
             let m = self.0.lock().unwrap();
             Ok(m.iter()
-                .filter(|((k, sk), _)| k == pk && sk.starts_with(p))
+                .filter(|((k, sk), _)| k == pk && sk.starts_with(p) && sk.as_str() > after)
                 .take(limit)
                 .map(|(_, i)| i.clone())
                 .collect())
@@ -1452,6 +1453,66 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn barrier_collects_acks_and_continues_once() {
+        let src = r#"return { handle = function(ctx, ev)
+            if ev.step == "create" then
+                return native.barrier.create({ id = "b1", members = { "a.xml", "b.xml" },
+                    continue_with = "finalize", state = { batch = 7 } })
+            elseif ev.step == "ack" then
+                local r = native.barrier.ack("b1", ev.member, ev.outcome)
+                return { duplicate = r.duplicate, complete = r.complete, dispatched = r.dispatched }
+            elseif ev.step == "pending" then
+                return native.barrier.pending("b1")
+            else
+                local b = native.barrier.hydrate({ barrier = "b1" })
+                if not b then return "not complete" end
+                local seen = {}
+                for member, outcome in b:results() do
+                    table.insert(seen, member .. "=" .. tostring(outcome.ok) .. ":" .. tostring(outcome.error))
+                end
+                return { total = b.total, batch = b.state.batch, seen = seen, failed = #b:failures(),
+                         unknown = pcall(native.barrier.ack, "b1", "zzz") }
+            end
+        end }"#;
+        let backend = Arc::new(MemItems::default());
+        let queue = Arc::new(MemQueue::default());
+        let e = engine_cfg(src, Limits::default(), r#"{"queue":true}"#)
+            .with_db(backend.clone())
+            .with_queue(queue.clone());
+        let call = |ev: serde_json::Value| e.invoke(inv(Trigger::Queue, ev));
+        assert_eq!(call(json!({"step":"create"})).await.unwrap(), json!("b1"));
+        assert_eq!(
+            call(json!({"step":"done"})).await.unwrap(),
+            json!("not complete")
+        );
+        assert_eq!(
+            call(json!({"step":"ack","member":"b.xml","outcome":{"ok":false,"error":"schema"}}))
+                .await
+                .unwrap(),
+            json!({"duplicate":false,"complete":false,"dispatched":false})
+        );
+        assert_eq!(
+            call(json!({"step":"pending"})).await.unwrap(),
+            json!(["a.xml"])
+        );
+        assert_eq!(
+            call(json!({"step":"ack","member":"a.xml"})).await.unwrap(),
+            json!({"duplicate":false,"complete":true,"dispatched":true})
+        );
+        assert_eq!(
+            *queue.0.lock().unwrap(),
+            vec![(
+                json!({"tenant":"acme","script":"finalize","event":{"barrier":"b1"}}),
+                0
+            )]
+        );
+        assert_eq!(
+            call(json!({"step":"done"})).await.unwrap(),
+            json!({"total":2,"batch":7,"seen":["a.xml=true:nil","b.xml=false:schema"],"failed":1,"unknown":false})
+        );
     }
 
     #[tokio::test]
@@ -2995,9 +3056,15 @@ mod tests {
         submit.trigger = Trigger::Invoke;
         let started = std::time::Instant::now();
         assert_eq!(e.invoke(submit).await.unwrap(), json!("h1"));
-        assert!(started.elapsed() < Duration::from_millis(700), "submit waited for the response");
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "submit waited for the response"
+        );
         // The request itself is never written; only the state is.
-        assert!(backend.get("data/acme/jobs/h1/request.json").unwrap().is_none());
+        assert!(backend
+            .get("data/acme/jobs/h1/request.json")
+            .unwrap()
+            .is_none());
         assert!(backend.get("data/acme/state/h1.json").unwrap().is_some());
 
         let done = "data/acme/jobs/h1/done.json";
@@ -3039,7 +3106,13 @@ mod tests {
         let mut after = msg(json!({"bucket": "$batch", "key": "jobs/h1/done.json"}));
         after.script = Some("after".into());
         let out = e.invoke(after).await.unwrap();
-        assert!(out["failed"].as_str().unwrap().contains("http request failed"), "{out}");
+        assert!(
+            out["failed"]
+                .as_str()
+                .unwrap()
+                .contains("http request failed"),
+            "{out}"
+        );
 
         // Without the Fargate server's background executor, job:http is refused.
         let (e, _) = http_batch_world(port, false);
@@ -3047,7 +3120,10 @@ mod tests {
         submit.script = Some("start".into());
         submit.trigger = Trigger::Invoke;
         let err = e.invoke(submit).await.unwrap_err().to_string();
-        assert!(err.contains("only available on the Fargate server"), "{err}");
+        assert!(
+            err.contains("only available on the Fargate server"),
+            "{err}"
+        );
         // A URL outside the allowlist fails at submit, in the script.
         let (e, _) = http_batch_world(port, true);
         let mut submit = msg(json!({"url": "https://elsewhere.example/x"}));

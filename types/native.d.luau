@@ -127,6 +127,19 @@ declare extern type BatchResult with
     keys: (self) -> { { bucket: string, key: string } }
 end
 
+-- What an ack records for a member. `ok = false` still resolves the member.
+type BarrierOutcome = { ok: boolean, error: string?, result: any }
+
+declare extern type BarrierResult with
+    id: string
+    total: number
+    state: any
+    -- Every member and its recorded outcome, in member order.
+    results: (self) -> () -> (string, BarrierOutcome)?
+    -- The members whose outcome is `ok = false`.
+    failures: (self) -> { { member: string, error: string?, result: any } }
+end
+
 declare extern type HttpResponse with
     status: number
     headers: { [string]: string }
@@ -230,6 +243,18 @@ declare native: {
         hydrate: (event: { [string]: any }, opts: { allow_failure: boolean? }?) -> BatchResult?,
         -- For a router: nil unless `event` is a done.json from the batch bucket.
         route: (event: { [string]: any }) -> { job: string, script: string?, event: { [string]: any } }?,
+    },
+    barrier: {
+        -- Registers the members to wait for (at most 10 000); returns the id (generated unless given).
+        create: (opts: { id: string?, members: { string }, continue_with: string?, state: any, deadline_s: number? }) -> string,
+        -- Records a member's outcome (the first ack wins). `complete` once every member is resolved;
+        -- `dispatched` when this call sent the continuation.
+        ack: (id: string, member: string, outcome: { ok: boolean?, error: string?, result: any }?) -> { duplicate: boolean, complete: boolean, dispatched: boolean },
+        -- Up to `limit` (default and maximum 100) members still waiting, in name order.
+        pending: (id: string, limit: number?) -> { string },
+        status: (id: string) -> { id: string, total: number, ready: boolean, complete: boolean, dispatched: boolean, overdue: boolean, due_s: number? },
+        -- In the continuation: nil if the barrier is not complete or has expired.
+        hydrate: (event: { [string]: any }) -> BarrierResult?,
     },
     ndjson: {
         rows: (source: string | ByteStream) -> () -> any?,

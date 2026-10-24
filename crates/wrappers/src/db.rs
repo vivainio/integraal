@@ -39,8 +39,15 @@ pub trait ItemBackend: Send + Sync {
     /// `delta` if it is absent or expired (`ttl <= now`). Every call sets the item's expiry to `ttl`.
     /// The item then reads back (`get`, `query`) with the number as its value.
     fn add(&self, pk: &str, sk: &str, delta: i64, ttl: u64, now: u64) -> Result<i64, String>;
-    /// Items under `pk` whose sort key starts with `sk_prefix`, ascending by sort key, at most `limit`.
-    fn query(&self, pk: &str, sk_prefix: &str, limit: usize) -> Result<Vec<Item>, String>;
+    /// Items under `pk` whose sort key starts with `sk_prefix` and sorts after `after` (`""` starts at
+    /// the beginning), ascending by sort key, at most `limit`.
+    fn query(
+        &self,
+        pk: &str,
+        sk_prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<Item>, String>;
 }
 
 /// A backend confined to partition keys starting with `TEN#<tenant>`. Scripts supply
@@ -53,14 +60,14 @@ pub struct DbScope {
     signer: Arc<CallbackSigner>,
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-fn check(what: &str, v: &str, allow_empty: bool) -> Result<(), String> {
+pub(crate) fn check(what: &str, v: &str, allow_empty: bool) -> Result<(), String> {
     let bad =
         (v.is_empty() && !allow_empty) || v.len() > MAX_KEY_LEN || v.chars().any(char::is_control);
     if bad {
@@ -85,7 +92,7 @@ impl DbScope {
     }
 
     /// DynamoDB deletes expired items lazily (up to 48h late), so reads drop anything already expired.
-    fn live(item: Item) -> Option<Item> {
+    pub(crate) fn live(item: Item) -> Option<Item> {
         (item.ttl > now_secs()).then_some(item)
     }
 
@@ -155,12 +162,27 @@ impl DbScope {
     ) -> Result<Vec<(String, String)>, String> {
         check("sk_prefix", sk_prefix, true)?;
         let limit = limit.unwrap_or(MAX_QUERY_ITEMS).clamp(1, MAX_QUERY_ITEMS);
-        let items = self.backend.query(&self.full_pk(pk)?, sk_prefix, limit)?;
+        let items = self
+            .backend
+            .query(&self.full_pk(pk)?, sk_prefix, "", limit)?;
         Ok(items
             .into_iter()
             .filter_map(Self::live)
             .map(|i| (i.sk, i.value))
             .collect())
+    }
+}
+
+impl DbScope {
+    /// The partition holding a barrier. Like locks, it contains a control character, so scripts cannot
+    /// read or forge barrier rows through `native.db`.
+    pub(crate) fn barrier_pk(&self, id: &str) -> Result<String, String> {
+        check("barrier id", id, false)?;
+        Ok(format!("TEN#{}#\u{1}barrier#{id}", self.tenant))
+    }
+
+    pub(crate) fn raw(&self) -> &Arc<dyn ItemBackend> {
+        &self.backend
     }
 }
 
