@@ -23,7 +23,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  # The roto AWS simulator is a PyPI package; 0.10.1 is the first release with the `runtime` Lambda executor.
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -31,5 +30,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v6
-      - run: uv tool install 'roto-aws>=0.10.1'
       - run: uv run --project e2e pytest e2e -v

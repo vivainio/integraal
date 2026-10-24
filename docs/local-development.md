@@ -31,7 +31,7 @@ The engine tests use in-memory stores, so they need no AWS or simulator.
 ### Mega integration test
 
 `e2e/` holds a black-box test that exercises every [integration pattern](patterns.md) against a real
-`integraal-server`, with roto standing in for AWS. It needs `roto-server` 0.10.1 or later on your `PATH` (`uv tool install 'roto-aws>=0.10.1'`):
+`integraal-server`, with roto standing in for AWS. The test environment installs the roto simulator itself (pinned in `e2e/pyproject.toml`), so there is nothing else to set up:
 
 ```bash
 uv run --project e2e pytest e2e
@@ -42,7 +42,7 @@ stands in for the hypothetical system that integraal acts as the integration lay
 back-office or partner system that integraal calls, that sends callbacks, and that works batch jobs.
 The Lambda entrypoints (`lambda`, `ingress`, `webhook`) run as the real `bootstrap` binaries, warm,
 behind roto's Lambda Runtime API (its `runtime` executor), so direct invoke, intake placement and
-the callback webhook are tested as deployed. Set `ROTO_SERVER` to use a roto build that is not on your `PATH`.
+the callback webhook are tested as deployed. Set `ROTO_SERVER` to run against a different roto build.
 Megalith records every request it gets and answers from a canned table, so tests can assert on what
 integraal sent (headers, bodies, concurrency) as well as on what came back.
 
