@@ -7,8 +7,8 @@ use std::{
 use integraal_loader::{CachedLoader, LoadError, ScriptKey};
 use integraal_wrappers::{
     install, parse_runtime_version, Access, BucketScope, BucketScopes, DbScope, Deadline,
-    HostContext, HostLimits, HttpPolicy, ItemBackend, MasterKeys, ObjectBackend, ScriptName,
-    Throttle, Vault,
+    HostContext, HostLimits, HttpPolicy, ItemBackend, MasterKeys, ObjectBackend, QueueBackend,
+    ScriptName, Throttle, Vault,
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
@@ -137,6 +137,9 @@ pub struct TenantConfig {
     /// Absent = no access. Names must match the deployment's `buckets.map`.
     #[serde(default)]
     pub buckets: HashMap<String, Access>,
+    /// Allows `native.queue.send` (new work for this tenant on the deployment's job queue).
+    #[serde(default)]
+    pub queue: bool,
     /// Allows `native.batch` (jobs handed to a partner through the deployment's batch bucket).
     #[serde(default)]
     pub batch: bool,
@@ -170,6 +173,7 @@ struct Call {
     script: String,
     trigger: Trigger,
     event: serde_json::Value,
+    attempt: u32,
 }
 
 #[derive(Clone)]
@@ -186,6 +190,7 @@ pub struct Engine {
         Arc<integraal_wrappers::CallbackSigner>,
     )>,
     callback_base_url: Option<String>,
+    queue: Option<Arc<dyn QueueBackend>>,
     throttle: Option<Arc<Throttle>>,
     master_keys: Option<MasterKeys>,
 }
@@ -197,6 +202,7 @@ pub(crate) struct Services {
     batch: Option<BucketScope>,
     db: Option<DbScope>,
     cb_url: Option<String>,
+    queue: Option<Arc<dyn QueueBackend>>,
     throttle: Option<Arc<Throttle>>,
     master_keys: Option<MasterKeys>,
     vault: Option<Arc<Vault>>,
@@ -212,6 +218,7 @@ impl Engine {
             batch: None,
             db: None,
             callback_base_url: None,
+            queue: None,
             throttle: None,
             master_keys: None,
         }
@@ -257,6 +264,12 @@ impl Engine {
     /// Enables `native.callback` (requires `with_db`): callback URLs are `<base_url>/cb/<tenant>/<id>`.
     pub fn with_callback_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.callback_base_url = Some(base_url.into());
+        self
+    }
+
+    /// Enables `native.queue` for tenants whose config sets `"queue": true`: `send` delivers to this queue.
+    pub fn with_queue(mut self, backend: Arc<dyn QueueBackend>) -> Self {
+        self.queue = Some(backend);
         self
     }
 
@@ -334,11 +347,19 @@ impl Engine {
             .db
             .as_ref()
             .map(|(b, s)| DbScope::new(b.clone(), inv.tenant.as_str()).with_signer(s.clone()));
+        let queue = if config.queue {
+            Some(self.queue.clone().ok_or_else(|| {
+                Error::Config("the job queue is not configured on this deployment".into())
+            })?)
+        } else {
+            None
+        };
         let svc = Services {
             buckets,
             batch,
             db,
             cb_url: self.callback_base_url.clone(),
+            queue,
             throttle: self.throttle.clone(),
             master_keys: self.master_keys.clone(),
             vault: self.vault().map(Arc::new),
@@ -354,6 +375,7 @@ impl Engine {
                     script,
                     trigger: inv.trigger,
                     event: inv.event,
+                    attempt: inv.attempt,
                 };
                 tokio::task::spawn_blocking(move || {
                     run(&source.source, &call, &limits, &svc, &config)
@@ -395,6 +417,7 @@ impl Services {
             batch: None,
             db: None,
             cb_url: None,
+            queue: None,
             throttle: None,
             master_keys: None,
             vault: None,
@@ -437,6 +460,7 @@ pub(crate) fn new_vm(
             buckets: svc.buckets.clone(),
             batch: svc.batch.clone(),
             db: svc.db.clone(),
+            queue: svc.queue.clone(),
             callback_base_url: svc.cb_url.clone(),
             throttle: svc.throttle.clone(),
             master_keys: svc.master_keys.clone(),
@@ -496,6 +520,7 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
     ctx.set("trigger", format!("{:?}", call.trigger).to_lowercase())
         .map_err(internal)?;
     ctx.set("runtime", vm.version).map_err(internal)?;
+    ctx.set("attempt", call.attempt.max(1)).map_err(internal)?;
 
     let event = lua.to_value(&call.event).map_err(internal)?;
     let out: mlua::Value = handler
@@ -607,6 +632,7 @@ fn run_routed(
         script: router,
         trigger: Trigger::Route,
         event: inv.event.clone(),
+        attempt: inv.attempt,
     };
     let decision = call_in_vm(&vm, router_src, &route_call)?;
 
@@ -640,6 +666,7 @@ fn run_routed(
         script,
         trigger: inv.trigger,
         event,
+        attempt: inv.attempt,
     };
 
     if parse_runtime_version(&target.source)? == vm.version {
@@ -706,6 +733,7 @@ mod tests {
             version: None,
             trigger,
             event,
+            attempt: 0,
         }
     }
 
@@ -1033,6 +1061,25 @@ mod tests {
             }
             Ok(mine)
         }
+        fn add(&self, pk: &str, sk: &str, delta: i64, ttl: u64, now: u64) -> Result<i64, String> {
+            let mut m = self.0.lock().unwrap();
+            let key = (pk.to_string(), sk.to_string());
+            let base = m
+                .get(&key)
+                .filter(|old| old.ttl > now)
+                .and_then(|old| old.value.parse::<i64>().ok())
+                .unwrap_or(0);
+            let total = base + delta;
+            m.insert(
+                key,
+                integraal_wrappers::Item {
+                    sk: sk.to_string(),
+                    value: total.to_string(),
+                    ttl,
+                },
+            );
+            Ok(total)
+        }
         fn query(
             &self,
             pk: &str,
@@ -1049,7 +1096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_is_confined_to_tenant_and_expires_in_24h() {
+    async fn db_is_confined_to_tenant_and_expires_in_a_week() {
         let backend = Arc::new(MemItems::default());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1095,7 +1142,105 @@ mod tests {
                    "rows":[{"sk":"a","value":{"n":1}}],"all":2,"bad":false})
         );
         let ttl = backend.get("TEN#acme#cart", "a").unwrap().unwrap().ttl;
-        assert!((now + 86_400..=now + 86_405).contains(&ttl));
+        assert!((now + 604_800..=now + 604_805).contains(&ttl));
+    }
+
+    #[tokio::test]
+    async fn db_claims_and_counters_are_atomic_and_tenant_scoped() {
+        let backend = Arc::new(MemItems::default());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // an expired claim and an expired counter of ours: both start over
+        for (pk, v) in [("TEN#acme#claim", "\"old\""), ("TEN#acme#hits", "41")] {
+            backend
+                .put(
+                    pk,
+                    integraal_wrappers::Item {
+                        sk: "".into(),
+                        value: v.into(),
+                        ttl: now - 1,
+                    },
+                )
+                .unwrap();
+        }
+        let e = engine(
+            r#"return { handle = function()
+                local first = native.db.put_if_absent("claim", nil, "mine")
+                local second = native.db.put_if_absent("claim", nil, "yours")
+                return { first = first, second = second, held = native.db.get("claim"),
+                         a = native.db.add("hits"), b = native.db.add("hits", nil, 4), c = native.db.add("hits", nil, -2),
+                         read = native.db.get("hits"), sub = native.db.add("hits", "other") }
+            end }"#,
+            Limits::default(),
+        )
+        .with_db(backend.clone());
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!({"first":true,"second":false,"held":"mine","a":1,"b":5,"c":3,"read":3,"sub":1})
+        );
+        let other = backend.get("TEN#other#hits", "").unwrap();
+        assert!(other.is_none(), "counters never touch other tenants");
+    }
+
+    #[derive(Default)]
+    struct MemQueue(std::sync::Mutex<Vec<(serde_json::Value, u32)>>);
+    impl QueueBackend for MemQueue {
+        fn send(&self, messages: &[integraal_wrappers::OutMessage]) -> Result<(), String> {
+            let mut m = self.0.lock().unwrap();
+            for o in messages {
+                m.push((serde_json::from_str(&o.body).unwrap(), o.delay_secs));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_send_stays_in_the_tenant_and_needs_opt_in() {
+        let src = r#"return { handle = function(ctx, ev)
+            local one = native.queue.send({ script = "work", event = { n = 1 }, delay_s = 30 })
+            local many = native.queue.send({ { script = "work", version = "v2", event = { n = 2 } }, { event = "routed" } })
+            local bad_name = pcall(native.queue.send, { script = "../x" })
+            local bad_delay = pcall(native.queue.send, { script = "x", delay_s = 901 })
+            return { one = one, many = many, bad_name = bad_name, bad_delay = bad_delay, attempt = ctx.attempt }
+        end }"#;
+        let queue = Arc::new(MemQueue::default());
+        let mut call = inv(Trigger::Queue, json!(null));
+        call.attempt = 3;
+        let e = engine_cfg(src, Limits::default(), r#"{"queue":true}"#).with_queue(queue.clone());
+        assert_eq!(
+            e.invoke(call).await.unwrap(),
+            json!({"one":1,"many":2,"bad_name":false,"bad_delay":false,"attempt":3})
+        );
+        assert_eq!(
+            *queue.0.lock().unwrap(),
+            vec![
+                (json!({"tenant":"acme","script":"work","event":{"n":1}}), 30),
+                (
+                    json!({"tenant":"acme","script":"work","version":"v2","event":{"n":2}}),
+                    0
+                ),
+                (json!({"tenant":"acme","event":"routed"}), 0),
+            ]
+        );
+
+        // not opted in: the API errors instead of sending
+        let off = engine_cfg(src, Limits::default(), "{}").with_queue(queue.clone());
+        let err = off
+            .invoke(inv(Trigger::Invoke, json!(null)))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("native.queue is not available"),
+            "{err}"
+        );
+        // opted in but the deployment has no queue
+        let none = engine_cfg(src, Limits::default(), r#"{"queue":true}"#);
+        assert!(matches!(
+            none.invoke(inv(Trigger::Invoke, json!(null))).await,
+            Err(Error::Config(_))
+        ));
     }
 
     #[tokio::test]
@@ -2073,6 +2218,7 @@ mod tests {
             version: None,
             trigger: Trigger::Queue,
             event,
+            attempt: 0,
         }
     }
 

@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use aws_sdk_sqs::types::MessageSystemAttributeName;
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -245,6 +246,7 @@ async fn run_http(
         version,
         trigger: Trigger::Http,
         event: body.map(|b| b.0).unwrap_or(Value::Null),
+        attempt: 0,
     };
     match engine.invoke(inv).await {
         Ok(result) => (StatusCode::OK, Json(result)),
@@ -277,6 +279,7 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
             .receive_message()
             .queue_url(&queue_url)
             .max_number_of_messages(10)
+            .message_system_attribute_names(MessageSystemAttributeName::ApproximateReceiveCount)
             .wait_time_seconds(10)
             .send()
             .await;
@@ -297,12 +300,18 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
                 s3.clone(),
             );
             tasks.push(tokio::spawn(async move {
+                let attempt = msg
+                    .attributes()
+                    .and_then(|a| a.get(&MessageSystemAttributeName::ApproximateReceiveCount))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
                 let acked = handle_message(
                     &engine,
                     &client,
                     &queue_url,
                     &s3,
                     msg.body().unwrap_or_default(),
+                    attempt,
                 )
                 .await;
                 if acked {
@@ -330,6 +339,7 @@ async fn handle_message(
     queue_url: &str,
     s3: &S3Events,
     body: &str,
+    attempt: u32,
 ) -> bool {
     match classify(body) {
         Err(e) => {
@@ -339,6 +349,7 @@ async fn handle_message(
         Ok(Message::Ignored) => true,
         Ok(Message::Envelope(mut inv)) => {
             inv.trigger = Trigger::Queue;
+            inv.attempt = attempt;
             match engine.invoke(inv).await {
                 Ok(_) => true,
                 Err(e) => {
@@ -352,11 +363,14 @@ async fn handle_message(
             for record in records {
                 let outcome = match s3.invocation(&record) {
                     Ok(None) => Ok(()),
-                    Ok(Some(inv)) => engine
-                        .invoke(inv)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| e.to_string()),
+                    Ok(Some(mut inv)) => {
+                        inv.attempt = attempt;
+                        engine
+                            .invoke(inv)
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    }
                     Err(e) => Err(e),
                 };
                 if let Err(e) = outcome {

@@ -11,6 +11,7 @@ deployment settings behind it:
 | `native.bucket.<bucket>` | [Buckets (S3)](buckets.md) |
 | `native.db` | [DynamoDB](dynamodb.md) |
 | `native.lock` | [Locks](locks.md) |
+| `native.queue` | [Queue](queue.md) |
 | `native.callback` | [Callbacks](callbacks.md) |
 | `native.batch`, `native.ndjson` | [Batch jobs](batch.md) |
 | `native.crypto` | [Crypto](crypto.md) |

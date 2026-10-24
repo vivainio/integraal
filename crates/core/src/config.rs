@@ -344,6 +344,9 @@ impl GlobalConfig {
         if let Some(db) = &self.db {
             engine = engine.with_db(Arc::new(crate::DynamoBackend::from_env(&db.table).await));
         }
+        if let Some(q) = &self.queue {
+            engine = engine.with_queue(Arc::new(crate::SqsBackend::from_env(&q.url).await));
+        }
         if let Some(cb) = &self.callbacks {
             engine = engine.with_callback_base_url(&cb.base_url);
         }

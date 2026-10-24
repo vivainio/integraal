@@ -6,7 +6,7 @@ use std::{
 };
 
 /// Every item expires this long after its last write.
-pub const DB_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub const DB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const MAX_ITEM_BYTES: usize = 64 * 1024;
 pub const MAX_QUERY_ITEMS: usize = 100;
 const MAX_KEY_LEN: usize = 256;
@@ -35,6 +35,10 @@ pub trait ItemBackend: Send + Sync {
     fn put_if_free(&self, pk: &str, item: Item, now: u64) -> Result<bool, String>;
     /// Deletes the item only if its value is `value`; returns whether it deleted.
     fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String>;
+    /// Atomically adds `delta` to the counter at `(pk, sk)` and returns the new value, creating it at
+    /// `delta` if it is absent or expired (`ttl <= now`). Every call sets the item's expiry to `ttl`.
+    /// The item then reads back (`get`, `query`) with the number as its value.
+    fn add(&self, pk: &str, sk: &str, delta: i64, ttl: u64, now: u64) -> Result<i64, String>;
     /// Items under `pk` whose sort key starts with `sk_prefix`, ascending by sort key, at most `limit`.
     fn query(&self, pk: &str, sk_prefix: &str, limit: usize) -> Result<Vec<Item>, String>;
 }
@@ -110,6 +114,31 @@ impl DbScope {
             ttl: now_secs() + ttl.min(DB_TTL).as_secs(),
         };
         self.backend.put(&self.full_pk(pk)?, item)
+    }
+
+    /// Writes the item only if the key holds no live item; returns whether it wrote. An item that has
+    /// expired but not yet been swept by DynamoDB counts as absent.
+    pub fn put_if_absent(&self, pk: &str, sk: &str, value: String) -> Result<bool, String> {
+        check("sk", sk, true)?;
+        if value.len() > MAX_ITEM_BYTES {
+            return Err(format!("item exceeds {MAX_ITEM_BYTES} bytes"));
+        }
+        let now = now_secs();
+        let item = Item {
+            sk: sk.to_string(),
+            value,
+            ttl: now + DB_TTL.as_secs(),
+        };
+        self.backend.put_if_free(&self.full_pk(pk)?, item, now)
+    }
+
+    /// Atomically adds `delta` to the counter at `(pk, sk)` and returns the new value. A missing or
+    /// expired counter starts from 0. Use keys that only `add` writes; `get` reads a counter back as a number.
+    pub fn add(&self, pk: &str, sk: &str, delta: i64) -> Result<i64, String> {
+        check("sk", sk, true)?;
+        let now = now_secs();
+        self.backend
+            .add(&self.full_pk(pk)?, sk, delta, now + DB_TTL.as_secs(), now)
     }
 
     pub fn delete(&self, pk: &str, sk: &str) -> Result<(), String> {
@@ -207,7 +236,7 @@ pub(crate) const KEY_TTL: u64 = 253_402_300_799;
 /// HMAC key for callback tokens. Nobody configures it: the first process to need it
 /// generates a random key and stores it in the table outside any `TEN#` partition
 /// (tenants cannot address it); everyone else reads it. To rotate, delete the row.
-/// Callbacks live at most 24h, so outstanding ones simply stop working.
+/// Callbacks live at most `DB_TTL`, so outstanding ones simply stop working.
 pub struct CallbackSigner {
     backend: Arc<dyn ItemBackend>,
     key: OnceLock<[u8; 32]>,

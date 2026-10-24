@@ -34,9 +34,14 @@ fn s(v: &str) -> AttributeValue {
 }
 
 fn parse(attrs: &std::collections::HashMap<String, AttributeValue>) -> Option<Item> {
+    // A counter (`add`) keeps its number in `n`; that is its value.
+    let value = match attrs.get("n") {
+        Some(n) => n.as_n().ok()?.clone(),
+        None => attrs.get("v")?.as_s().ok()?.clone(),
+    };
     Some(Item {
         sk: attrs.get("sk")?.as_s().ok()?.clone(),
-        value: attrs.get("v")?.as_s().ok()?.clone(),
+        value,
         ttl: attrs.get("ttl")?.as_n().ok()?.parse().ok()?,
     })
 }
@@ -177,6 +182,67 @@ impl ItemBackend for DynamoBackend {
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(out.attributes().and_then(parse))
+        })
+    }
+
+    fn add(&self, pk: &str, sk: &str, delta: i64, ttl: u64, now: u64) -> Result<i64, String> {
+        self.handle.block_on(async {
+            // A row can be replaced between the two steps, so retry a few times before giving up.
+            for _ in 0..3 {
+                let res = self
+                    .client
+                    .update_item()
+                    .table_name(&self.table)
+                    .key("pk", s(pk))
+                    .key("sk", s(sk))
+                    .update_expression("SET v = if_not_exists(v, :z), #t = :ttl ADD n :d")
+                    .condition_expression(
+                        "attribute_not_exists(pk) OR (attribute_exists(n) AND #t > :now)",
+                    )
+                    .expression_attribute_names("#t", "ttl")
+                    .expression_attribute_values(":z", s("0"))
+                    .expression_attribute_values(":ttl", AttributeValue::N(ttl.to_string()))
+                    .expression_attribute_values(":d", AttributeValue::N(delta.to_string()))
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                    .return_values(ReturnValue::UpdatedNew)
+                    .send()
+                    .await;
+                match res {
+                    Ok(out) => {
+                        return out
+                            .attributes()
+                            .and_then(|a| a.get("n"))
+                            .and_then(|n| n.as_n().ok())
+                            .and_then(|n| n.parse().ok())
+                            .ok_or_else(|| "counter update returned no value".to_string());
+                    }
+                    Err(SdkError::ServiceError(e))
+                        if e.err().is_conditional_check_failed_exception() => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+                // The row is expired, or not a counter: start a fresh counter over an expired row.
+                let res = self
+                    .client
+                    .put_item()
+                    .table_name(&self.table)
+                    .item("pk", s(pk))
+                    .item("sk", s(sk))
+                    .item("v", s(&delta.to_string()))
+                    .item("n", AttributeValue::N(delta.to_string()))
+                    .item("ttl", AttributeValue::N(ttl.to_string()))
+                    .condition_expression("attribute_not_exists(pk) OR #t <= :now")
+                    .expression_attribute_names("#t", "ttl")
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                    .send()
+                    .await;
+                match res {
+                    Ok(_) => return Ok(delta),
+                    Err(SdkError::ServiceError(e))
+                        if e.err().is_conditional_check_failed_exception() => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            Err("key holds a value that is not a counter".to_string())
         })
     }
 

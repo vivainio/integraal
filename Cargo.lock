@@ -1942,6 +1942,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-dynamodb",
  "aws-sdk-s3",
+ "aws-sdk-sqs",
  "crc32fast",
  "flate2",
  "integraal-loader",

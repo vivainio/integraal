@@ -35,7 +35,7 @@ process at startup.
 | `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
 | `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
 | `admin.port`, `admin.token_env` | server | operator API for the [credential vault](#vault) on its own port. Requires `db` and `crypto` |
-| `queue.url` | server, webhook | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `buckets.map` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it |
+| `queue.url` | server, webhook, Lambda | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `buckets.map` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it, and so does [`native.queue.send`](queue.md) for tenants that enable it |
 | `server.port` | server | HTTP port (default `8080`) |
 | `throttle` | server | outbound HTTP limits, see [Throttling](http.md#throttling) |
 | `ceiling` | server, Lambda | operator ceilings for tenant `timeout_ms` and `memory_mb`; see [Limits](limits.md#deployment-ceiling) |

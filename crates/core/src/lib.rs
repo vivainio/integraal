@@ -8,6 +8,7 @@ pub mod ingress;
 mod placement;
 mod s3_data;
 pub mod s3_events;
+mod sqs_queue;
 
 pub use engine::{Placement, TenantConfig, TenantLimits};
 pub use placement::{PlaceOptions, Placed};
@@ -18,6 +19,7 @@ pub use engine::{Engine, Limits};
 pub use integraal_wrappers::{Vault, VaultEntry};
 pub use s3_data::S3Backend;
 pub use s3_events::S3Events;
+pub use sqs_queue::SqsBackend;
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +67,10 @@ pub struct Invocation {
     pub trigger: Trigger,
     #[serde(default)]
     pub event: serde_json::Value,
+    /// Which delivery of the message this is (SQS `ApproximateReceiveCount`); 0 when unknown. Set by
+    /// the entrypoint, never read from the wire, and exposed to scripts as `ctx.attempt`.
+    #[serde(skip)]
+    pub attempt: u32,
 }
 
 fn default_trigger() -> Trigger {

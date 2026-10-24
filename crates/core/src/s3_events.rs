@@ -173,6 +173,7 @@ impl S3Events {
                 "etag": s3.pointer("/object/eTag").cloned().unwrap_or(Value::Null),
                 "event": name,
             }),
+            attempt: 0,
         }))
     }
 }

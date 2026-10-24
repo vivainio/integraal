@@ -396,6 +396,9 @@ mod tests {
         fn delete_if_value(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
             unimplemented!()
         }
+        fn add(&self, _: &str, _: &str, _: i64, _: u64, _: u64) -> Result<i64, String> {
+            unimplemented!()
+        }
         fn query(&self, pk: &str, prefix: &str, limit: usize) -> Result<Vec<Item>, String> {
             Ok(self
                 .0

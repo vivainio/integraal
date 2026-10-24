@@ -23,8 +23,9 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 ## Native API (`--!runtime 1`)
 `native.log`, `native.json.{encode,decode}`, `native.time.now_ms`,
 `native.bucket.<name>.{get,put,delete,list,open,presign_get,presign_put}` for each bucket in `buckets.map` that the tenant's `config.json` `buckets` block grants (`read`/`write`/`delete`/`readwrite`; `upload`/`download` separately allow `presign_put`/`presign_get`) (confined to `<buckets.prefix><tenant>/`),
-`native.db.{get,put,delete,query}` (small items under `TEN#<tenant>#` partition keys, 24h TTL on every write; needs `db.table`),
+`native.db.{get,put,put_if_absent,add,delete,query}` (small items under `TEN#<tenant>#` partition keys, one-week TTL on every write; needs `db.table`),
 `native.lock.with` (named mutual exclusion within the process or across processes via the table, with an enforced lease), `native.deadline.with` (time-boxed blocks),
+`native.queue.send` (new work for the tenant on the job queue),
 `native.callback.create` (signed single-use callback URLs, served by the webhook Lambda; needs `callbacks.base_url`),
 `native.http.{request,get}` (only URLs in `config.json` `http.allow`; no redirects, no private IPs).
 `native.batch` (jobs handed to a partner through a dedicated bucket: `new`/`submit`, then `route`/`hydrate` in the continuation; results are multi-part NDJSON checked against a manifest) and `native.ndjson.rows`,

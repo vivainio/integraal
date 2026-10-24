@@ -40,6 +40,7 @@ If none exists the invocation fails with a *no handler* error.
 - `ctx.tenant`, `ctx.script` – who and what is running
 - `ctx.trigger` – `"invoke"`, `"http"`, `"queue"`, or `"route"` (router scripts)
 - `ctx.runtime` – the pinned native API version
+- `ctx.attempt` – which delivery of a queue message this is (`1` the first, then counting up as it is retried); `1` for other triggers
 - `event` – the JSON `event` of the envelope, converted to Lua values
 
 ## Return value

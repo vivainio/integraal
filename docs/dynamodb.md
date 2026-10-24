@@ -9,11 +9,13 @@ A small shared key-value store for state that doesn't belong in an S3 object. It
 | --- | --- |
 | `get(pk, sk?)` | the stored value, or `nil` if missing or expired. |
 | `put(pk, sk?, value)` | stores any JSON-serializable value. |
+| `put_if_absent(pk, sk?, value)` | stores the value only if the key holds no live item; returns `true` if it wrote. An expired item counts as absent. |
+| `add(pk, sk?, delta?)` | atomic counter: adds `delta` (default `1`, may be negative) and returns the new value. A missing or expired counter starts from 0. |
 | `delete(pk, sk?)` | removes an item. |
 | `query(pk, opts?)` | rows `{ sk, value }` under `pk`, in sort-key order. `opts.sk_prefix` filters, `opts.limit` caps (at most 100). |
 
 `sk` defaults to the empty string. Values are stored as JSON, at most 64 KB each.
-**Every write sets a 24 hour expiry**, so this is for short-lived state; use
+**Every write sets a one week expiry**, so this is for short-lived state; use
 [`native.bucket`](buckets.md) for anything that must stay. Calls count against `max_data_ops`.
 
 ```lua
@@ -22,6 +24,19 @@ local s = native.db.get("session", "u42")
 for _, row in native.db.query("session", { sk_prefix = "u" }) do
   native.log("info", row.sk)
 end
+```
+
+`put_if_absent` and `add` are the building blocks for idempotency and for counting work across
+invocations: claim a key to run something once, or count finished pieces and act on the one that
+completes the set (see [Scatter and gather](patterns.md#scatter-and-gather)). Use keys that only
+`add` writes: `get` reads a counter back as a number, and a later `put` replaces it. Both calls count
+against `max_data_ops`.
+
+```lua
+if native.db.put_if_absent("seen", ev.id, true) then   -- true only for the first delivery
+  process(ev)
+end
+local n = native.db.add("progress", job)               -- 1, 2, 3, ...
 ```
 
 Isolation is enforced by the host: your `pk` is stored as `TEN#<tenant>#<pk>`, so a script cannot
@@ -36,5 +51,5 @@ Set `db.table` in the [global config](deployment.md#configuration). The table ne
 
 All tenants share the table; isolation comes from the enforced `TEN#<tenant>#` partition key prefix.
 
-IAM: `dynamodb:GetItem`, `PutItem`, `DeleteItem` (conditional writes included) and `Query` on the table.
+IAM: `dynamodb:GetItem`, `PutItem`, `UpdateItem`, `DeleteItem` (conditional writes included) and `Query` on the table.
 [Locks](locks.md) use the same actions.

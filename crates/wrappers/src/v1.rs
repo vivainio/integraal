@@ -68,6 +68,10 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
         )?,
     )?;
     native.set("db", db_api(lua, host, budget.clone())?)?;
+    native.set(
+        "queue",
+        crate::queue::api(lua, &host.tenant, host.queue.clone(), budget.clone())?,
+    )?;
     native.set("callback", callback_api(lua, host, budget.clone())?)?;
     native.set(
         "lock",
@@ -285,6 +289,30 @@ fn db_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Ta
 
     let n = need.clone();
     db.set(
+        "put_if_absent",
+        lua.create_function(
+            move |lua, (pk, sk, value): (String, Option<String>, Value)| {
+                let json = serde_json::to_string(&lua.from_value::<serde_json::Value>(value)?)
+                    .map_err(mlua::Error::external)?;
+                n()?.put_if_absent(&pk, sk.as_deref().unwrap_or(""), json)
+                    .map_err(err)
+            },
+        )?,
+    )?;
+
+    let n = need.clone();
+    db.set(
+        "add",
+        lua.create_function(
+            move |_, (pk, sk, delta): (String, Option<String>, Option<i64>)| {
+                n()?.add(&pk, sk.as_deref().unwrap_or(""), delta.unwrap_or(1))
+                    .map_err(err)
+            },
+        )?,
+    )?;
+
+    let n = need.clone();
+    db.set(
         "delete",
         lua.create_function(move |_, (pk, sk): (String, Option<String>)| {
             n()?.delete(&pk, sk.as_deref().unwrap_or("")).map_err(err)
@@ -353,11 +381,7 @@ fn callback_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Res
                 None => (None, Value::Nil, None),
             };
             if let Some(s) = &script {
-                let ok = !s.is_empty()
-                    && s.len() <= 128
-                    && s.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-                if !ok || s == "." || s == ".." {
+                if !crate::queue::valid_name(s) {
                     return Err(mlua::Error::runtime(format!("invalid script name {s:?}")));
                 }
             }

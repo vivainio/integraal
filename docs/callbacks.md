@@ -12,7 +12,7 @@ local url = native.callback.create({ script = "on-payment", state = { order = 7 
 ```
 
 `script` is optional (without it the tenant's [router](router.md) picks one); `ttl_s` defaults to and is capped at
-24 hours; `state` is any JSON value stored in [`native.db`](dynamodb.md) (at most 64 KB). The first `POST` to the URL
+one week; `state` is any JSON value stored in [`native.db`](dynamodb.md) (at most 64 KB). The first `POST` to the URL
 enqueues the request and runs the script as a `queue` trigger with
 `event = { method, path, query, headers, body, body_base64, state }`; any later call gets 404.
 

@@ -8,8 +8,8 @@
 //! (`get`/`put`/`delete`/`list`/`open` on the tenant's own prefix of each bucket its config grants), and
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
-//! under the tenant's own partition keys, each expiring after 24 hours), and `native.crypto`
-//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets).
+//! under the tenant's own partition keys, each expiring after a week), and `native.crypto`
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets), and `native.queue` (send new work to the job queue).
 
 mod batch;
 mod bucket;
@@ -20,6 +20,7 @@ mod gzip;
 mod http;
 mod lock;
 mod ndjson;
+mod queue;
 mod sink;
 mod sql;
 mod throttle;
@@ -41,6 +42,10 @@ pub use db::{
 };
 pub use deadline::Deadline;
 pub use http::{AllowRule, HttpPolicy};
+pub use queue::{
+    OutMessage, QueueBackend, MAX_DELAY_SECS, MAX_MESSAGE_BYTES, MAX_SENT_PER_INVOCATION,
+    SEND_CHUNK,
+};
 pub use throttle::{Slot, Throttle, ThrottleRule};
 pub use vault::{Vault, VaultEntry, MAX_SECRET_BYTES, MIN_SECRET_BYTES};
 pub use xml::{ByteStream, MAX_STREAM_BYTES};
@@ -124,8 +129,10 @@ pub struct HostContext {
     pub buckets: BucketScopes,
     /// The tenant's folder in the deployment's dedicated batch bucket; `native.batch` errors when absent.
     pub batch: Option<BucketScope>,
-    /// Tenant-scoped small item store with 24h expiry; `native.db` errors when absent.
+    /// Tenant-scoped small item store with one-week expiry; `native.db` errors when absent.
     pub db: Option<DbScope>,
+    /// The job queue behind `native.queue.send`; `native.queue` errors when absent.
+    pub queue: Option<std::sync::Arc<dyn QueueBackend>>,
     /// Public base URL of the webhook ingress; `native.callback` errors when absent.
     pub callback_base_url: Option<String>,
     /// Operator-set limits on outbound HTTP, shared by everything in this process (Fargate only).

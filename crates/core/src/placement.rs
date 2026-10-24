@@ -396,6 +396,7 @@ mod tests {
             version: None,
             trigger: Trigger::Queue,
             event,
+            attempt: 0,
         }
     }
 

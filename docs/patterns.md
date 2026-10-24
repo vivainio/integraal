@@ -143,7 +143,7 @@ flowchart LR
 ```
 
 ### Small state (DynamoDB)
-Small items per tenant with a 24h TTL; also backs callbacks and cross-process locks. [DynamoDB](dynamodb.md)
+Small items per tenant with a one-week TTL, atomic counters and claim-once keys; also backs callbacks and cross-process locks. [DynamoDB](dynamodb.md)
 
 ```mermaid
 flowchart LR
@@ -157,6 +157,65 @@ Nested time-boxed blocks that interrupt the script. [Native API](native-api.md)
 flowchart LR
     I[invocation deadline] --> D1["deadline.with 10s"] --> D2["deadline.with 2s"]
 ```
+
+## Scatter and gather
+
+Split work into parts that run in parallel, then do one final step when every part is done.
+There are two ways, depending on who does the parallel work.
+
+### Partner does the parallel work
+One [batch job](batch.md) with several independent queries: the partner runs them however it likes,
+and `done.json` is the barrier. The continuation sees every result at once.
+
+### Workers do the parallel work
+The script scatters with [`native.queue.send`](queue.md), each shard counts itself with
+[`native.db`](dynamodb.md) when it finishes, and the shard that completes the set sends the gather
+message. `put_if_absent` makes a repeated delivery count once, and claiming the gather the same way
+makes it run exactly once.
+
+```mermaid
+flowchart LR
+    S["scatter script<br/>db.put flow, queue.send x N"] --> Q[(job queue)]
+    Q --> W1[shard 1] & W2[shard 2] & W3[shard N]
+    W1 & W2 & W3 -->|"put_if_absent claim, then db.add done"| C{{"done == total?"}}
+    C -->|"claim gather, queue.send"| G[gather script]
+    C -. not yet .-> X[end]
+```
+
+```lua
+-- scatter
+local flow = native.crypto.hex_encode(native.crypto.random(8))
+native.db.put("flow", flow, { total = #chunks, gather = "merge" })
+local msgs = {}
+for i, chunk in ipairs(chunks) do
+  msgs[i] = { script = "work", event = { flow = flow, shard = i, chunk = chunk } }
+end
+native.queue.send(msgs)
+
+-- shard (on_queue)
+local result = do_work(ev.chunk)
+native.bucket.Out.put(ev.flow .. "/" .. ev.shard .. ".json", native.json.encode(result))
+if native.db.put_if_absent("flow-seen", ev.flow .. "/" .. ev.shard, true) then   -- once per shard
+  local flow = native.db.get("flow", ev.flow)
+  if native.db.add("flow-done", ev.flow) == flow.total
+     and native.db.put_if_absent("flow-gathered", ev.flow, true) then             -- once per flow
+    native.queue.send({ script = flow.gather, event = { flow = ev.flow } })
+  end
+end
+```
+
+Two things the recipe does not do for you:
+
+- **A shard that fails for good.** On its last attempt (`ctx.attempt` equal to the queue's
+  `maxReceiveCount`) the shard can write a failure marker and count itself anyway, so the gather runs
+  with a partial result instead of waiting forever.
+- **A lost count.** A process that dies between `put_if_absent` and `add` leaves the counter one short.
+  Send a delayed check (`native.queue.send({ script = "check", event = { flow = flow }, delay_s = 600 })`)
+  that compares `native.db.get("flow-done", flow)` with `total`, and either re-sends itself, or gathers
+  what exists once the flow is overdue. Flow rows expire after a week.
+
+Many parts at once can flood the queue for everyone else; per-tenant concurrency caps are on the
+[roadmap](roadmap.md).
 
 ## Which one?
 
@@ -173,3 +232,5 @@ flowchart LR
 | Protect a partner API from overload | HTTP throttle (`max_concurrent`, `per_second`) |
 | Crunch large files | Streams, zip, gzip, SQL |
 | Avoid concurrent runs | Locks |
+| Split work and join the results | Scatter and gather (`queue.send` plus `db.add`), or one batch job with several queries |
+| Run something once despite redelivery | `db.put_if_absent` |

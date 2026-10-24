@@ -26,6 +26,7 @@ nav = [
     { "Buckets (S3)" = "buckets.md" },
     { "DynamoDB" = "dynamodb.md" },
     { "Locks" = "locks.md" },
+    { "Queue" = "queue.md" },
     { "Callbacks" = "callbacks.md" },
     { "Batch jobs" = "batch.md" },
     { "Crypto" = "crypto.md" },

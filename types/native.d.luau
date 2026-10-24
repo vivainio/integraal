@@ -12,6 +12,8 @@ declare extern type Context with
     script: string
     trigger: "invoke" | "http" | "queue" | "route"
     runtime: number
+    -- Delivery number of a queue message (1 = first); always 1 for other triggers.
+    attempt: number
 end
 
 -- Fields are present depending on `type`:
@@ -138,8 +140,16 @@ declare native: {
     db: {
         get: (pk: string, sk: string?) -> any,
         put: (pk: string, sk: string?, value: any) -> (),
+        -- Writes only if the key holds no live item; returns whether it wrote.
+        put_if_absent: (pk: string, sk: string?, value: any) -> boolean,
+        -- Atomic counter: adds `delta` (default 1) and returns the new value. Missing or expired starts at 0.
+        add: (pk: string, sk: string?, delta: number?) -> number,
         delete: (pk: string, sk: string?) -> (),
         query: (pk: string, opts: { sk_prefix: string?, limit: number? }?) -> { DbRow },
+    },
+    queue: {
+        -- One message or an array; returns how many were sent.
+        send: (messages: { script: string?, version: string?, event: any, delay_s: number? } | { { script: string?, version: string?, event: any, delay_s: number? } }) -> number,
     },
     callback: {
         create: (opts: { script: string?, state: any, ttl_s: number? }?) -> string,
