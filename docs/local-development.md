@@ -31,7 +31,7 @@ The engine tests use in-memory stores, so they need no AWS or simulator.
 ### Mega integration test
 
 `e2e/` holds a black-box test that exercises every [integration pattern](patterns.md) against a real
-`integraal-server`, with roto standing in for AWS. It needs `roto-server` on your `PATH`:
+`integraal-server`, with roto standing in for AWS. It needs `roto-server` 0.10.1 or later on your `PATH` (`uv tool install 'roto-aws>=0.10.1'`):
 
 ```bash
 uv run --project e2e pytest e2e
