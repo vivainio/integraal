@@ -9,7 +9,7 @@
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
 //! under the tenant's own partition keys, each expiring after 24 hours), and `native.crypto`
-//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), and `native.gzip` (streaming and string gzip).
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets).
 
 mod bucket;
 mod crypto;
@@ -17,6 +17,7 @@ mod db;
 mod gzip;
 mod http;
 mod sink;
+mod sql;
 mod throttle;
 mod v1;
 mod vault;
@@ -65,6 +66,7 @@ pub struct HostLimits {
     pub max_http_response_bytes: u64,
     pub max_object_bytes: usize,
     pub max_stream_bytes: u64,
+    pub max_sql_bytes: u64,
     pub max_http_requests: u32,
     pub max_data_ops: u32,
     pub max_http_timeout: Duration,

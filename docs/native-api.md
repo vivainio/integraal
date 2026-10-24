@@ -14,6 +14,7 @@ deployment settings behind it:
 | `native.crypto` | [Crypto](crypto.md) |
 | `native.http` | [Outbound HTTP](http.md) |
 | `native.xml`, `native.zip`, `native.gzip`, byte streams | [Streams and XML](streams-xml.md) |
+| `native.sql` | [SQL scratch databases](sql.md) |
 | routing (`on_route`) | [Router](router.md) |
 
 Budgets and size caps for all of them are in [Limits](limits.md).

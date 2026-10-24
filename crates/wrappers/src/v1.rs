@@ -80,6 +80,15 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
         )?,
     )?;
     native.set(
+        "sql",
+        crate::sql::api(
+            lua,
+            host.limits.max_sql_bytes,
+            host.limits.max_object_bytes,
+            host.limits.deadline,
+        )?,
+    )?;
+    native.set(
         "crypto",
         crate::crypto::api(
             lua,

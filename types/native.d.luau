@@ -37,6 +37,16 @@ declare extern type ZipWriter with
     finish: (self) -> string?
 end
 
+declare extern type SqlDatabase with
+    exec: (self, sql: string, params: { any }?) -> number
+    query: (self, sql: string, params: { any }?) -> { { [string]: any } }
+    get: (self, sql: string, params: { any }?) -> { [string]: any }?
+    last_insert_id: (self) -> number
+    save: (self, sink: Sink) -> number
+    dump: (self) -> string
+    close: (self) -> ()
+end
+
 declare extern type GzipWriter with
     write: (self, data: string) -> ()
     finish: (self) -> string?
@@ -125,6 +135,11 @@ declare native: {
     },
     xml: {
         events: (source: string | ByteStream, opts: { trim: boolean? }?) -> () -> XmlEvent?,
+    },
+    sql: {
+        open: () -> SqlDatabase,
+        load: (source: string | ByteStream) -> SqlDatabase,
+        null: any,
     },
     gzip: {
         open: (source: string | ByteStream) -> ByteStream,

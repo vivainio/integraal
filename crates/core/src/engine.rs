@@ -20,6 +20,7 @@ pub struct Limits {
     pub max_http_response_bytes: u64,
     pub max_object_bytes: usize,
     pub max_stream_bytes: u64,
+    pub max_sql_bytes: u64,
     pub max_http_requests: u32,
     pub max_data_ops: u32,
     pub max_http_timeout: Duration,
@@ -36,6 +37,7 @@ impl Default for Limits {
             max_http_response_bytes: 5 * MB,
             max_object_bytes: (5 * MB) as usize,
             max_stream_bytes: 4096 * MB,
+            max_sql_bytes: 64 * MB,
             max_http_requests: 100,
             max_data_ops: 1000,
             max_http_timeout: Duration::from_secs(10),
@@ -57,6 +59,7 @@ impl Limits {
             max_http_response_bytes: 100 * MB,
             max_object_bytes: (100 * MB) as usize,
             max_stream_bytes: 4096 * MB,
+            max_sql_bytes: 512 * MB,
             max_http_requests: 1000,
             max_data_ops: 10_000,
             max_http_timeout: Duration::from_secs(30),
@@ -85,6 +88,7 @@ impl Limits {
                 .min(ceiling.max_object_bytes),
             max_stream_bytes: mb(t.max_stream_mb, self.max_stream_bytes)
                 .min(ceiling.max_stream_bytes),
+            max_sql_bytes: mb(t.max_sql_mb, self.max_sql_bytes).min(ceiling.max_sql_bytes),
             max_http_requests: t
                 .max_http_requests
                 .unwrap_or(self.max_http_requests)
@@ -108,6 +112,7 @@ pub struct TenantLimits {
     pub max_http_response_mb: Option<u64>,
     pub max_object_mb: Option<u64>,
     pub max_stream_mb: Option<u64>,
+    pub max_sql_mb: Option<u64>,
     pub max_http_requests: Option<u32>,
     pub max_data_ops: Option<u32>,
     pub max_http_timeout_ms: Option<u64>,
@@ -368,6 +373,7 @@ fn new_vm(
                 max_http_response_bytes: limits.max_http_response_bytes,
                 max_object_bytes: limits.max_object_bytes,
                 max_stream_bytes: limits.max_stream_bytes,
+                max_sql_bytes: limits.max_sql_bytes,
                 max_http_requests: limits.max_http_requests,
                 max_data_ops: limits.max_data_ops,
                 max_http_timeout: limits.max_http_timeout,
@@ -1491,6 +1497,91 @@ mod tests {
             .read_to_string(&mut text)
             .unwrap();
         assert!(text.starts_with("line 1\nline 1\n") && text.ends_with("line 200\n"));
+    }
+
+    #[tokio::test]
+    async fn sql_scratch_db_saves_loads_and_is_locked_down() {
+        let store = Arc::new(MemBackend::default());
+        let script = r#"return {
+            on_queue = function(ctx, ev)
+                local db = native.sql.open()
+                db:exec("create table seen (id text primary key, amount real, note text)")
+                for i = 1, 1000 do
+                    db:exec("insert into seen values (?, ?, ?)", { "id" .. i, i * 1.5, native.sql.null })
+                end
+                local out = native.bucket.Temp.create("job.db")
+                local bytes = db:save(out)
+                out:close()
+                return { bytes = bytes > 0 }
+            end,
+            handle = function()
+                local db = native.sql.load(native.bucket.Temp.open("job.db"))
+                local top = db:query("select id, amount, note from seen order by amount desc limit 2")
+                db:exec("insert into seen values ('new', 1, 'x')")  -- a loaded db is writable
+                local c = db:get("select count(*) as n, sum(amount) as total from seen")
+                local function fails(sql)
+                    local ok = pcall(function() db:exec(sql) end)
+                    return not ok
+                end
+                local dup = pcall(function() db:exec("insert into seen values ('id1', 1, 'x')") end)
+                local d2 = native.sql.load(db:dump())
+                return {
+                    top = top, n = c.n, total = c.total, dup_rejected = not dup,
+                    attach = fails("attach database ':memory:' as x"),
+                    pragma = fails("pragma journal_mode = off"),
+                    redump = d2:get("select count(*) as n from seen").n,
+                    bad = not pcall(native.sql.load, "not a database"),
+                }
+            end }"#;
+        let mk = |store: Arc<MemBackend>| {
+            engine_cfg(script, Limits::default(), r#"{"buckets":{"Temp":"readwrite"}}"#)
+                .with_bucket("Temp", store, "tmp/")
+        };
+        let first = mk(store.clone())
+            .invoke(inv(Trigger::Queue, json!({})))
+            .await
+            .unwrap();
+        assert_eq!(first, json!({"bytes": true}));
+        // A later invocation, with a fresh engine, picks the file up from the bucket.
+        let out = mk(store).invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert_eq!(out["top"], json!([{"id":"id1000","amount":1500},{"id":"id999","amount":1498.5}]));
+        assert_eq!(out["n"], json!(1001));
+        assert_eq!(out["total"], json!(750_751));
+        for k in ["dup_rejected", "attach", "pragma", "bad"] {
+            assert_eq!(out[k], json!(true), "{k}: {out}");
+        }
+        assert_eq!(out["redump"], json!(1001));
+    }
+
+    #[tokio::test]
+    async fn sql_scratch_db_respects_size_and_time_limits() {
+        let e = engine_cfg(
+            r#"return { handle = function()
+                local db = native.sql.open()
+                db:exec("create table t (b blob)")
+                local full = pcall(function()
+                    for i = 1, 100 do db:exec("insert into t values (zeroblob(100000))") end
+                end)
+                return { full = full }
+            end }"#,
+            Limits { max_sql_bytes: 1024 * 1024, ..Limits::default() },
+            "{}",
+        );
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!({"full": false})
+        );
+        let e = engine(
+            r#"return { handle = function()
+                local db = native.sql.open()
+                db:exec("with recursive r(n) as (select 1 union all select n + 1 from r) select count(*) from r")
+            end }"#,
+            Limits { timeout: Duration::from_millis(300), ..Limits::default() },
+        );
+        assert!(matches!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await,
+            Err(Error::Timeout)
+        ));
     }
 
     #[tokio::test]

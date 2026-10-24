@@ -28,6 +28,7 @@ nav = [
     { "Crypto" = "crypto.md" },
     { "Outbound HTTP" = "http.md" },
     { "Streams and XML" = "streams-xml.md" },
+    { "SQL scratch databases" = "sql.md" },
     { "Router" = "router.md" },
     { "Limits" = "limits.md" },
   ] },

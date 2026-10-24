@@ -15,6 +15,7 @@ sha2 = "0.10"
 url = "2"
 ureq = "3"
 quick-xml = "0.38"
+rusqlite = { version = "0.40", features = ["bundled", "serialize", "hooks", "limits"] }
 flate2 = "1"
 crc32fast = "1"
 chacha20poly1305 = "0.10"

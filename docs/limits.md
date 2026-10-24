@@ -14,6 +14,7 @@ Every field is optional and unknown keys are rejected (so typos can't silently l
 | `max_http_response_mb` | 5 | 100 | Largest non-streaming HTTP body. |
 | `max_object_mb` | 5 | 100 | Largest `native.bucket.<bucket>.get`/`put` object. |
 | `max_stream_mb` | 4096 | 4096 | Total bytes one stream parse may read. |
+| `max_sql_mb` | 64 | 512 | Size of one `native.sql` database (and the largest file `native.sql.load` accepts). |
 | `max_http_requests` | 100 | 1000 | `native.http` calls per invocation. |
 | `max_data_ops` | 1000 | 10 000 | `native.bucket`, `native.db` and `native.callback` calls per invocation. |
 | `max_http_timeout_ms` | 10 000 | 30 000 | Per HTTP request timeout. |
