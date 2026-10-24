@@ -29,7 +29,7 @@ Calls count against `max_http_requests`; sizes and timeouts are set in [Limits](
 ## Credential vault {#credential-vault}
 Secrets the operator stores (see [Credential vault](deployment.md#vault)) can be *used* in requests
 but never read. Each secret is a JSON value. A request opts in, per part, with
-`vault = { "header", "body", "url" }`, and then `{{vault:NAME.path.to.field}}` is expanded in exactly
+`vault = { "header", "body", "url", "basic_auth" }`, and then `{{vault:NAME.path.to.field}}` is expanded in exactly
 those parts. `NAME` is the secret and the rest walks into its JSON (object keys, array indexes); the
 result must be a string, number or boolean. A secret that is itself a plain string is `{{vault:NAME}}`.
 
@@ -42,6 +42,20 @@ native.http.request({
   vault = { "header" },
 })
 -- native.http.get(url, headers, { "header" }) takes the same list as its third argument
+```
+
+### Basic auth
+`basic_auth = { username, password }` on `native.http.request` (and `job:http`) sends an HTTP Basic
+`Authorization` header, replacing any `authorization` header you set. The two values are expanded
+like any other part, so list `"basic_auth"` in `vault` to take them from the vault; the base64 token is
+redacted from the response too. A username cannot contain `:`.
+
+```lua
+native.http.request({
+  url = "https://api.example.com/v1/items",
+  basic_auth = { username = "{{vault:acme.user}}", password = "{{vault:acme.pass}}" },
+  vault = { "basic_auth" },
+})
 ```
 
 Without the option, placeholders stay literal text. That is deliberate: a script that relays

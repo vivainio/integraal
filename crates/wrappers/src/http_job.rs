@@ -59,6 +59,7 @@ impl Env {
             .get::<Option<HashMap<String, String>>>("headers")?
             .unwrap_or_default();
         let body = opts.get::<Option<mlua::LuaString>>("body")?;
+        let basic = crate::v1::basic_auth_opt(opts)?;
         let expand =
             Expand::parse(opts.get::<Option<Vec<String>>>("vault")?).map_err(mlua::Error::runtime)?;
 
@@ -81,7 +82,7 @@ impl Env {
             } else {
                 url.clone()
             };
-            let headers = headers
+            let mut headers = headers
                 .iter()
                 .map(|(k, v)| {
                     if !expand.header {
@@ -94,27 +95,37 @@ impl Env {
                     ))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
+            let mut token = None;
+            if let Some((user, pass)) = &basic {
+                let t = crate::vault::basic_auth_token(user, pass, expand.basic_auth, &mut lookup)?;
+                headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+                headers.push(("authorization".into(), format!("Basic {t}")));
+                token = Some(t.into_bytes());
+            }
             let body = match &body {
                 Some(b) if expand.body => crate::vault::substitute(&b.as_bytes(), &mut lookup)?,
                 Some(b) => b.as_bytes().to_vec(),
                 None => Vec::new(),
             };
-            Ok((url, headers, body))
+            Ok((url, headers, body, token))
         })();
         let scrub = |msg: String| {
             let values: Vec<Vec<u8>> = used.iter().map(|s| s.value.clone()).collect();
             err(String::from_utf8_lossy(&crate::vault::redact(msg.as_bytes(), &values)))
         };
-        let (url, headers, body) = expanded.map_err(scrub)?;
+        let (url, headers, body, token) = expanded.map_err(scrub)?;
         let url = self.policy.check(&method, &url).map_err(scrub)?;
         for secret in &used {
             secret.check(&url).map_err(scrub)?;
         }
-        let secrets = used
+        let mut secrets: Vec<Vec<u8>> = used
             .iter()
             .filter(|s| s.value.len() >= crate::MIN_SECRET_BYTES)
             .map(|s| s.value.clone())
             .collect();
+        if !used.is_empty() {
+            secrets.extend(token.filter(|t| t.len() >= crate::MIN_SECRET_BYTES));
+        }
         Ok(Prepared {
             method,
             url,

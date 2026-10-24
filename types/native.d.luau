@@ -97,7 +97,7 @@ declare extern type BatchJob with
     query: (self, name: string, query: string, params: any?) -> string
     -- A request the host performs itself after `submit`, however long it takes (Fargate only). The
     -- result is read with `results[name]` (status, headers) and `body(name)`.
-    http: (self, name: string, opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, vault: { string }? }) -> string
+    http: (self, name: string, opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, basic_auth: { username: string, password: string }?, vault: { string }? }) -> string
     -- Attaches a file (or one more part of the same input) to the request: a string or a stream.
     input: (self, name: string, content: string | ByteStream, opts: { ext: string? }?) -> string
     -- Attaches rows, as NDJSON cut into parts: an array or an iterator function.
@@ -203,9 +203,9 @@ declare native: {
         base64_decode: (text: string) -> string,
     },
     http: {
-        request: ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, vault: { string }?, stream: true }) -> HttpStreamResponse)
-            & ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, vault: { string }?, stream: false? }) -> HttpResponse),
-        get: (url: string, headers: { [string]: string }?, vault: { string }?) -> HttpResponse,
+        request: ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, basic_auth: { username: string, password: string }?, vault: { string }?, stream: true }) -> HttpStreamResponse)
+            & ((opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, basic_auth: { username: string, password: string }?, vault: { string }?, stream: false? }) -> HttpResponse),
+        get: (url: string, headers: { [string]: string }?, basic_auth: { username: string, password: string }?, vault: { string }?) -> HttpResponse,
     },
     xml: {
         events: (source: string | ByteStream, opts: { trim: boolean? }?) -> () -> XmlEvent?,

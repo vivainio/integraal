@@ -301,10 +301,11 @@ pub(crate) struct Expand {
     pub header: bool,
     pub body: bool,
     pub url: bool,
+    pub basic_auth: bool,
 }
 
 impl Expand {
-    /// From the `vault` option of a request: a list of `"header"`, `"body"` and `"url"`.
+    /// From the `vault` option of a request: a list of `"header"`, `"body"`, `"url"` and `"basic_auth"`.
     pub fn parse(parts: Option<Vec<String>>) -> Result<Self, String> {
         let mut e = Self::default();
         for p in parts.into_iter().flatten() {
@@ -312,15 +313,43 @@ impl Expand {
                 "header" => e.header = true,
                 "body" => e.body = true,
                 "url" => e.url = true,
+                "basic_auth" => e.basic_auth = true,
                 other => {
                     return Err(format!(
-                        "unknown vault target {other:?} (expected header, body or url)"
+                        "unknown vault target {other:?} (expected header, body, url or basic_auth)"
                     ))
                 }
             }
         }
         Ok(e)
     }
+}
+
+/// The base64 `user:password` of an HTTP Basic `Authorization` header. With `expand`, `{{vault:...}}`
+/// placeholders in the two parts are resolved first. The token is returned so the caller can redact it.
+pub(crate) fn basic_auth_token(
+    username: &str,
+    password: &str,
+    expand: bool,
+    mut resolve: impl FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let mut part = |v: &str| -> Result<Vec<u8>, String> {
+        if expand {
+            substitute(v.as_bytes(), &mut resolve)
+        } else {
+            Ok(v.as_bytes().to_vec())
+        }
+    };
+    let user = part(username)?;
+    let pass = part(password)?;
+    if user.contains(&b':') {
+        return Err("a basic_auth username cannot contain ':'".into());
+    }
+    let mut joined = user;
+    joined.push(b':');
+    joined.extend_from_slice(&pass);
+    Ok(STANDARD.encode(joined))
 }
 
 /// Secret names are the first segment of a `{{vault:name.path}}` reference, so they cannot contain `.`.
@@ -383,6 +412,20 @@ mod tests {
     use crate::MasterKey;
     use serde_json::json;
     use std::{collections::BTreeMap, sync::Mutex};
+
+    #[test]
+    fn basic_auth_token_expands_only_when_asked() {
+        let resolve = |r: &str| match r {
+            "svc.user" => Ok(b"alice".to_vec()),
+            "svc.pass" => Ok(b"p:w".to_vec()),
+            _ => Err("no".to_string()),
+        };
+        let t = basic_auth_token("{{vault:svc.user}}", "{{vault:svc.pass}}", true, resolve).unwrap();
+        assert_eq!(t, "YWxpY2U6cDp3"); // alice:p:w
+        let t = basic_auth_token("bob", "{{vault:svc.pass}}", false, resolve).unwrap();
+        assert_eq!(t, "Ym9iOnt7dmF1bHQ6c3ZjLnBhc3N9fQ==");
+        assert!(basic_auth_token("a:b", "x", false, resolve).is_err());
+    }
 
     #[derive(Default)]
     struct Mem(Mutex<BTreeMap<(String, String), Item>>);

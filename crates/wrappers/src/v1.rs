@@ -415,6 +415,14 @@ impl<R: std::io::Read> std::io::Read for SlotReader<R> {
     }
 }
 
+/// `basic_auth = { username, password }` of a request.
+pub(crate) fn basic_auth_opt(opts: &Table) -> mlua::Result<Option<(String, String)>> {
+    let Some(t) = opts.get::<Option<Table>>("basic_auth")? else {
+        return Ok(None);
+    };
+    Ok(Some((t.get("username")?, t.get("password")?)))
+}
+
 fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     use std::{collections::HashMap, io::Read};
 
@@ -431,7 +439,8 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                            headers: HashMap<String, String>,
                            body: Option<mlua::LuaString>,
                            stream: bool,
-                           expand: crate::vault::Expand| {
+                           expand: crate::vault::Expand,
+                           basic: Option<(String, String)>| {
         budget.take_http().map_err(mlua::Error::runtime)?;
         let remaining = budget.deadline.remaining();
         let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -462,7 +471,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             } else {
                 url.clone()
             };
-            let headers = headers
+            let mut headers = headers
                 .iter()
                 .map(|(k, v)| {
                     if !expand.header {
@@ -476,6 +485,13 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                     ))
                 })
                 .collect::<Result<HashMap<_, _>, String>>()?;
+            let mut token = None;
+            if let Some((user, pass)) = &basic {
+                let t = crate::vault::basic_auth_token(user, pass, expand.basic_auth, &mut lookup)?;
+                headers.retain(|k, _| !k.eq_ignore_ascii_case("authorization"));
+                headers.insert("authorization".into(), format!("Basic {t}"));
+                token = Some(t.into_bytes());
+            }
             let body = match &body {
                 Some(b) if expand.body => {
                     Some(crate::vault::substitute(&b.as_bytes(), &mut lookup)?)
@@ -483,7 +499,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                 Some(b) => Some(b.as_bytes().to_vec()),
                 None => None,
             };
-            Ok((url, headers, body))
+            Ok((url, headers, body, token))
         })();
         // Whatever fails from here on is reported with secret values scrubbed out.
         let scrub = |msg: String| {
@@ -493,7 +509,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                     .into_owned(),
             )
         };
-        let (url, headers, body) = expanded.map_err(scrub)?;
+        let (url, headers, body, token) = expanded.map_err(scrub)?;
         let url = policy.check(&method, &url).map_err(scrub)?;
         for secret in &used {
             secret.check(&url).map_err(scrub)?;
@@ -506,11 +522,14 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             ));
         }
         // Only values long enough not to mangle ordinary text are redacted from responses.
-        let secrets: Vec<Vec<u8>> = used
+        let mut secrets: Vec<Vec<u8>> = used
             .iter()
             .filter(|s| s.value.len() >= crate::MIN_SECRET_BYTES)
             .map(|s| s.value.clone())
             .collect();
+        if !used.is_empty() {
+            secrets.extend(token.filter(|t| t.len() >= crate::MIN_SECRET_BYTES));
+        }
         // Only method and host go on the span: the path and query may carry secrets.
         let span = tracing::info_span!(
             "http.client",
@@ -605,6 +624,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                 opts.get::<Option<bool>>("stream")?.unwrap_or(false),
                 crate::vault::Expand::parse(opts.get::<Option<Vec<String>>>("vault")?)
                     .map_err(mlua::Error::runtime)?,
+                basic_auth_opt(&opts)?,
             )
         })?,
     )?;
@@ -626,6 +646,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                     None,
                     false,
                     crate::vault::Expand::parse(vault).map_err(mlua::Error::runtime)?,
+                    None,
                 )
             },
         )?,
