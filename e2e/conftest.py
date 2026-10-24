@@ -122,6 +122,22 @@ def _spawn(cmd, log: Path, env=None):
     return subprocess.Popen(cmd, stdout=log.open("wb"), stderr=subprocess.STDOUT, env=env, cwd=ROOT)
 
 
+_WORKDIR: list[Path] = []
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """A failing test gets the tail of the server and roto logs attached, so the cause is on screen."""
+    outcome = yield
+    rep = outcome.get_result()
+    if rep.when == "call" and rep.failed and _WORKDIR:
+        for name in ("server.log", "roto.log"):
+            f = _WORKDIR[0] / name
+            if f.exists():
+                tail = "\n".join(f.read_text(errors="replace").splitlines()[-25:])
+                rep.sections.append((f"{name} (last 25 lines)", tail))
+
+
 @pytest.fixture(scope="session")
 def megalith():
     m = Megalith()
@@ -134,6 +150,7 @@ def stack(megalith):
     if not shutil.which("roto-server"):
         pytest.skip("roto-server is not on PATH")
     work = Path(tempfile.mkdtemp(prefix="integraal-e2e-"))
+    _WORKDIR[:] = [work]
     procs = []
     try:
         subprocess.run(

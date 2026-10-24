@@ -48,7 +48,7 @@ impl ScriptStore for S3Store {
                     .body
                     .collect()
                     .await
-                    .map_err(|e| LoadError::Storage(e.to_string()))?;
+                    .map_err(|e| LoadError::Storage(sdk_err(&e)))?;
                 let source = String::from_utf8(bytes.to_vec()).map_err(|_| LoadError::NotUtf8)?;
                 Ok(Fetched::Fresh(Script { source, etag }))
             }
@@ -58,7 +58,12 @@ impl ScriptStore for S3Store {
             Err(SdkError::ServiceError(e)) if e.raw().status().as_u16() == 304 => {
                 Ok(Fetched::NotModified)
             }
-            Err(e) => Err(LoadError::Storage(e.to_string())),
+            Err(e) => Err(LoadError::Storage(sdk_err(&e))),
         }
     }
+}
+
+/// An AWS SDK error with its whole cause chain. `to_string()` alone gives just "service error".
+pub(crate) fn sdk_err<E: std::error::Error>(e: &E) -> String {
+    aws_sdk_s3::error::DisplayErrorContext(e).to_string()
 }

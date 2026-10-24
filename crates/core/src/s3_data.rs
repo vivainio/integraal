@@ -1,3 +1,4 @@
+use crate::sdk_err;
 use aws_sdk_s3::{error::SdkError, operation::get_object::GetObjectError, Client};
 use integraal_wrappers::{ObjectBackend, ObjectWriter, PresignMethod};
 use std::io::Read;
@@ -93,7 +94,7 @@ impl S3Writer {
                     .key(&key)
                     .send()
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| sdk_err(&e))?
                     .upload_id()
                     .ok_or("S3 returned no upload id")?
                     .to_string(),
@@ -124,7 +125,7 @@ impl S3Writer {
                         .upload_id(&id)
                         .send()
                         .await;
-                    Err(e.to_string())
+                    Err(sdk_err(&e))
                 }
             }
         })?;
@@ -160,7 +161,7 @@ impl ObjectWriter for S3Writer {
                     .send()
                     .await
                     .map(|_| ())
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| sdk_err(&e))
             });
         }
         if !tail.is_empty() {
@@ -183,7 +184,7 @@ impl ObjectWriter for S3Writer {
                 .send()
                 .await
                 .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map_err(|e| sdk_err(&e))
         });
         if done.is_err() {
             self.upload_id = Some(id); // Drop aborts it
@@ -248,7 +249,7 @@ impl ObjectBackend for S3Backend {
                 {
                     Ok(None)
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(sdk_err(&e)),
             }
         })
     }
@@ -265,18 +266,14 @@ impl ObjectBackend for S3Backend {
                 .await
             {
                 Ok(out) => Ok(Some(
-                    out.body
-                        .collect()
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .to_vec(),
+                    out.body.collect().await.map_err(|e| sdk_err(&e))?.to_vec(),
                 )),
                 Err(SdkError::ServiceError(e))
                     if matches!(e.err(), GetObjectError::NoSuchKey(_)) =>
                 {
                     Ok(None)
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(sdk_err(&e)),
             }
         })
     }
@@ -292,7 +289,7 @@ impl ObjectBackend for S3Backend {
                 .send()
                 .await
                 .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map_err(|e| sdk_err(&e))
         })
     }
 
@@ -306,7 +303,7 @@ impl ObjectBackend for S3Backend {
                 .send()
                 .await
                 .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map_err(|e| sdk_err(&e))
         })
     }
 
@@ -317,7 +314,7 @@ impl ObjectBackend for S3Backend {
         ttl: std::time::Duration,
     ) -> Result<String, String> {
         self.handle.block_on(async {
-            let cfg = PresigningConfig::expires_in(ttl).map_err(|e| e.to_string())?;
+            let cfg = PresigningConfig::expires_in(ttl).map_err(|e| sdk_err(&e))?;
             match method {
                 PresignMethod::Get => self
                     .client
@@ -327,7 +324,7 @@ impl ObjectBackend for S3Backend {
                     .presigned(cfg)
                     .await
                     .map(|r| r.uri().to_string())
-                    .map_err(|e| e.to_string()),
+                    .map_err(|e| sdk_err(&e)),
                 PresignMethod::Put => self
                     .client
                     .put_object()
@@ -336,7 +333,7 @@ impl ObjectBackend for S3Backend {
                     .presigned(cfg)
                     .await
                     .map(|r| r.uri().to_string())
-                    .map_err(|e| e.to_string()),
+                    .map_err(|e| sdk_err(&e)),
             }
         })
     }
@@ -352,7 +349,7 @@ impl ObjectBackend for S3Backend {
                 .max_keys(limit.min(1000) as i32)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| sdk_err(&e))?;
             Ok(out
                 .contents()
                 .iter()

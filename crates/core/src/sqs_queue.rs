@@ -1,3 +1,4 @@
+use crate::sdk_err;
 use aws_sdk_sqs::{types::SendMessageBatchRequestEntry, Client};
 use integraal_wrappers::{OutMessage, QueueBackend};
 use tokio::runtime::Handle;
@@ -54,7 +55,7 @@ impl QueueBackend for SqsBackend {
                         .message_body(&m.body)
                         .delay_seconds(m.delay_secs as i32)
                         .build()
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| sdk_err(&e))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let out = self.handle.block_on(
@@ -64,7 +65,7 @@ impl QueueBackend for SqsBackend {
                     .set_entries(Some(entries))
                     .send(),
             );
-            let out = out.map_err(|e| e.to_string())?;
+            let out = out.map_err(|e| sdk_err(&e))?;
             if !out.failed().is_empty() {
                 return Err(format!(
                     "{} of {} messages were rejected by the queue",

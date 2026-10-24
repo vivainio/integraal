@@ -100,3 +100,8 @@ pub enum Error {
     #[error("internal error: {0}")]
     Internal(String),
 }
+
+/// An AWS SDK error with its whole cause chain. `to_string()` alone gives just "service error".
+pub(crate) fn sdk_err<E: std::error::Error>(e: &E) -> String {
+    aws_sdk_s3::error::DisplayErrorContext(e).to_string()
+}

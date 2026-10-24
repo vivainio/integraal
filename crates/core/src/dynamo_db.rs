@@ -1,3 +1,4 @@
+use crate::sdk_err;
 use aws_sdk_dynamodb::{
     error::SdkError,
     types::{AttributeValue, ReturnValue},
@@ -76,7 +77,7 @@ impl ItemBackend for DynamoBackend {
                 .consistent_read(true)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| sdk_err(&e))?;
             Ok(out.item().and_then(parse))
         })
     }
@@ -94,7 +95,7 @@ impl ItemBackend for DynamoBackend {
                 .send()
                 .await
                 .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map_err(|e| sdk_err(&e))
         })
     }
 
@@ -109,7 +110,7 @@ impl ItemBackend for DynamoBackend {
                 .send()
                 .await
                 .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map_err(|e| sdk_err(&e))
         })
     }
 
@@ -134,7 +135,7 @@ impl ItemBackend for DynamoBackend {
                 {
                     Ok(false)
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(sdk_err(&e)),
             }
         })
     }
@@ -162,7 +163,7 @@ impl ItemBackend for DynamoBackend {
                 {
                     Ok(false)
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(sdk_err(&e)),
             }
         })
     }
@@ -187,7 +188,7 @@ impl ItemBackend for DynamoBackend {
                 {
                     Ok(false)
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(sdk_err(&e)),
             }
         })
     }
@@ -204,7 +205,7 @@ impl ItemBackend for DynamoBackend {
                 .return_values(ReturnValue::AllOld)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| sdk_err(&e))?;
             Ok(out.attributes().and_then(parse))
         })
     }
@@ -243,7 +244,7 @@ impl ItemBackend for DynamoBackend {
                     }
                     Err(SdkError::ServiceError(e))
                         if e.err().is_conditional_check_failed_exception() => {}
-                    Err(e) => return Err(e.to_string()),
+                    Err(e) => return Err(sdk_err(&e)),
                 }
                 // The row is expired, or not a counter: start a fresh counter over an expired row.
                 let res = self
@@ -264,7 +265,7 @@ impl ItemBackend for DynamoBackend {
                     Ok(_) => return Ok(delta),
                     Err(SdkError::ServiceError(e))
                         if e.err().is_conditional_check_failed_exception() => {}
-                    Err(e) => return Err(e.to_string()),
+                    Err(e) => return Err(sdk_err(&e)),
                 }
             }
             Err("key holds a value that is not a counter".to_string())
@@ -299,7 +300,7 @@ impl ItemBackend for DynamoBackend {
                     .exclusive_start_key("pk", s(pk))
                     .exclusive_start_key("sk", s(after));
             }
-            let out = q.send().await.map_err(|e| e.to_string())?;
+            let out = q.send().await.map_err(|e| sdk_err(&e))?;
             Ok(out.items().iter().filter_map(parse).collect())
         })
     }
