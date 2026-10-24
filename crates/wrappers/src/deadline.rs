@@ -132,6 +132,32 @@ fn nanos(t: Instant, base: Instant) -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+/// Runs `f` with a block ending at `at` pushed on the deadline stack, and translates the block
+/// running out into "deadline exceeded" (see `api`).
+pub(crate) fn run_block(
+    deadline: &Deadline,
+    at: Instant,
+    f: &Function,
+) -> mlua::Result<MultiValue> {
+    let id = deadline.push(at);
+    let res = f.call::<MultiValue>(());
+    let (fired, past, outer_expired) = deadline.pop(id);
+    if outer_expired {
+        // Unwinding to an enclosing block or the invocation limit: not ours to translate.
+        return Err(mlua::Error::runtime(match deadline.check() {
+            Err(m) => m,
+            Ok(()) => BLOCK_EXPIRED,
+        }));
+    }
+    match res {
+        // Finished normally after the time was up, or swallowed the interrupt with a pcall.
+        Ok(_) if fired => Err(mlua::Error::runtime("deadline exceeded")),
+        // Failed because of the clock (a native call timed out, say), not on its own.
+        Err(_) if fired || past => Err(mlua::Error::runtime("deadline exceeded")),
+        other => other,
+    }
+}
+
 /// `native.deadline.with(ms, fn)`: runs `fn()` and returns its results. If `fn` is still running
 /// after `ms` (or the invocation's own time is shorter), it is interrupted and `with` raises
 /// "deadline exceeded", which the caller can `pcall`. Blocks nest; the earliest deadline wins.
@@ -143,23 +169,7 @@ pub fn api(lua: &Lua, deadline: Deadline) -> mlua::Result<Table> {
             if ms == 0 {
                 return Err(mlua::Error::runtime("deadline must be at least 1 ms"));
             }
-            let id = deadline.push(Instant::now() + Duration::from_millis(ms));
-            let res = f.call::<MultiValue>(());
-            let (fired, past, outer_expired) = deadline.pop(id);
-            if outer_expired {
-                // Unwinding to an enclosing block or the invocation limit: not ours to translate.
-                return Err(mlua::Error::runtime(match deadline.check() {
-                    Err(m) => m,
-                    Ok(()) => BLOCK_EXPIRED,
-                }));
-            }
-            match res {
-                // Finished normally after the time was up, or swallowed the interrupt with a pcall.
-                Ok(_) if fired => Err(mlua::Error::runtime("deadline exceeded")),
-                // Failed because of the clock (a native call timed out, say), not on its own.
-                Err(_) if fired || past => Err(mlua::Error::runtime("deadline exceeded")),
-                other => other,
-            }
+            run_block(&deadline, Instant::now() + Duration::from_millis(ms), &f)
         })?,
     )?;
     Ok(t)

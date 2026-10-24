@@ -17,6 +17,7 @@ mod db;
 mod deadline;
 mod gzip;
 mod http;
+mod lock;
 mod sink;
 mod sql;
 mod throttle;
@@ -33,7 +34,7 @@ pub use bucket::{
 pub use crypto::{MasterKey, MasterKeys};
 pub use db::{
     Callback, CallbackSigner, DbScope, Item, ItemBackend, Take, Taken, DB_TTL, MAX_ITEM_BYTES,
-    MAX_QUERY_ITEMS,
+    MAX_LOCK_LEASE, MAX_QUERY_ITEMS,
 };
 pub use deadline::Deadline;
 pub use http::{AllowRule, HttpPolicy};

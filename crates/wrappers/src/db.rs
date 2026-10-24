@@ -30,6 +30,11 @@ pub trait ItemBackend: Send + Sync {
     fn take(&self, pk: &str, sk: &str) -> Result<Option<Item>, String>;
     /// Writes the item only if no item exists at `(pk, item.sk)`; returns whether it wrote.
     fn put_if_absent(&self, pk: &str, item: Item) -> Result<bool, String>;
+    /// Writes the item if none exists at `(pk, item.sk)` or the existing one's `ttl` is at or before
+    /// `now` (expired but not yet swept by DynamoDB); returns whether it wrote.
+    fn put_if_free(&self, pk: &str, item: Item, now: u64) -> Result<bool, String>;
+    /// Deletes the item only if its value is `value`; returns whether it deleted.
+    fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String>;
     /// Items under `pk` whose sort key starts with `sk_prefix`, ascending by sort key, at most `limit`.
     fn query(&self, pk: &str, sk_prefix: &str, limit: usize) -> Result<Vec<Item>, String>;
 }
@@ -127,6 +132,44 @@ impl DbScope {
             .filter_map(Self::live)
             .map(|i| (i.sk, i.value))
             .collect())
+    }
+}
+
+/// Longest lease `lock_acquire` grants.
+pub const MAX_LOCK_LEASE: Duration = Duration::from_secs(15 * 60);
+
+impl DbScope {
+    /// The partition holding a lock. It contains a control character, which `check` rejects in
+    /// script-supplied keys, so scripts cannot read or forge locks through `native.db`.
+    fn lock_pk(&self, name: &str) -> Result<String, String> {
+        check("lock name", name, false)?;
+        Ok(format!("TEN#{}#\u{1}lock#{name}", self.tenant))
+    }
+
+    /// Tries once to take the named lock for `lease`. Returns the owner id to pass to `lock_release`,
+    /// or `None` if someone else holds it. A lock whose lease has run out is up for grabs even if
+    /// DynamoDB has not swept its row yet.
+    ///
+    /// The stored expiry is rounded up to whole seconds and padded by one more, so a holder that
+    /// stops itself `lease` after it *started asking* is gone before anyone else can take over.
+    pub fn lock_acquire(&self, name: &str, lease: Duration) -> Result<Option<String>, String> {
+        let pk = self.lock_pk(name)?;
+        let lease = lease.min(MAX_LOCK_LEASE);
+        let owner = hex(&random::<16>()?);
+        let now = now_secs();
+        let item = Item {
+            sk: String::new(),
+            value: owner.clone(),
+            ttl: now + lease.as_secs() + u64::from(lease.subsec_nanos() > 0) + 1,
+        };
+        Ok(self.backend.put_if_free(&pk, item, now)?.then_some(owner))
+    }
+
+    /// Frees the lock if `owner` still holds it; a lock that expired and moved on is left alone.
+    pub fn lock_release(&self, name: &str, owner: &str) -> Result<(), String> {
+        self.backend
+            .delete_if_value(&self.lock_pk(name)?, "", owner)
+            .map(|_| ())
     }
 }
 

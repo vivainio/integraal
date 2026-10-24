@@ -56,6 +56,16 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     native.set("bucket", buckets_api(lua, host, budget.clone())?)?;
     native.set("db", db_api(lua, host, budget.clone())?)?;
     native.set("callback", callback_api(lua, host, budget.clone())?)?;
+    native.set(
+        "lock",
+        crate::lock::api(
+            lua,
+            &host.tenant,
+            host.db.clone(),
+            budget.clone(),
+            host.limits.deadline.clone(),
+        )?,
+    )?;
     native.set("http", http_api(lua, host, budget)?)?;
     native.set(
         "deadline",

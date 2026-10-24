@@ -24,6 +24,7 @@ nav = [
     { "Native API overview" = "native-api.md" },
     { "Buckets (S3)" = "buckets.md" },
     { "DynamoDB" = "dynamodb.md" },
+    { "Locks" = "locks.md" },
     { "Callbacks" = "callbacks.md" },
     { "Crypto" = "crypto.md" },
     { "Outbound HTTP" = "http.md" },

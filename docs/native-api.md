@@ -10,6 +10,7 @@ deployment settings behind it:
 | --- | --- |
 | `native.bucket.<bucket>` | [Buckets (S3)](buckets.md) |
 | `native.db` | [DynamoDB](dynamodb.md) |
+| `native.lock` | [Locks](locks.md) |
 | `native.callback` | [Callbacks](callbacks.md) |
 | `native.crypto` | [Crypto](crypto.md) |
 | `native.http` | [Outbound HTTP](http.md) |

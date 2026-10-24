@@ -390,6 +390,12 @@ mod tests {
         fn put_if_absent(&self, _: &str, _: Item) -> Result<bool, String> {
             unimplemented!()
         }
+        fn put_if_free(&self, _: &str, _: Item, _: u64) -> Result<bool, String> {
+            unimplemented!()
+        }
+        fn delete_if_value(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
+            unimplemented!()
+        }
         fn query(&self, pk: &str, prefix: &str, limit: usize) -> Result<Vec<Item>, String> {
             Ok(self
                 .0

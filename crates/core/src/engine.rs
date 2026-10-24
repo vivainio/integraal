@@ -930,6 +930,29 @@ mod tests {
             }
             Ok(absent)
         }
+        fn put_if_free(
+            &self,
+            pk: &str,
+            item: integraal_wrappers::Item,
+            now: u64,
+        ) -> Result<bool, String> {
+            let mut m = self.0.lock().unwrap();
+            let key = (pk.to_string(), item.sk.clone());
+            let free = m.get(&key).is_none_or(|old| old.ttl <= now);
+            if free {
+                m.insert(key, item);
+            }
+            Ok(free)
+        }
+        fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String> {
+            let mut m = self.0.lock().unwrap();
+            let key = (pk.to_string(), sk.to_string());
+            let mine = m.get(&key).is_some_and(|i| i.value == value);
+            if mine {
+                m.remove(&key);
+            }
+            Ok(mine)
+        }
         fn query(
             &self,
             pk: &str,
@@ -1707,6 +1730,140 @@ mod tests {
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!({"ok": false, "err": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn local_locks_exclude_across_invocations_and_release_on_every_path() {
+        // The table is process-wide, so two engines (two invocations) contend.
+        let holder = engine(
+            r#"return { handle = function()
+                return { native.lock.with("tl-a", nil, function()
+                    local t = native.time.now_ms()
+                    while native.time.now_ms() - t < 400 do end
+                    return "held"
+                end) }
+            end }"#,
+            Limits::default(),
+        );
+        let rival = |wait: u32| {
+            engine(
+                &format!(
+                    r#"return {{ handle = function()
+                        return {{ native.lock.with("tl-a", {{ wait_ms = {wait} }}, function() return "got" end) }}
+                    end }}"#
+                ),
+                Limits::default(),
+            )
+        };
+        let (held, busy, patient) = tokio::join!(
+            holder.invoke(inv(Trigger::Invoke, json!(null))),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                rival(0).invoke(inv(Trigger::Invoke, json!(null))).await
+            },
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                rival(5000).invoke(inv(Trigger::Invoke, json!(null))).await
+            },
+        );
+        assert_eq!(held.unwrap(), json!([true, "held"]));
+        assert_eq!(busy.unwrap(), json!([false]));
+        assert_eq!(patient.unwrap(), json!([true, "got"]));
+
+        // Other tenants' names do not collide, and a lease kills the holder and frees the lock.
+        let e = engine(
+            r#"return { handle = function()
+                local ok, err = pcall(native.lock.with, "tl-b", { lease_ms = 50 }, function() while true do end end)
+                local again = { native.lock.with("tl-b", nil, function() return 1 end) }
+                local boom = pcall(native.lock.with, "tl-b", nil, function() error("x") end)
+                local after_error = { native.lock.with("tl-b", nil, function() return 2 end) }
+                local nested = { native.lock.with("tl-c", nil, function()
+                    return native.lock.with("tl-c", nil, function() return "inner" end)
+                end) }
+                return { killed = not ok and tostring(err):find("deadline exceeded") ~= nil,
+                         again = again, boom = boom, after_error = after_error, nested = nested,
+                         bad_scope = pcall(native.lock.with, "x", { scope = "nope" }, function() end),
+                         bad_lease = pcall(native.lock.with, "x", { lease_ms = 0 }, function() end),
+                         no_db = pcall(native.lock.with, "x", { scope = "db" }, function() end) }
+            end }"#,
+            Limits::default(),
+        );
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!({"killed": true, "again": [true, 1], "boom": false, "after_error": [true, 2],
+                   "nested": [true, false], "bad_scope": false, "bad_lease": false, "no_db": false})
+        );
+    }
+
+    #[tokio::test]
+    async fn db_locks_are_leases_owned_by_the_holder() {
+        let backend = Arc::new(MemItems::default());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let lock_item = |value: &str, ttl: u64| integraal_wrappers::Item {
+            sk: "".into(),
+            value: value.into(),
+            ttl,
+        };
+        // held by someone else, lease still running / lease long gone but row not yet swept
+        backend
+            .put("TEN#acme#\u{1}lock#busy", lock_item("other", now + 600))
+            .unwrap();
+        backend
+            .put("TEN#acme#\u{1}lock#stale", lock_item("other", now - 5))
+            .unwrap();
+        let e = engine(
+            r#"return { handle = function()
+                local o = {}
+                o.busy = { native.lock.with("busy", { scope = "db" }, function() return "no" end) }
+                local t = native.time.now_ms()
+                o.waited = { native.lock.with("busy", { scope = "db", wait_ms = 300 }, function() return "no" end) }
+                o.waited_ms = native.time.now_ms() - t
+                o.stale = { native.lock.with("stale", { scope = "db" }, function() return "took over" end) }
+                o.free = { native.lock.with("free", { scope = "db", lease_ms = 5000 }, function()
+                    -- same tenant, but a different holder: the lock is taken
+                    local again = { native.lock.with("free", { scope = "db" }, function() return "no" end) }
+                    return again[1]
+                end) }
+                local ok, err = pcall(native.lock.with, "slow", { scope = "db", lease_ms = 100 }, function() while true do end end)
+                o.killed = not ok and tostring(err):find("deadline exceeded") ~= nil
+                o.reusable = { native.lock.with("slow", { scope = "db" }, function() return 1 end) }
+                o.invisible = not pcall(native.db.query, "\u{1}lock#free") and #native.db.query("lock#free") == 0
+                return o
+            end }"#,
+            Limits::default(),
+        )
+        .with_db(backend.clone());
+        let out = e.invoke(inv(Trigger::Invoke, json!(null))).await;
+        let out = out.unwrap_or_else(|err| panic!("{err:?}"));
+        assert_eq!(out["busy"], json!([false]));
+        assert_eq!(out["waited"], json!([false]));
+        assert!(out["waited_ms"].as_u64().unwrap() >= 250, "{out}");
+        assert_eq!(out["stale"], json!([true, "took over"]));
+        assert_eq!(out["free"], json!([true, false]));
+        assert_eq!(out["killed"], json!(true));
+        assert_eq!(out["invisible"], json!(true));
+        assert_eq!(out["reusable"], json!([true, 1]));
+        // released on every path, and the other holder's row is untouched
+        for name in ["free", "slow", "stale"] {
+            assert!(
+                backend
+                    .get(&format!("TEN#acme#\u{1}lock#{name}"), "")
+                    .unwrap()
+                    .is_none(),
+                "{name} still locked"
+            );
+        }
+        assert_eq!(
+            backend
+                .get("TEN#acme#\u{1}lock#busy", "")
+                .unwrap()
+                .unwrap()
+                .value,
+            "other"
         );
     }
 

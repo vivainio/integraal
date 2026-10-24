@@ -37,3 +37,4 @@ Set `db.table` in the [global config](deployment.md#configuration). The table ne
 All tenants share the table; isolation comes from the enforced `TEN#<tenant>#` partition key prefix.
 
 IAM: `dynamodb:GetItem`, `PutItem`, `DeleteItem` (conditional writes included) and `Query` on the table.
+[Locks](locks.md) use the same actions.

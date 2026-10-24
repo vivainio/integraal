@@ -147,6 +147,9 @@ declare native: {
         compress: (data: string) -> string,
         decompress: (data: string) -> string,
     },
+    lock: {
+        with: <T...>(name: string, opts: { scope: ("local" | "db")?, wait_ms: number?, lease_ms: number? }?, fn: () -> T...) -> (boolean, T...),
+    },
     deadline: {
         with: <T...>(ms: number, fn: () -> T...) -> T...,
     },

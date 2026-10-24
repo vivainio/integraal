@@ -113,6 +113,57 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    fn put_if_free(&self, pk: &str, item: Item, now: u64) -> Result<bool, String> {
+        self.handle.block_on(async {
+            let res = self
+                .client
+                .put_item()
+                .table_name(&self.table)
+                .item("pk", s(pk))
+                .item("sk", s(&item.sk))
+                .item("v", s(&item.value))
+                .item("ttl", AttributeValue::N(item.ttl.to_string()))
+                .condition_expression("attribute_not_exists(pk) OR #t <= :now")
+                .expression_attribute_names("#t", "ttl")
+                .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                .send()
+                .await;
+            match res {
+                Ok(_) => Ok(true),
+                Err(SdkError::ServiceError(e))
+                    if e.err().is_conditional_check_failed_exception() =>
+                {
+                    Ok(false)
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        })
+    }
+
+    fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String> {
+        self.handle.block_on(async {
+            let res = self
+                .client
+                .delete_item()
+                .table_name(&self.table)
+                .key("pk", s(pk))
+                .key("sk", s(sk))
+                .condition_expression("v = :v")
+                .expression_attribute_values(":v", s(value))
+                .send()
+                .await;
+            match res {
+                Ok(_) => Ok(true),
+                Err(SdkError::ServiceError(e))
+                    if e.err().is_conditional_check_failed_exception() =>
+                {
+                    Ok(false)
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        })
+    }
+
     fn take(&self, pk: &str, sk: &str) -> Result<Option<Item>, String> {
         self.handle.block_on(async {
             let out = self
