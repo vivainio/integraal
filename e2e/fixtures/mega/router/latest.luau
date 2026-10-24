@@ -10,6 +10,9 @@ local function on_route(_ctx, event)
 	if key and string.sub(key, 1, 15) == "incoming/feeds/" then
 		return "feed"
 	end
+	if key and string.sub(key, 1, 16) == "incoming/orders/" then
+		return "ingest"
+	end
 	if event.route then
 		return event.route
 	end

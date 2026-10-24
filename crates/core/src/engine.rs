@@ -2645,6 +2645,7 @@ mod tests {
             "orders",
             r#"return { on_invoke = function(ctx, ev)
                 local job = native.batch.new({ id = "j1" })
+                job:input_rows("seed", { { id = 1 }, { id = 2 } })
                 local customers = job:query("customers", "customers_by_id", { ids = ev.ids })
                 job:query("orders", "open_orders")
                 job:state({ ref = ev.ref, customers = customers })

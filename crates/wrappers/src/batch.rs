@@ -557,6 +557,9 @@ impl UserData for Job {
                     .chain(d.http.iter().map(|(n, _)| n.as_str()))
                     .collect::<Vec<_>>(),
                 "created_ms": now,
+                "inputs": d.inputs.values()
+                    .flat_map(|i| i.parts.iter().filter_map(|p| p.get("key").and_then(Json::as_str)))
+                    .collect::<Vec<_>>(),
                 "state": d.state,
             });
             let inputs: serde_json::Map<String, Json> = d
@@ -690,6 +693,9 @@ impl InputRows {
 struct Envelope {
     script: Option<String>,
     queries: Vec<String>,
+    /// Keys (relative to the job folder) of the input files the script attached. Absent in state
+    /// written by older versions, whose inputs are then not cleaned up.
+    inputs: Vec<String>,
     state: Json,
 }
 
@@ -711,6 +717,17 @@ fn load_envelope(ctx: &Ctx, scope: &BucketScope, id: &str) -> mlua::Result<Optio
             .map(|a| {
                 a.iter()
                     .filter_map(|q| q.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        inputs: j
+            .get("inputs")
+            .and_then(Json::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Json::as_str)
+                    .filter(|k| part_key_ok(k))
+                    .map(str::to_string)
                     .collect()
             })
             .unwrap_or_default(),
@@ -781,6 +798,7 @@ struct Hydrated {
     ok: bool,
     error: Option<String>,
     state: Json,
+    inputs: Vec<String>,
     outputs: BTreeMap<String, Arc<Output>>,
 }
 
@@ -873,6 +891,7 @@ fn hydrate(lua: &Lua, ctx: &Arc<Ctx>, event: &Table, allow_failure: bool) -> mlu
         ok,
         error,
         state: env.state,
+        inputs: env.inputs,
         outputs,
     })?))
 }
@@ -1113,6 +1132,9 @@ impl UserData for Hydrated {
                 for p in &o.parts {
                     add(format!("{}{}", job_dir(&this.id), p.key))?;
                 }
+            }
+            for key in &this.inputs {
+                add(format!("{}{key}", job_dir(&this.id)))?;
             }
             add(format!("{}request.json", job_dir(&this.id)))?;
             add(format!("{}done.json", job_dir(&this.id)))?;

@@ -4,6 +4,7 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 env:
@@ -21,3 +22,19 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # Needs a roto with the `runtime` Lambda executor, which no release has yet, so it is built from source.
+  # Run it by hand from the Actions tab until a release includes it.
+  e2e:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      - run: git clone --depth 1 https://github.com/vivainio/roto /tmp/roto
+      - run: cargo build --manifest-path /tmp/roto/Cargo.toml -p roto-server
+      - run: uv run --project e2e pytest e2e -v
+        env:
+          ROTO_SERVER: /tmp/roto/target/debug/roto-server
