@@ -8,6 +8,7 @@
 //! {
 //!   "scripts":   { "bucket": "scripts", "prefix": "" },
 //!   "buckets":   { "prefix": "tenants/", "map": { "In": "data-in", "Out": "data-out" } },
+//!   "batch":     { "bucket": "partner-batch", "prefix": "tenants/" },
 //!   "db":        { "table": "integraal" },
 //!   "callbacks": { "base_url": "https://hooks.example.com" },
 //!   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
@@ -37,6 +38,9 @@ pub struct GlobalConfig {
     /// Named tenant buckets (`native.bucket.<name>`).
     #[serde(default)]
     pub buckets: BucketsConfig,
+    /// Dedicated bucket for `native.batch` jobs, kept apart from the data buckets.
+    #[serde(default)]
+    pub batch: Option<BatchConfig>,
     /// DynamoDB table behind `native.db` and `native.callback`.
     #[serde(default)]
     pub db: Option<DbConfig>,
@@ -86,6 +90,17 @@ pub struct BucketsConfig {
     /// Logical name (letters, digits, `_`; by convention `In`, `Out`, `Backup`, `Temp`) to S3 bucket.
     #[serde(default)]
     pub map: BTreeMap<String, String>,
+}
+
+/// The bucket partners exchange batch jobs through. Tenants only reach it when their
+/// `config.json` sets `"batch": true`, and only their own `<prefix><tenant>/` folder of it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchConfig {
+    pub bucket: String,
+    /// Base prefix; empty or ending with `/`. A tenant's jobs are `<prefix><tenant>/jobs/<job>/`.
+    #[serde(default)]
+    pub prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -227,6 +242,16 @@ impl GlobalConfig {
                 ));
             }
         }
+        if let Some(b) = &self.batch {
+            if b.bucket.is_empty() || !(b.prefix.is_empty() || b.prefix.ends_with('/')) {
+                return Err(
+                    "batch needs a bucket, and its prefix must be empty or end with '/'".into(),
+                );
+            }
+            if self.buckets.map.values().any(|d| *d == b.bucket) {
+                return Err("batch.bucket must not also be one of buckets.map".into());
+            }
+        }
         if self
             .callbacks
             .as_ref()
@@ -312,6 +337,10 @@ impl GlobalConfig {
             let backend = crate::S3Backend::from_env(bucket).await;
             engine = engine.with_bucket(name, Arc::new(backend), self.buckets.prefix.clone());
         }
+        if let Some(b) = &self.batch {
+            let backend = crate::S3Backend::from_env(&b.bucket).await;
+            engine = engine.with_batch_bucket(Arc::new(backend), b.prefix.clone());
+        }
         if let Some(db) = &self.db {
             engine = engine.with_db(Arc::new(crate::DynamoBackend::from_env(&db.table).await));
         }
@@ -350,6 +379,7 @@ mod tests {
         let full = r#"{
             "scripts": {"bucket": "s", "prefix": "p/"},
             "buckets": {"prefix": "tenants/", "map": {"In": "data-in", "Out": "data-out"}},
+            "batch": {"bucket": "partner-batch", "prefix": "tenants/"},
             "db": {"table": "t"}, "callbacks": {"base_url": "https://h.example.com"},
             "queue": {"url": "https://sqs/q"}, "admin": {"port": 9090, "token_env": "T"}, "crypto": {"keys": {"1": "K1", "2": "K2"}, "active": 2}, "server": {"port": 9000},
             "throttle": [{"url": "https://api.partner.com/", "max_concurrent": 2}],
@@ -401,6 +431,15 @@ mod tests {
         assert!(
             bad(r#""ingress": {"queues": {"a": ""}, "default": "a"}"#),
             "class without a queue URL"
+        );
+        assert!(bad(r#""batch": {"bucket": ""}"#), "batch without a bucket");
+        assert!(
+            bad(r#""batch": {"bucket": "b", "prefix": "x"}"#),
+            "batch prefix without slash"
+        );
+        assert!(
+            bad(r#""buckets": {"map": {"In": "same"}}, "batch": {"bucket": "same"}"#),
+            "batch bucket shared with a data bucket"
         );
         assert!(
             bad(r#""crypto": {"keys": {"1": "K"}, "active": 2}"#),

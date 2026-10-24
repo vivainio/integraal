@@ -21,3 +21,4 @@ async-trait.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 crc32fast = "1"
+sha2 = "0.10"

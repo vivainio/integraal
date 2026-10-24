@@ -137,6 +137,9 @@ pub struct TenantConfig {
     /// Absent = no access. Names must match the deployment's `buckets.map`.
     #[serde(default)]
     pub buckets: HashMap<String, Access>,
+    /// Allows `native.batch` (jobs handed to a partner through the deployment's batch bucket).
+    #[serde(default)]
+    pub batch: bool,
     /// Script whose `on_route`/`route` handler picks the script for messages that don't name one.
     #[serde(default)]
     pub router: Option<String>,
@@ -176,6 +179,8 @@ pub struct Engine {
     ceiling: Limits,
     /// Named buckets with the base key prefix each tenant's directory sits under.
     buckets: HashMap<String, (Arc<dyn ObjectBackend>, String)>,
+    /// The one bucket behind `native.batch`, kept apart from the data buckets.
+    batch: Option<(Arc<dyn ObjectBackend>, String)>,
     db: Option<(
         Arc<dyn ItemBackend>,
         Arc<integraal_wrappers::CallbackSigner>,
@@ -189,6 +194,7 @@ pub struct Engine {
 #[derive(Clone)]
 pub(crate) struct Services {
     buckets: BucketScopes,
+    batch: Option<BucketScope>,
     db: Option<DbScope>,
     cb_url: Option<String>,
     throttle: Option<Arc<Throttle>>,
@@ -203,6 +209,7 @@ impl Engine {
             limits,
             ceiling: Limits::ceiling(),
             buckets: HashMap::new(),
+            batch: None,
             db: None,
             callback_base_url: None,
             throttle: None,
@@ -226,6 +233,17 @@ impl Engine {
     ) -> Self {
         self.buckets
             .insert(name.into(), (backend, base_prefix.into()));
+        self
+    }
+
+    /// Registers the dedicated bucket behind `native.batch`. Each tenant is confined to
+    /// `<base_prefix><tenant>/` in it, and only reaches it if its config sets `batch`.
+    pub fn with_batch_bucket(
+        mut self,
+        backend: Arc<dyn ObjectBackend>,
+        base_prefix: impl Into<String>,
+    ) -> Self {
+        self.batch = Some((backend, base_prefix.into()));
         self
     }
 
@@ -301,12 +319,24 @@ impl Engine {
                 .with_access(*access);
             buckets.insert(name.clone(), scope);
         }
+        let batch = if config.batch {
+            let (backend, base) = self.batch.as_ref().ok_or_else(|| {
+                Error::Config("the batch bucket is not configured on this deployment".into())
+            })?;
+            Some(
+                BucketScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
+                    .with_max_object_bytes(limits.max_object_bytes),
+            )
+        } else {
+            None
+        };
         let db = self
             .db
             .as_ref()
             .map(|(b, s)| DbScope::new(b.clone(), inv.tenant.as_str()).with_signer(s.clone()));
         let svc = Services {
             buckets,
+            batch,
             db,
             cb_url: self.callback_base_url.clone(),
             throttle: self.throttle.clone(),
@@ -362,6 +392,7 @@ impl Services {
     pub(crate) fn bare() -> Self {
         Self {
             buckets: BucketScopes::new(),
+            batch: None,
             db: None,
             cb_url: None,
             throttle: None,
@@ -378,6 +409,7 @@ pub(crate) struct Vm {
     deadline: Instant,
     script: ScriptName,
     buckets: BucketScopes,
+    batch: Option<BucketScope>,
 }
 
 pub(crate) fn new_vm(
@@ -403,6 +435,7 @@ pub(crate) fn new_vm(
             tenant: tenant.to_string(),
             script: script.clone(),
             buckets: svc.buckets.clone(),
+            batch: svc.batch.clone(),
             db: svc.db.clone(),
             callback_base_url: svc.cb_url.clone(),
             throttle: svc.throttle.clone(),
@@ -434,6 +467,7 @@ pub(crate) fn new_vm(
         deadline: hard,
         script,
         buckets: vm_buckets,
+        batch: svc.batch.clone(),
     })
 }
 
@@ -471,7 +505,7 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
         .from_value(out)
         .map_err(|e| Error::Script(format!("handler result is not JSON-serializable: {e}")))?;
     if call.trigger == Trigger::Queue {
-        apply_deletes(&result, &call.event, &vm.buckets)?;
+        apply_deletes(&result, &call.event, &vm.buckets, vm.batch.as_ref())?;
     }
     Ok(result)
 }
@@ -486,6 +520,7 @@ fn apply_deletes(
     result: &serde_json::Value,
     event: &serde_json::Value,
     buckets: &BucketScopes,
+    batch: Option<&BucketScope>,
 ) -> Result<(), Error> {
     use serde_json::Value;
     let bad = |m: &str| Error::Script(format!("invalid delete in handler result: {m}"));
@@ -510,7 +545,12 @@ fn apply_deletes(
         Some(_) => return Err(bad("expected true or a list of { bucket, key }")),
     };
     for (bucket, key) in targets {
-        let scope = buckets.get(&bucket).ok_or_else(|| {
+        let scope = if bucket == integraal_wrappers::BATCH_BUCKET {
+            batch
+        } else {
+            buckets.get(&bucket)
+        };
+        let scope = scope.ok_or_else(|| {
             Error::Script(format!(
                 "delete: bucket {bucket:?} is not available to this tenant"
             ))
@@ -2113,6 +2153,377 @@ mod tests {
             e.invoke(msg(json!({"key": "x"}))).await,
             Err(Error::NoRoute)
         ));
+    }
+
+    fn gz(text: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(text.as_bytes()).unwrap();
+        e.finish().unwrap()
+    }
+
+    fn sha(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    const BATCH_CONFIG: &str = r#"{"router":"router","batch":true}"#;
+
+    fn batch_world() -> (Engine, Arc<MemBackend>) {
+        let store = Arc::new(MemoryStore::default());
+        put(
+            &store,
+            "orders",
+            r#"return { on_invoke = function(ctx, ev)
+                local job = native.batch.new({ id = "j1" })
+                local customers = job:query("customers", "customers_by_id", { ids = ev.ids })
+                job:query("orders", "open_orders")
+                job:state({ ref = ev.ref, customers = customers })
+                job:continue_with("settle")
+                return { id = job:submit(), customers = customers }
+            end }"#,
+        );
+        put(
+            &store,
+            "router",
+            r#"return { on_route = function(ctx, ev)
+                local r = native.batch.route(ev)
+                if r then return r.script and { script = r.script, event = r.event } or "gone" end
+                return "orders"
+            end }"#,
+        );
+        put(
+            &store,
+            "gone",
+            "return { on_queue = function() return { gone = true } end }",
+        );
+        put(
+            &store,
+            "settle",
+            r#"return { on_queue = function(ctx, ev)
+                local job = native.batch.hydrate(ev)
+                if not job then return { gone = true } end
+                local ids, orders = {}, 0
+                for row in job:rows("customers") do table.insert(ids, row.id) end
+                for _ in job:rows("orders") do orders += 1 end
+                return { job = job.id, state = job.state, ids = ids, orders = orders,
+                         parts = job.results.customers.parts, delete = job:keys() }
+            end }"#,
+        );
+        put(
+            &store,
+            "probe",
+            r#"return { on_queue = function(ctx, ev)
+                local ok, err = pcall(function()
+                    local job = native.batch.hydrate(ev, { allow_failure = ev.allow })
+                    if not job.ok then return "failed: " .. job.error end
+                    local n = 0
+                    for _ in job:rows("customers") do n += 1 end
+                    return n
+                end)
+                return { ok = ok, out = tostring(err) }
+            end }"#,
+        );
+        store.put(&ScriptKey::config("acme").unwrap(), BATCH_CONFIG);
+        let backend = Arc::new(MemBackend::default());
+        let e = routed(&store).with_batch_bucket(backend.clone(), "data/");
+        (e, backend)
+    }
+
+    fn partner_done(backend: &MemBackend, done: serde_json::Value) {
+        backend
+            .put(
+                "data/acme/jobs/j1/done.json",
+                serde_json::to_vec(&done).unwrap(),
+            )
+            .unwrap();
+    }
+
+    fn done_event() -> serde_json::Value {
+        json!({"bucket": "$batch", "key": "jobs/j1/done.json"})
+    }
+
+    fn direct(script: &str, event: serde_json::Value) -> Invocation {
+        Invocation {
+            script: Some(script.into()),
+            ..msg(event)
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_job_round_trip_through_a_partner() {
+        let (e, backend) = batch_world();
+        let mut submit = msg(json!({"ref": 7, "ids": [1, 2, 3]}));
+        submit.script = Some("orders".into());
+        submit.trigger = Trigger::Invoke;
+        let out = e.invoke(submit).await.unwrap();
+        assert_eq!(out, json!({"id": "j1", "customers": "customers"}));
+
+        // The partner sees the work but not our state; the state sits outside the job folder.
+        let request: serde_json::Value = serde_json::from_slice(
+            &backend
+                .get("data/acme/jobs/j1/request.json")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["queries"][0]["name"], "customers");
+        assert_eq!(request["queries"][0]["params"], json!({"ids": [1, 2, 3]}));
+        assert_eq!(request["queries"][1]["params"], json!({}));
+        assert!(!request.to_string().contains("\"ref\""));
+        assert!(backend.get("data/acme/state/j1.json").unwrap().is_some());
+
+        // Not done yet: a hydrate on the (premature) event finds nothing.
+        assert_eq!(
+            e.invoke(direct("settle", done_event())).await.unwrap(),
+            json!({"gone": true})
+        );
+
+        // The partner answers with several parts, mixed gzip and plain, and commits with done.json.
+        let p0 = gz("{\"id\":1}\n{\"id\":2}\n");
+        let p1 = b"\n{\"id\":3}\n".to_vec();
+        let o0 = gz("{\"n\":1}\n");
+        backend
+            .put("data/acme/jobs/j1/customers.0000.ndjson.gz", p0.clone())
+            .unwrap();
+        backend
+            .put("data/acme/jobs/j1/customers.0001.ndjson", p1.clone())
+            .unwrap();
+        backend
+            .put("data/acme/jobs/j1/orders.0000.ndjson.gz", o0.clone())
+            .unwrap();
+        partner_done(
+            &backend,
+            json!({"ok": true, "results": {
+                "customers": {"rows": 3, "parts": [
+                    {"key": "customers.0000.ndjson.gz", "bytes": p0.len(), "sha256": sha(&p0)},
+                    {"key": "customers.0001.ndjson", "bytes": p1.len()}]},
+                "orders": {"parts": [{"key": "orders.0000.ndjson.gz"}]},
+            }}),
+        );
+
+        // Through the router: the continuation named at submit time runs, with its state back.
+        let out = e.invoke(msg(done_event())).await.unwrap();
+        assert_eq!(out["state"], json!({"ref": 7, "customers": "customers"}));
+        assert_eq!(out["ids"], json!([1, 2, 3]));
+        assert_eq!(out["orders"], 1);
+        assert_eq!(out["parts"], 2);
+
+        // The handler's `delete = job:keys()` removed the whole job after it succeeded.
+        assert!(backend.list("data/acme/jobs", 100).unwrap().is_empty());
+        assert!(backend.get("data/acme/state/j1.json").unwrap().is_none());
+
+        // A duplicate delivery finds the job gone and the router sends it to the fallback.
+        assert_eq!(
+            e.invoke(msg(done_event())).await.unwrap(),
+            json!({"gone": true})
+        );
+        // A data-bucket object that merely looks like a done.json is not a batch event.
+        let mut other = msg(json!({"bucket": "In", "key": "jobs/j1/done.json", "ids": []}));
+        other.trigger = Trigger::Invoke;
+        assert_eq!(e.invoke(other).await.unwrap()["id"], "j1");
+    }
+
+    async fn probe(e: &Engine, event: serde_json::Value) -> serde_json::Value {
+        e.invoke(direct("probe", event)).await.unwrap()
+    }
+
+    async fn submitted() -> (Engine, Arc<MemBackend>) {
+        let (e, backend) = batch_world();
+        let mut submit = msg(json!({"ref": 1, "ids": []}));
+        submit.script = Some("orders".into());
+        submit.trigger = Trigger::Invoke;
+        e.invoke(submit).await.unwrap();
+        (e, backend)
+    }
+
+    #[tokio::test]
+    async fn batch_failure_and_corruption_are_reported() {
+        let (e, backend) = submitted().await;
+        let part = gz("{\"id\":1}\n{\"id\":2}\n");
+        backend.put("data/acme/jobs/j1/c.gz", part.clone()).unwrap();
+        let manifest = |c: serde_json::Value| json!({"ok": true, "results": {"customers": c, "orders": {"parts": []}}});
+        let text = |v: &serde_json::Value| v["out"].as_str().unwrap().to_string();
+
+        // The partner says it failed.
+        partner_done(&backend, json!({"ok": false, "error": "partner timeout"}));
+        let r = probe(&e, done_event()).await;
+        assert_eq!(r["ok"], false);
+        assert!(text(&r).contains("batch j1 failed: partner timeout"));
+        let mut ev = done_event();
+        ev["allow"] = json!(true);
+        assert!(text(&probe(&e, ev).await).contains("failed: partner timeout"));
+
+        // Good manifest.
+        partner_done(
+            &backend,
+            manifest(json!({"rows": 2, "parts": [
+            {"key": "c.gz", "bytes": part.len(), "sha256": sha(&part)}]})),
+        );
+        assert_eq!(text(&probe(&e, done_event()).await), "2");
+
+        // Wrong row count, size, checksum; a missing part; an escaping key; a missing result.
+        let cases = [
+            (
+                manifest(json!({"rows": 5, "parts": [{"key": "c.gz"}]})),
+                "has 2 rows, manifest says 5",
+            ),
+            (
+                manifest(json!({"parts": [{"key": "c.gz", "bytes": 1}]})),
+                "manifest says 1 bytes",
+            ),
+            (
+                manifest(json!({"parts": [{"key": "c.gz", "sha256": sha(b"x")}]})),
+                "sha256 mismatch",
+            ),
+            (
+                manifest(json!({"parts": [{"key": "nope.gz"}]})),
+                "part \"nope.gz\" is missing",
+            ),
+            (
+                manifest(json!({"parts": [{"key": "../../state/j1.json"}]})),
+                "invalid part key",
+            ),
+            (
+                json!({"ok": true, "results": {"orders": {"parts": []}}}),
+                "result \"customers\" is missing",
+            ),
+        ];
+        for (done, want) in cases {
+            partner_done(&backend, done);
+            let r = probe(&e, done_event()).await;
+            assert_eq!(r["ok"], false, "{want}");
+            assert!(text(&r).contains(want), "{want}: got {}", text(&r));
+        }
+
+        // Garbage in a row names the line.
+        backend
+            .put("data/acme/jobs/j1/c.gz", gz("{\"id\":1}\nnot json\n"))
+            .unwrap();
+        partner_done(&backend, manifest(json!({"parts": [{"key": "c.gz"}]})));
+        assert!(text(&probe(&e, done_event()).await).contains("line 2"));
+    }
+
+    #[tokio::test]
+    async fn ndjson_rows_reads_strings_and_streams() {
+        let backend = Arc::new(MemBackend::default());
+        backend
+            .put("data/acme/a.ndjson", b"{\"a\":1}\n\n[2]\n3".to_vec())
+            .unwrap();
+        let e = engine_cfg(
+            r#"return { handle = function()
+                local out = {}
+                for v in native.ndjson.rows(native.bucket.In.open("a.ndjson")) do table.insert(out, v) end
+                local n = 0
+                for _ in native.ndjson.rows('{"x":1}\n{"x":2}\n') do n += 1 end
+                local ok = pcall(function() for _ in native.ndjson.rows("{oops}\n") do end end)
+                return { first = out[1].a, second = out[2][1], third = out[3], n = n, bad = ok }
+            end }"#,
+            Limits::default(),
+            r#"{"buckets":{"In":"read"}}"#,
+        )
+        .with_bucket("In", backend, "data/");
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!({"first": 1, "second": 2, "third": 3, "n": 2, "bad": false})
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_requests_can_carry_input_files() {
+        let store = Arc::new(MemoryStore::default());
+        put(
+            &store,
+            "feeder",
+            r#"return { on_invoke = function(ctx, ev)
+                local job = native.batch.new({ id = "j2" })
+                job:input_rows("ids", { { id = 1 }, { id = 2 }, { id = 3 } })
+                job:input("blob", "raw bytes", { ext = ".bin" })
+                job:input("blob", "second", { ext = ".bin" })
+                job:query("lookup", "by_ids", { input = "ids" })
+                job:submit()
+                return true
+            end }"#,
+        );
+        store.put(&ScriptKey::config("acme").unwrap(), r#"{"batch":true}"#);
+        let backend2 = Arc::new(MemBackend::default());
+        let e2 = routed(&store).with_batch_bucket(backend2.clone(), "data/");
+        let mut inv = msg(json!(null));
+        inv.script = Some("feeder".into());
+        inv.trigger = Trigger::Invoke;
+        assert_eq!(e2.invoke(inv).await.unwrap(), json!(true));
+
+        let ids = backend2
+            .get("data/acme/jobs/j2/inputs/ids.0000.ndjson")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids, b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n");
+        let request: serde_json::Value = serde_json::from_slice(
+            &backend2
+                .get("data/acme/jobs/j2/request.json")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["inputs"]["ids"]["rows"], 3);
+        assert_eq!(
+            request["inputs"]["ids"]["parts"][0]["key"],
+            "inputs/ids.0000.ndjson"
+        );
+        assert_eq!(request["inputs"]["ids"]["parts"][0]["bytes"], ids.len());
+        assert_eq!(request["inputs"]["ids"]["parts"][0]["sha256"], sha(&ids));
+        assert_eq!(request["inputs"]["blob"]["rows"], serde_json::Value::Null);
+        assert_eq!(
+            request["inputs"]["blob"]["parts"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            backend2
+                .get("data/acme/jobs/j2/inputs/blob.0001.bin")
+                .unwrap()
+                .unwrap(),
+            b"second"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_needs_tenant_grant_and_deployment_bucket() {
+        let store = Arc::new(MemoryStore::default());
+        put(
+            &store,
+            "s",
+            r#"return { on_invoke = function() return native.batch.new({ id = "x" }):submit() end }"#,
+        );
+        let call = || {
+            let mut i = msg(json!(null));
+            i.script = Some("s".into());
+            i.trigger = Trigger::Invoke;
+            i
+        };
+        // No grant in the tenant config: the script gets an error, not the bucket.
+        let backend = Arc::new(MemBackend::default());
+        let e = routed(&store).with_batch_bucket(backend.clone(), "data/");
+        assert!(e
+            .invoke(call())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("batch"));
+        // Granted, but the deployment has no batch bucket: a configuration error.
+        store.put(&ScriptKey::config("acme").unwrap(), r#"{"batch":true}"#);
+        let e = routed(&store);
+        assert!(matches!(e.invoke(call()).await, Err(Error::Config(_))));
+        // A job needs a query.
+        let e = routed(&store).with_batch_bucket(backend, "data/");
+        assert!(e
+            .invoke(call())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("at least one query"));
     }
 
     #[tokio::test]

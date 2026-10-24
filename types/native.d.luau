@@ -61,6 +61,37 @@ declare extern type ZipEntry with
     read: (self) -> string
 end
 
+-- A `native.batch` job being put together. Nothing the partner sees exists until `submit`.
+declare extern type BatchJob with
+    -- Adds a named query for the partner; returns the name, which `rows`/`open` take later.
+    query: (self, name: string, query: string, params: any?) -> string
+    -- Attaches a file (or one more part of the same input) to the request: a string or a stream.
+    input: (self, name: string, content: string | ByteStream, opts: { ext: string? }?) -> string
+    -- Attaches rows, as NDJSON cut into parts: an array or an iterator function.
+    input_rows: (self, name: string, rows: { any } | () -> any?, opts: { ext: string? }?) -> string
+    -- Saved for the continuation; the partner never sees it.
+    state: (self, value: any) -> ()
+    -- Script that `native.batch.route` picks when the partner's done.json arrives.
+    continue_with: (self, script: string) -> ()
+    id: (self) -> string
+    submit: (self) -> string
+end
+
+declare extern type BatchResult with
+    id: string
+    ok: boolean
+    error: string?
+    state: any
+    results: { [string]: { rows: number?, parts: number } }
+    parts: (self, name: string) -> number
+    -- Stream of one part (1-based), gunzipped if needed, checked against the manifest at its end.
+    open: (self, name: string, part: number?) -> ByteStream
+    -- Rows of every part in order; raises if a part is missing, corrupt or the row count is off.
+    rows: (self, name: string) -> () -> any?
+    -- Every object of the job, for a queue handler's `delete =` result (at most 100).
+    keys: (self) -> { { bucket: string, key: string } }
+end
+
 declare extern type HttpResponse with
     status: number
     headers: { [string]: string }
@@ -146,6 +177,16 @@ declare native: {
         writer: (sink: Sink?) -> GzipWriter,
         compress: (data: string) -> string,
         decompress: (data: string) -> string,
+    },
+    batch: {
+        new: (opts: { id: string? }?) -> BatchJob,
+        -- nil when the job is not complete or was already cleaned up.
+        hydrate: (event: { [string]: any }, opts: { allow_failure: boolean? }?) -> BatchResult?,
+        -- For a router: nil unless `event` is a done.json from the batch bucket.
+        route: (event: { [string]: any }) -> { job: string, script: string?, event: { [string]: any } }?,
+    },
+    ndjson: {
+        rows: (source: string | ByteStream) -> () -> any?,
     },
     lock: {
         with: <T...>(name: string, opts: { scope: ("local" | "db")?, wait_ms: number?, lease_ms: number? }?, fn: () -> T...) -> (boolean, T...),

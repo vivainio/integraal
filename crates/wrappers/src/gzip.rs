@@ -18,9 +18,9 @@ use crate::{
 };
 
 /// Fails once more than `left` bytes have been produced (decompression bomb guard).
-struct Capped<R> {
-    inner: R,
-    left: u64,
+pub(crate) struct Capped<R> {
+    pub inner: R,
+    pub left: u64,
 }
 
 impl<R: Read> Read for Capped<R> {

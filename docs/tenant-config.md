@@ -35,6 +35,7 @@ Each section is documented in the chapter for the feature it configures.
 | `router` | [Router](router.md#tenant-config-router) |
 | `placement` | [Worker classes](ingress.md#tenant-config-placement) |
 | `buckets` | [Buckets (S3)](buckets.md#grants) |
+| `batch` | [Batch jobs](batch.md#tenant-config-and-deployment) |
 | `http.allow` | [Outbound HTTP](http.md#tenant-config-httpallow) |
 | `limits` | [Limits](limits.md) |
 | `vars` | [below](#vars) |

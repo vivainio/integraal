@@ -26,6 +26,7 @@ nav = [
     { "DynamoDB" = "dynamodb.md" },
     { "Locks" = "locks.md" },
     { "Callbacks" = "callbacks.md" },
+    { "Batch jobs" = "batch.md" },
     { "Crypto" = "crypto.md" },
     { "Outbound HTTP" = "http.md" },
     { "Streams and XML" = "streams-xml.md" },

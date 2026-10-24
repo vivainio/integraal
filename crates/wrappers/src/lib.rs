@@ -11,6 +11,7 @@
 //! under the tenant's own partition keys, each expiring after 24 hours), and `native.crypto`
 //! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets).
 
+mod batch;
 mod bucket;
 mod crypto;
 mod db;
@@ -18,6 +19,7 @@ mod deadline;
 mod gzip;
 mod http;
 mod lock;
+mod ndjson;
 mod sink;
 mod sql;
 mod throttle;
@@ -27,6 +29,7 @@ mod xml;
 mod zip;
 mod zip_writer;
 
+pub use batch::BATCH_BUCKET;
 pub use bucket::{
     Access, BucketScope, BucketScopes, ObjectBackend, ObjectWriter, PresignMethod, MAX_LIST_KEYS,
     MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
@@ -119,6 +122,8 @@ pub struct HostContext {
     pub script: ScriptName,
     /// Tenant-scoped object storage by bucket name, as granted by the tenant config; exposed as `native.bucket.<name>`.
     pub buckets: BucketScopes,
+    /// The tenant's folder in the deployment's dedicated batch bucket; `native.batch` errors when absent.
+    pub batch: Option<BucketScope>,
     /// Tenant-scoped small item store with 24h expiry; `native.db` errors when absent.
     pub db: Option<DbScope>,
     /// Public base URL of the webhook ingress; `native.callback` errors when absent.

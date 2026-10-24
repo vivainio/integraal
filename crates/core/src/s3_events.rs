@@ -77,6 +77,8 @@ pub struct S3Events {
     /// physical bucket name -> logical name (`In`, ...)
     buckets: HashMap<String, String>,
     prefix: String,
+    /// The dedicated batch bucket and its prefix, if configured.
+    batch: Option<(String, String)>,
 }
 
 impl S3Events {
@@ -90,18 +92,30 @@ impl S3Events {
                 .map(|(logical, physical)| (physical, logical))
                 .collect(),
             prefix: prefix.into(),
+            batch: None,
         }
+    }
+
+    /// Also recognises notifications from the batch bucket (`physical`, tenant directories under
+    /// `prefix`). Their events carry `bucket = "$batch"`.
+    pub fn with_batch(mut self, physical: impl Into<String>, prefix: impl Into<String>) -> Self {
+        self.batch = Some((physical.into(), prefix.into()));
+        self
     }
 
     /// From the global config's `buckets` section.
     pub fn from_config(cfg: &crate::GlobalConfig) -> Self {
-        Self::new(
+        let events = Self::new(
             cfg.buckets
                 .map
                 .iter()
                 .map(|(name, bucket)| (name.clone(), bucket.clone())),
             cfg.buckets.prefix.clone(),
-        )
+        );
+        match &cfg.batch {
+            Some(b) => events.with_batch(b.bucket.clone(), b.prefix.clone()),
+            None => events,
+        }
     }
 
     /// One record -> one invocation (no script, so the tenant's router picks one) with
@@ -125,15 +139,21 @@ impl S3Events {
             .pointer("/object/key")
             .and_then(Value::as_str)
             .ok_or("record has no object key")?;
-        let bucket = self
-            .buckets
-            .get(physical)
-            .ok_or_else(|| format!("bucket {physical:?} is not in buckets.map"))?;
+        let (bucket, prefix) = match &self.batch {
+            Some((name, prefix)) if name == physical => (integraal_wrappers::BATCH_BUCKET, prefix),
+            _ => (
+                self.buckets
+                    .get(physical)
+                    .map(String::as_str)
+                    .ok_or_else(|| format!("bucket {physical:?} is not in buckets.map"))?,
+                &self.prefix,
+            ),
+        };
 
         let key = percent_decode(raw_key)?;
         let rest = key
-            .strip_prefix(&self.prefix)
-            .ok_or_else(|| format!("key {key:?} is outside buckets.prefix"))?;
+            .strip_prefix(prefix.as_str())
+            .ok_or_else(|| format!("key {key:?} is outside the bucket's prefix"))?;
         let (tenant, relative) = rest
             .split_once('/')
             .ok_or_else(|| format!("key {key:?} has no tenant directory"))?;
@@ -190,6 +210,29 @@ mod tests {
 
     fn record(bucket: &str, key: &str) -> Value {
         json!({"eventName": "ObjectCreated:Put", "s3": {"bucket": {"name": bucket}, "object": {"key": key, "size": 12, "eTag": "abc"}}})
+    }
+
+    #[test]
+    fn batch_bucket_events_carry_the_reserved_bucket_name() {
+        let ev = events().with_batch("acme-batch", "jobs-root/");
+        let inv = ev
+            .invocation(&record("acme-batch", "jobs-root/acme/jobs/j1/done.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(inv.tenant, "acme");
+        assert_eq!(inv.event["bucket"], "$batch");
+        assert_eq!(inv.event["key"], "jobs/j1/done.json");
+        // The data prefix does not apply to it, nor the batch prefix to data buckets.
+        assert!(ev
+            .invocation(&record("acme-batch", "tenants/acme/x"))
+            .is_err());
+        assert!(ev
+            .invocation(&record("acme-in", "jobs-root/acme/x"))
+            .is_err());
+        // Without a batch bucket configured, its notifications are errors, not silent drops.
+        assert!(events()
+            .invocation(&record("acme-batch", "jobs-root/acme/x"))
+            .is_err());
     }
 
     #[test]

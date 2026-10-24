@@ -11,6 +11,7 @@ process at startup.
 {
   "scripts":   { "bucket": "scripts", "prefix": "" },
   "buckets":   { "prefix": "tenants/", "map": { "In": "acme-in", "Out": "acme-out", "Backup": "acme-bak", "Temp": "acme-tmp" } },
+  "batch":     { "bucket": "partner-batch", "prefix": "tenants/" },
   "db":        { "table": "integraal" },
   "callbacks": { "base_url": "https://hooks.example.com" },
   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
@@ -29,6 +30,7 @@ process at startup.
 | `scripts.prefix` | all | key prefix, concatenated as-is (end it with `/`) |
 | `buckets.map` | server, Lambda | named buckets (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`). Enables `native.bucket.<name>`; see [Buckets](buckets.md#deployment) |
 | `buckets.prefix` | server, Lambda | base prefix applied in every bucket; empty or ending in `/`. Tenant data lives at `<prefix><tenant>/` |
+| `batch.bucket`, `batch.prefix` | server, Lambda | the dedicated bucket behind `native.batch`, kept apart from `buckets.map`; its [S3 notifications](batch.md#wiring-the-continuation) go to the same queue. See [Batch jobs](batch.md#tenant-config-and-deployment) |
 | `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |
 | `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
 | `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
@@ -82,6 +84,7 @@ fails loudly beyond that.
 <scripts.bucket>/<tenant>/<script>/<version>.luau   immutable
 <scripts.bucket>/<tenant>/config.json               operator-owned policy
 <each buckets.map bucket>/<buckets.prefix><tenant>/...   tenant data, see Buckets
+<batch.bucket>/<batch.prefix><tenant>/jobs|state/...      batch jobs, see Batch jobs
 ```
 
 ## IAM
