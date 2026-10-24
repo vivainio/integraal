@@ -946,6 +946,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn utf8_library_is_available() {
+        let e = engine(
+            "return { handle = function() return utf8.len(\"h\\u{e9}llo\") end }",
+            Limits::default(),
+        );
+        assert_eq!(
+            e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+            json!(5)
+        );
+    }
+
+    #[tokio::test]
     async fn decimal_global_is_exact() {
         let e = engine(
             "return { handle = function() return tostring(D\"0.1\" + D\"0.2\") end }",
