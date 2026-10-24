@@ -140,6 +140,25 @@ pub struct TenantConfig {
     /// Script whose `on_route`/`route` handler picks the script for messages that don't name one.
     #[serde(default)]
     pub router: Option<String>,
+    /// Which worker size class this tenant's messages are forwarded to by the intake Lambda.
+    #[serde(default)]
+    pub placement: Placement,
+}
+
+/// The `placement` block of a tenant's `config.json`; see `docs/ingress.md`.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    /// The class used when there is no `script`, or the script fails or picks nothing valid.
+    /// Absent: the deployment's default class.
+    #[serde(default)]
+    pub class: Option<String>,
+    /// Other classes the placement script may pick; `class` is always allowed.
+    #[serde(default)]
+    pub classes: Vec<String>,
+    /// Script whose `on_place`/`place` handler picks a class per message.
+    #[serde(default)]
+    pub script: Option<String>,
 }
 
 /// A fully resolved unit of work: which script runs, with which event.
@@ -168,7 +187,7 @@ pub struct Engine {
 
 /// Everything besides limits and config that one invocation's native API is wired to.
 #[derive(Clone)]
-struct Services {
+pub(crate) struct Services {
     buckets: BucketScopes,
     db: Option<DbScope>,
     cb_url: Option<String>,
@@ -246,19 +265,26 @@ impl Engine {
         self.invoke_within(inv, None).await
     }
 
+    /// `<tenant>/config.json`, or the defaults when the tenant has none.
+    pub(crate) async fn tenant_config(&self, tenant: &str) -> Result<TenantConfig, Error> {
+        match self.loader.load(&ScriptKey::config(tenant)?).await {
+            Ok(c) => serde_json::from_str(&c.source).map_err(|e| Error::Config(e.to_string())),
+            Err(LoadError::NotFound(_)) => Ok(TenantConfig::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub(crate) fn loader(&self) -> &Arc<CachedLoader> {
+        &self.loader
+    }
+
     /// Like `invoke`, additionally capping the timeout (e.g. to the time a Lambda has left).
     pub async fn invoke_within(
         &self,
         inv: Invocation,
         max_time: Option<Duration>,
     ) -> Result<serde_json::Value, Error> {
-        let config = match self.loader.load(&ScriptKey::config(&inv.tenant)?).await {
-            Ok(c) => serde_json::from_str::<TenantConfig>(&c.source)
-                .map_err(|e| Error::Config(e.to_string()))?,
-            Err(LoadError::NotFound(_)) => TenantConfig::default(),
-            Err(e) => return Err(e.into()),
-        };
-        let config = Arc::new(config);
+        let config = Arc::new(self.tenant_config(&inv.tenant).await?);
         let mut limits = self.limits.resolve(&self.ceiling, &config.limits);
         if let Some(max) = max_time {
             limits.timeout = limits.timeout.min(max);
@@ -331,16 +357,30 @@ impl Engine {
     }
 }
 
+impl Services {
+    /// No buckets, table, vault or keys: what a script that may only compute gets.
+    pub(crate) fn bare() -> Self {
+        Self {
+            buckets: BucketScopes::new(),
+            db: None,
+            cb_url: None,
+            throttle: None,
+            master_keys: None,
+            vault: None,
+        }
+    }
+}
+
 /// A Luau state set up for one invocation: native API installed, sandboxed, limits armed.
-struct Vm {
-    lua: Lua,
-    version: u32,
+pub(crate) struct Vm {
+    pub(crate) lua: Lua,
+    pub(crate) version: u32,
     deadline: Instant,
     script: ScriptName,
     buckets: BucketScopes,
 }
 
-fn new_vm(
+pub(crate) fn new_vm(
     version: u32,
     tenant: &str,
     script: &str,
@@ -573,11 +613,11 @@ fn run_routed(
     }
 }
 
-fn internal(e: mlua::Error) -> Error {
+pub(crate) fn internal(e: mlua::Error) -> Error {
     Error::Internal(e.to_string())
 }
 
-fn script_err(e: mlua::Error, deadline: Instant) -> Error {
+pub(crate) fn script_err(e: mlua::Error, deadline: Instant) -> Error {
     if Instant::now() >= deadline || e.to_string().contains("__timeout__") {
         Error::Timeout
     } else if e.to_string().contains("not enough memory") {

@@ -16,7 +16,7 @@ use crate::{Invocation, Trigger};
 pub const MAX_REQUEUES: u32 = 5;
 
 /// Marker field added to re-sent messages (S3 notification parsers ignore unknown fields).
-const ATTEMPT_FIELD: &str = "integraal_attempt";
+pub(crate) const ATTEMPT_FIELD: &str = "integraal_attempt";
 
 /// What a queue message body turned out to be.
 #[derive(Debug)]

@@ -13,6 +13,7 @@
 //!   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
 //!   "admin":     { "port": 9090, "token_env": "INTEGRAAL_ADMIN_TOKEN" },
 //!   "queue":     { "url": "https://sqs.eu-west-1.amazonaws.com/123/integraal" },
+//!   "ingress":   { "queues": { "small": "https://sqs.../jobs-small", "large": "https://sqs.../jobs-large" }, "default": "small" },
 //!   "server":    { "port": 8080 },
 //!   "throttle":  [{ "url": "https://api.partner.com/v1/", "max_concurrent": 2, "per_second": 5 }],
 //!   "ceiling":   { "timeout_ms": 60000, "memory_mb": 256 },
@@ -51,6 +52,9 @@ pub struct GlobalConfig {
     /// SQS queue: the server polls it, the webhook Lambda sends to it.
     #[serde(default)]
     pub queue: Option<QueueConfig>,
+    /// Intake Lambda only: the job queue of each worker size class.
+    #[serde(default)]
+    pub ingress: Option<IngressConfig>,
     #[serde(default)]
     pub server: ServerConfig,
     /// Outbound HTTP limits; applied by the Fargate server only.
@@ -123,6 +127,38 @@ pub struct CryptoConfig {
 #[serde(deny_unknown_fields)]
 pub struct QueueConfig {
     pub url: String,
+}
+
+/// The intake Lambda's routing table. It consumes `queue` (the intake queue) and forwards each
+/// message, unchanged, to the job queue of the class its tenant is placed in.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngressConfig {
+    /// Class name to job queue URL. Each class is served by its own Fargate service.
+    pub queues: BTreeMap<String, String>,
+    /// Class for tenants that name none (and for anything unplaceable); must be in `queues`.
+    pub default: String,
+    /// Time one placement script run may take. Default 500.
+    #[serde(default)]
+    pub place_timeout_ms: Option<u64>,
+    /// Heap limit of a tenant's placement VM. Default 16.
+    #[serde(default)]
+    pub place_memory_mb: Option<u64>,
+}
+
+impl IngressConfig {
+    pub fn place_options(&self, budget: Duration) -> crate::PlaceOptions {
+        let d = crate::PlaceOptions::default();
+        crate::PlaceOptions {
+            timeout: self
+                .place_timeout_ms
+                .map_or(d.timeout, Duration::from_millis),
+            memory_bytes: self
+                .place_memory_mb
+                .map_or(d.memory_bytes, |mb| (mb.max(1) * 1024 * 1024) as usize),
+            budget,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -222,6 +258,17 @@ impl GlobalConfig {
         {
             return Err("db.table and queue.url must not be empty".into());
         }
+        if let Some(i) = &self.ingress {
+            if !i.queues.contains_key(&i.default) {
+                return Err(format!(
+                    "ingress.default {:?} is not in ingress.queues",
+                    i.default
+                ));
+            }
+            if i.queues.values().any(String::is_empty) {
+                return Err("ingress.queues: every class needs a queue URL".into());
+            }
+        }
         Throttle::new(self.throttle.clone())?;
         Ok(())
     }
@@ -306,9 +353,19 @@ mod tests {
             "db": {"table": "t"}, "callbacks": {"base_url": "https://h.example.com"},
             "queue": {"url": "https://sqs/q"}, "admin": {"port": 9090, "token_env": "T"}, "crypto": {"keys": {"1": "K1", "2": "K2"}, "active": 2}, "server": {"port": 9000},
             "throttle": [{"url": "https://api.partner.com/", "max_concurrent": 2}],
+            "ingress": {"queues": {"small": "https://sqs/s", "large": "https://sqs/l"}, "default": "small", "place_timeout_ms": 200},
             "ceiling": {"timeout_ms": 5000, "memory_mb": 32}, "log": "debug"
         }"#;
         let c = GlobalConfig::parse(full).unwrap();
+        let opts = c
+            .ingress
+            .as_ref()
+            .unwrap()
+            .place_options(Duration::from_secs(9));
+        assert_eq!(
+            (opts.timeout, opts.budget),
+            (Duration::from_millis(200), Duration::from_secs(9))
+        );
         assert_eq!((c.server.port, c.log_filter()), (9000, "debug"));
         assert!(c.throttle().unwrap().is_some());
     }
@@ -337,6 +394,14 @@ mod tests {
             "rule without a limit"
         );
         assert!(bad(r#""server": {"port": 99999}"#), "port out of range");
+        assert!(
+            bad(r#""ingress": {"queues": {"a": "u"}, "default": "b"}"#),
+            "default class without a queue"
+        );
+        assert!(
+            bad(r#""ingress": {"queues": {"a": ""}, "default": "a"}"#),
+            "class without a queue URL"
+        );
         assert!(
             bad(r#""crypto": {"keys": {"1": "K"}, "active": 2}"#),
             "active not configured"

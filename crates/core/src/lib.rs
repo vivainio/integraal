@@ -4,12 +4,15 @@
 mod config;
 mod dynamo_db;
 mod engine;
+pub mod ingress;
+mod placement;
 mod s3_data;
 pub mod s3_events;
 
-pub use engine::{TenantConfig, TenantLimits};
+pub use engine::{Placement, TenantConfig, TenantLimits};
+pub use placement::{PlaceOptions, Placed};
 
-pub use config::GlobalConfig;
+pub use config::{GlobalConfig, IngressConfig};
 pub use dynamo_db::DynamoBackend;
 pub use engine::{Engine, Limits};
 pub use integraal_wrappers::{Vault, VaultEntry};
@@ -29,6 +32,8 @@ pub enum Trigger {
     Queue,
     /// Internal: the tenant's router script choosing a script for a message.
     Route,
+    /// Internal: the tenant's placement script choosing a worker class (intake Lambda).
+    Place,
 }
 
 impl Trigger {
@@ -40,6 +45,7 @@ impl Trigger {
             Trigger::Http => ["on_http", "handle"],
             Trigger::Queue => ["on_queue", "handle"],
             Trigger::Route => ["on_route", "route"],
+            Trigger::Place => ["on_place", "place"],
         }
     }
 }

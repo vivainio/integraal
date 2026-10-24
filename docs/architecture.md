@@ -23,6 +23,7 @@
 | `integraal-core` | The engine: limits, tenant config, VM setup, handler dispatch. |
 | `integraal-lambda` | Lambda entrypoint (binary `bootstrap`). |
 | `integraal-webhook` | Webhook ingress Lambda: verifies callback tokens and enqueues to SQS. |
+| `integraal-ingress` | Intake Lambda: places each queue message in a worker size class and forwards it to that class's job queue. |
 | `integraal-server` | Fargate entrypoint: HTTP server and SQS poller. |
 
 ## Script bucket and buckets, different trust levels

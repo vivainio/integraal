@@ -1956,6 +1956,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "integraal-ingress"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-sqs",
+ "integraal-core",
+ "lambda_runtime",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "integraal-lambda"
 version = "0.1.0"
 dependencies = [
