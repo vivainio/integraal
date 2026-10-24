@@ -5,6 +5,7 @@ mod config;
 mod dynamo_db;
 mod engine;
 pub mod ingress;
+mod modules;
 mod placement;
 mod s3_data;
 pub mod s3_events;

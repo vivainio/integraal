@@ -17,6 +17,8 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 ```
 <tenant>/<script>/latest.luau     mutable, revalidated
 <tenant>/<script>/<version>.luau  immutable, cached forever
+<tenant>/lib/<path>.luau          tenant modules, `require("@lib/<path>")`
+@shared/<name>/<version>.luau     global versioned modules, `require("@shared/<name>@<version>")` (operator-owned)
 <tenant>/config.json              operator-owned policy (tenants cannot write here)
 ```
 

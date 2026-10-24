@@ -60,9 +60,32 @@ Scripts live at `<tenant>/<script>/<version>.luau`. Callers that omit `version` 
 `latest`. Publish an immutable `v7.luau` next to `latest.luau` for pinned, never-revalidated
 deployments.
 
+## Modules
+
+`require` loads shared code into the script's VM. There are two sources, picked by prefix:
+
+```lua
+local dates = require("@lib/util/dates")     -- the tenant's own lib/ folder
+local csv   = require("@shared/csv@2.1.0")   -- global shared library, pinned version
+```
+
+| Spec | Object in the script bucket | Caching |
+| --- | --- | --- |
+| `@lib/<path>` | `<tenant>/lib/<path>.luau` | revalidated like `latest` scripts |
+| `@shared/<name>@<version>` | `@shared/<name>/<version>.luau` | immutable, cached forever |
+
+- A module is a chunk that returns a value (normally a table). It runs once per invocation; later
+  `require`s of the same module return the same value. Modules can `require` other modules.
+- `@lib` is confined to the calling tenant. The name `lib` is reserved and cannot be a script name.
+- Shared modules always need an exact version (`latest` is refused), so an operator can publish
+  `csv@2.2.0` without changing what existing scripts run. Only operators write to `@shared/`.
+- Circular requires fail, and one invocation may load at most 64 modules. Modules count against the
+  invocation's time and memory limits and see the same `native` API as the script.
+- Paths use `/`-separated names of letters, digits, `-`, `_` and `.`; `..` is not allowed.
+
 ## Sandbox facts
 
-- `os`, `io` and `require` are not available; everything external goes through `native`.
+- `os` and `io` are not available; everything external goes through `native`. `require` only loads modules (see [Modules](#modules)).
 - Globals are read-only; keep state in locals.
 - Each invocation starts with an empty VM, so there is no state between calls. Persist with
   `native.bucket.Out` (or another bucket your tenant is granted).

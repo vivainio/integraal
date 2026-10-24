@@ -206,6 +206,8 @@ pub(crate) struct Services {
     throttle: Option<Arc<Throttle>>,
     master_keys: Option<MasterKeys>,
     vault: Option<Arc<Vault>>,
+    /// Source for `require`; absent in VMs that run no tenant code of their own.
+    modules: Option<crate::modules::ModuleHost>,
 }
 
 impl Engine {
@@ -397,6 +399,10 @@ impl Engine {
             throttle: self.throttle.clone(),
             master_keys: self.master_keys.clone(),
             vault: self.vault().map(Arc::new),
+            modules: Some(crate::modules::ModuleHost {
+                loader: self.loader.clone(),
+                handle: tokio::runtime::Handle::current(),
+            }),
         };
 
         // Luau states are not Send-safe to hold across awaits; run on a blocking thread.
@@ -459,6 +465,7 @@ impl Services {
             throttle: None,
             master_keys: None,
             vault: None,
+            modules: None,
         }
     }
 }
@@ -517,6 +524,9 @@ pub(crate) fn new_vm(
             },
         },
     )?;
+    if let Some(host) = &svc.modules {
+        crate::modules::install(&lua, host.clone(), tenant).map_err(internal)?;
+    }
     lua.sandbox(true).map_err(internal)?;
     let watch = deadline;
     lua.set_interrupt(move |_| match watch.check() {
@@ -795,6 +805,107 @@ mod tests {
             e.invoke(inv(Trigger::Http, json!({}))).await.unwrap(),
             json!({"via":"http","v":"{\"a\":1}"})
         );
+    }
+
+    #[tokio::test]
+    async fn require_loads_tenant_lib_and_versioned_shared_modules() {
+        let store = Arc::new(MemoryStore::default());
+        let put = |k: ScriptKey, src: &str| store.put(&k, src);
+        put(
+            ScriptKey::new("acme", "s", None).unwrap(),
+            r#"
+            local util = require("@lib/util/math")
+            local again = require("@lib/util/math")
+            local csv = require("@shared/csv@2.0.0")
+            return { handle = function()
+              return { sum = util.add(1, 2), same = util == again, runs = util.runs(),
+                       csv = csv.join({ "a", "b" }), v = csv.version }
+            end }"#,
+        );
+        put(
+            ScriptKey::lib("acme", "util/math").unwrap(),
+            "local runs = 0; runs += 1; return { add = function(a, b) return a + b end, runs = function() return runs end }",
+        );
+        put(
+            ScriptKey::lib("acme", "needs_shared").unwrap(),
+            r#"return require("@shared/csv@2.0.0")"#,
+        );
+        put(
+            ScriptKey::shared("csv", "2.0.0").unwrap(),
+            r#"return { version = 2, join = function(t) return table.concat(t, ",") end }"#,
+        );
+        put(
+            ScriptKey::shared("csv", "1.0.0").unwrap(),
+            r#"return { version = 1 }"#,
+        );
+        let engine = |store: &Arc<MemoryStore>| {
+            Engine::new(
+                Arc::new(CachedLoader::new(
+                    Shared(store.clone()),
+                    Duration::from_secs(60),
+                )),
+                Limits::default(),
+            )
+        };
+        let out = engine(&store)
+            .invoke(inv(Trigger::Invoke, json!(null)))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({"sum": 3, "same": true, "runs": 1, "csv": "a,b", "v": 2})
+        );
+
+        // Failures surface as script errors naming the module.
+        for (src, needle) in [
+            (r#"require("@lib/missing"); return {}"#, "not found"),
+            (r#"require("@shared/csv"); return {}"#, "need a version"),
+            (r#"require("@shared/csv@latest"); return {}"#, "latest"),
+            (r#"require("@lib/../beta/x"); return {}"#, "invalid"),
+            (r#"require("./util"); return {}"#, "expected"),
+        ] {
+            put(ScriptKey::new("acme", "s", None).unwrap(), src);
+            match engine(&store)
+                .invoke(inv(Trigger::Invoke, json!(null)))
+                .await
+            {
+                Err(Error::Script(m)) => assert!(m.contains(needle), "{src}: {m}"),
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+
+        // Circular requires fail instead of recursing.
+        put(
+            ScriptKey::lib("acme", "a").unwrap(),
+            r#"return require("@lib/b")"#,
+        );
+        put(
+            ScriptKey::lib("acme", "b").unwrap(),
+            r#"return require("@lib/a")"#,
+        );
+        put(
+            ScriptKey::new("acme", "s", None).unwrap(),
+            r#"require("@lib/a"); return {}"#,
+        );
+        match engine(&store)
+            .invoke(inv(Trigger::Invoke, json!(null)))
+            .await
+        {
+            Err(Error::Script(m)) => assert!(m.contains("circular"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+
+        // A tenant's lib/ is its own: another tenant cannot reach it.
+        put(
+            ScriptKey::new("beta", "s", None).unwrap(),
+            r#"require("@lib/util/math"); return {}"#,
+        );
+        let mut other = inv(Trigger::Invoke, json!(null));
+        other.tenant = "beta".into();
+        assert!(matches!(
+            engine(&store).invoke(other).await,
+            Err(Error::Script(m)) if m.contains("not found")
+        ));
     }
 
     #[tokio::test]
