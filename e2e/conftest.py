@@ -111,6 +111,13 @@ class Stack:
         assert r.status_code < 300, r.text
 
 
+@pytest.fixture(autouse=True)
+def _fresh_megalith(megalith):
+    megalith.reset()
+    megalith.route("GET", "/hold", delay=0.6)
+    yield
+
+
 def _spawn(cmd, log: Path, env=None):
     return subprocess.Popen(cmd, stdout=log.open("wb"), stderr=subprocess.STDOUT, env=env, cwd=ROOT)
 
@@ -130,7 +137,7 @@ def stack(megalith):
     procs = []
     try:
         subprocess.run(
-            ["cargo", "build", "-p", "integraal-server", "-p", "integraal-webhook", "-p", "integraal-ingress", "-p", "integraal-lambda"],
+            ["cargo", "build", "-p", "integraal-server"],
             cwd=ROOT, check=True,
         )
         # Lambda-style binaries are all called `bootstrap`; the server is its own name.
@@ -140,7 +147,7 @@ def stack(megalith):
         roto_url = f"http://localhost:{roto_port}"
         roto = _spawn(
             ["roto-server", "--ephemeral", "--port", str(roto_port), "--setup", str(HERE / "setup.luau"),
-             "--set", f"FIXTURES={HERE / 'fixtures/mega'}"],
+             "--set", f"FIXTURES={HERE / 'fixtures/mega'}", "--set", f"MEGALITH={megalith.base}/"],
             work / "roto.log",
         )
         procs.append(roto)
@@ -152,7 +159,7 @@ def stack(megalith):
 
         sqs = boto3.client("sqs", endpoint_url=roto_url, region_name=REGION, aws_access_key_id="test", aws_secret_access_key="test")
         queues = {n: sqs.get_queue_url(QueueName=n)["QueueUrl"] for n in
-                  ("jobs", "jobs-dlq", "intake", "jobs-small", "jobs-large", "s3-events")}
+                  ("jobs", "jobs-dlq", "intake", "jobs-small", "jobs-large")}
 
         server_port, admin_port = free_port(), free_port()
         cfg = {

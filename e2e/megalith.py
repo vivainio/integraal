@@ -34,6 +34,8 @@ class Megalith:
                 try:
                     time.sleep(route.get("delay", 0))
                     out = route.get("body", b'{"ok":true}')
+                    if callable(out):  # computed from the request, e.g. to echo a header back
+                        out = out(megalith.requests[-1])
                     if not isinstance(out, bytes):
                         out = json.dumps(out).encode()
                     self.send_response(route.get("status", 200))

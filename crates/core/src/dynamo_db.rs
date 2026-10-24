@@ -33,6 +33,23 @@ fn s(v: &str) -> AttributeValue {
     AttributeValue::S(v.to_string())
 }
 
+/// DynamoDB rejects an empty string as a key attribute, but "no sort key" (locks, callbacks, the
+/// vault key) is an empty `sk` here. Control characters cannot appear in script-supplied keys, so a
+/// stand-in made of one never collides with them.
+const EMPTY_SK: &str = "\u{2}";
+
+fn sk_attr(sk: &str) -> AttributeValue {
+    s(if sk.is_empty() { EMPTY_SK } else { sk })
+}
+
+fn sk_value(stored: &str) -> String {
+    if stored == EMPTY_SK {
+        String::new()
+    } else {
+        stored.to_string()
+    }
+}
+
 fn parse(attrs: &std::collections::HashMap<String, AttributeValue>) -> Option<Item> {
     // A counter (`add`) keeps its number in `n`; that is its value.
     let value = match attrs.get("n") {
@@ -40,7 +57,7 @@ fn parse(attrs: &std::collections::HashMap<String, AttributeValue>) -> Option<It
         None => attrs.get("v")?.as_s().ok()?.clone(),
     };
     Some(Item {
-        sk: attrs.get("sk")?.as_s().ok()?.clone(),
+        sk: sk_value(attrs.get("sk")?.as_s().ok()?),
         value,
         ttl: attrs.get("ttl")?.as_n().ok()?.parse().ok()?,
     })
@@ -55,7 +72,7 @@ impl ItemBackend for DynamoBackend {
                 .get_item()
                 .table_name(&self.table)
                 .key("pk", s(pk))
-                .key("sk", s(sk))
+                .key("sk", sk_attr(sk))
                 .consistent_read(true)
                 .send()
                 .await
@@ -71,7 +88,7 @@ impl ItemBackend for DynamoBackend {
                 .put_item()
                 .table_name(&self.table)
                 .item("pk", s(pk))
-                .item("sk", s(&item.sk))
+                .item("sk", sk_attr(&item.sk))
                 .item("v", s(&item.value))
                 .item("ttl", AttributeValue::N(item.ttl.to_string()))
                 .send()
@@ -88,7 +105,7 @@ impl ItemBackend for DynamoBackend {
                 .delete_item()
                 .table_name(&self.table)
                 .key("pk", s(pk))
-                .key("sk", s(sk))
+                .key("sk", sk_attr(sk))
                 .send()
                 .await
                 .map(|_| ())
@@ -104,7 +121,7 @@ impl ItemBackend for DynamoBackend {
                 .put_item()
                 .table_name(&self.table)
                 .item("pk", s(pk))
-                .item("sk", s(&item.sk))
+                .item("sk", sk_attr(&item.sk))
                 .item("v", s(&item.value))
                 .item("ttl", AttributeValue::N(item.ttl.to_string()))
                 .condition_expression("attribute_not_exists(pk)")
@@ -130,7 +147,7 @@ impl ItemBackend for DynamoBackend {
                 .put_item()
                 .table_name(&self.table)
                 .item("pk", s(pk))
-                .item("sk", s(&item.sk))
+                .item("sk", sk_attr(&item.sk))
                 .item("v", s(&item.value))
                 .item("ttl", AttributeValue::N(item.ttl.to_string()))
                 .condition_expression("attribute_not_exists(pk) OR #t <= :now")
@@ -158,7 +175,7 @@ impl ItemBackend for DynamoBackend {
                 .delete_item()
                 .table_name(&self.table)
                 .key("pk", s(pk))
-                .key("sk", s(sk))
+                .key("sk", sk_attr(sk))
                 .condition_expression("v = :v")
                 .expression_attribute_values(":v", s(value))
                 .send()
@@ -183,7 +200,7 @@ impl ItemBackend for DynamoBackend {
                 .delete_item()
                 .table_name(&self.table)
                 .key("pk", s(pk))
-                .key("sk", s(sk))
+                .key("sk", sk_attr(sk))
                 .return_values(ReturnValue::AllOld)
                 .send()
                 .await
@@ -202,7 +219,7 @@ impl ItemBackend for DynamoBackend {
                     .update_item()
                     .table_name(&self.table)
                     .key("pk", s(pk))
-                    .key("sk", s(sk))
+                    .key("sk", sk_attr(sk))
                     .update_expression("SET v = if_not_exists(v, :z), #t = :ttl ADD n :d")
                     .condition_expression(
                         "attribute_not_exists(pk) OR (attribute_exists(n) AND #t > :now)",
@@ -234,7 +251,7 @@ impl ItemBackend for DynamoBackend {
                     .put_item()
                     .table_name(&self.table)
                     .item("pk", s(pk))
-                    .item("sk", s(sk))
+                    .item("sk", sk_attr(sk))
                     .item("v", s(&delta.to_string()))
                     .item("n", AttributeValue::N(delta.to_string()))
                     .item("ttl", AttributeValue::N(ttl.to_string()))

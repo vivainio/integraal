@@ -1,7 +1,0 @@
-{
-  "router": "router",
-  "buckets": { "In": "read", "Out": "readwrite", "Temp": "readwrite" },
-  "queue": true,
-  "batch": true,
-  "http": { "allow": [] }
-}
