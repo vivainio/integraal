@@ -42,6 +42,7 @@ fn batches(messages: &[OutMessage]) -> Vec<&[OutMessage]> {
 }
 
 impl QueueBackend for SqsBackend {
+    #[tracing::instrument(name = "sqs.send", skip_all, fields(messages = messages.len()))]
     fn send(&self, messages: &[OutMessage]) -> Result<(), String> {
         for batch in batches(messages) {
             let entries = batch

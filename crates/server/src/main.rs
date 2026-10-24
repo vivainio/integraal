@@ -22,14 +22,13 @@ use integraal_core::{
     Engine, Error, GlobalConfig, Invocation, S3Events, Trigger, Vault,
 };
 use serde_json::{json, Value};
+use tracing::Instrument;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = GlobalConfig::load().map_err(anyhow::Error::msg)?;
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_new(cfg.log_filter())?)
-        .init();
+    let _telemetry = integraal_core::telemetry::init("integraal-server", cfg.log_filter())
+        .map_err(anyhow::Error::msg)?;
 
     let mut engine = cfg.engine().await.map_err(anyhow::Error::msg)?;
     if let Some(throttle) = cfg.throttle().map_err(anyhow::Error::msg)? {
@@ -236,22 +235,46 @@ async fn run_http(
     headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
-    let version = headers
-        .get("x-script-version")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let inv = Invocation {
-        tenant,
-        script,
-        version,
-        trigger: Trigger::Http,
-        event: body.map(|b| b.0).unwrap_or(Value::Null),
-        attempt: 0,
-    };
-    match engine.invoke(inv).await {
-        Ok(result) => (StatusCode::OK, Json(result)),
-        Err(e) => (status_for(&e), Json(json!({ "error": e.to_string() }))),
+    let span = tracing::info_span!(
+        "http_request",
+        tenant = %tenant,
+        script = script.as_deref().unwrap_or("<routed>"),
+        otel.kind = "server",
+        otel.status_code = tracing::field::Empty,
+        http.response.status_code = tracing::field::Empty,
+    );
+    integraal_core::telemetry::adopt_parent(&span, |k| {
+        headers
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    });
+    let status = span.clone();
+    let reply = async move {
+        let version = headers
+            .get("x-script-version")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let inv = Invocation {
+            tenant,
+            script,
+            version,
+            trigger: Trigger::Http,
+            event: body.map(|b| b.0).unwrap_or(Value::Null),
+            attempt: 0,
+        };
+        match engine.invoke(inv).await {
+            Ok(result) => (StatusCode::OK, Json(result)),
+            Err(e) => (status_for(&e), Json(json!({ "error": e.to_string() }))),
+        }
     }
+    .instrument(span)
+    .await;
+    status.record("http.response.status_code", reply.0.as_u16());
+    if reply.0.is_server_error() {
+        status.record("otel.status_code", "ERROR");
+    }
+    reply
 }
 
 fn status_for(e: &Error) -> StatusCode {
@@ -299,32 +322,36 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
                 queue_url.clone(),
                 s3.clone(),
             );
-            tasks.push(tokio::spawn(async move {
-                let attempt = msg
-                    .attributes()
-                    .and_then(|a| a.get(&MessageSystemAttributeName::ApproximateReceiveCount))
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(0);
-                let acked = handle_message(
-                    &engine,
-                    &client,
-                    &queue_url,
-                    &s3,
-                    msg.body().unwrap_or_default(),
-                    attempt,
-                )
-                .await;
-                if acked {
-                    if let Some(handle) = msg.receipt_handle() {
-                        let _ = client
-                            .delete_message()
-                            .queue_url(&queue_url)
-                            .receipt_handle(handle)
-                            .send()
-                            .await;
+            tasks.push(tokio::spawn(
+                async move {
+                    let attempt = msg
+                        .attributes()
+                        .and_then(|a| a.get(&MessageSystemAttributeName::ApproximateReceiveCount))
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                    let acked = handle_message(
+                        &engine,
+                        &client,
+                        &queue_url,
+                        &s3,
+                        msg.body().unwrap_or_default(),
+                        attempt,
+                    )
+                    .await;
+                    integraal_core::telemetry::sqs_message(if acked { "acked" } else { "retry" });
+                    if acked {
+                        if let Some(handle) = msg.receipt_handle() {
+                            let _ = client
+                                .delete_message()
+                                .queue_url(&queue_url)
+                                .receipt_handle(handle)
+                                .send()
+                                .await;
+                        }
                     }
                 }
-            }));
+                .instrument(tracing::info_span!("sqs_message", otel.kind = "consumer")),
+            ));
         }
         for t in tasks {
             let _ = t.await;
@@ -391,6 +418,9 @@ async fn handle_message(
                         .await;
                     if let Err(e) = &sent {
                         tracing::error!(error = %e, "could not requeue failed records; retrying the whole message");
+                    }
+                    if sent.is_ok() {
+                        integraal_core::telemetry::sqs_message("requeued");
                     }
                     sent.is_ok()
                 }

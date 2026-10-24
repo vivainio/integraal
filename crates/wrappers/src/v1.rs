@@ -508,12 +508,27 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             .filter(|s| s.value.len() >= crate::MIN_SECRET_BYTES)
             .map(|s| s.value.clone())
             .collect();
+        // Only method and host go on the span: the path and query may carry secrets.
+        let span = tracing::info_span!(
+            "http.client",
+            otel.kind = "client",
+            http.request.method = %method,
+            server.address = url.host_str().unwrap_or_default(),
+            http.response.status_code = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        let _entered = span.enter();
         // Held until the response is fully read (or, when streaming, until the stream is dropped).
+        let waited = std::time::Instant::now();
         let slot = throttle
             .as_ref()
             .map(|t| t.acquire(&url, budget.deadline.effective()))
             .transpose()
             .map_err(mlua::Error::runtime)?;
+        if throttle.is_some() {
+            crate::telemetry::throttle_wait(waited.elapsed());
+        }
+        let started = std::time::Instant::now();
         let mut req = ureq::http::Request::builder()
             .method(method.as_str())
             .uri(url.as_str());
@@ -521,12 +536,23 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             req = req.header(k, v);
         }
         let body = body.unwrap_or_default();
+        let host = url.host_str().unwrap_or_default().to_string();
         let resp = agent
             .run(req.body(body).map_err(mlua::Error::external)?)
-            .map_err(|e| scrub(format!("http request failed: {e}")))?;
+            .map_err(|e| {
+                span.record("otel.status_code", "ERROR");
+                crate::telemetry::http_request(&method, &host, None, started.elapsed());
+                scrub(format!("http request failed: {e}"))
+            })?;
+        let status = resp.status().as_u16();
+        span.record("http.response.status_code", status);
+        if status >= 500 {
+            span.record("otel.status_code", "ERROR");
+        }
+        crate::telemetry::http_request(&method, &host, Some(status), started.elapsed());
 
         let out = lua.create_table()?;
-        out.set("status", resp.status().as_u16())?;
+        out.set("status", status)?;
         let hdrs = lua.create_table()?;
         for (k, v) in resp.headers() {
             if let Ok(v) = v.to_str() {

@@ -19,6 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use tracing::Instrument;
+
 use integraal_loader::ScriptKey;
 use integraal_wrappers::parse_runtime_version;
 use mlua::{
@@ -78,6 +80,7 @@ const RECYCLE_AFTER: usize = 1000;
 impl Engine {
     /// Places each invocation; the result is index-aligned with `items`. The invocation's `event`
     /// is what the placement script sees.
+    #[tracing::instrument(name = "place_batch", skip_all, fields(items = items.len()))]
     pub async fn place_batch(&self, items: Vec<Invocation>, opts: &PlaceOptions) -> Vec<Placed> {
         let cutoff = Instant::now() + opts.budget;
         let mut out = vec![Placed::fallback(None, "not placed"); items.len()];
@@ -98,11 +101,14 @@ impl Engine {
             let mut set = tokio::task::JoinSet::new();
             for (tenant, events) in window {
                 let (engine, opts) = (self.clone(), opts.clone());
-                set.spawn(async move {
-                    let (indices, events): (Vec<usize>, Vec<_>) = events.into_iter().unzip();
-                    let placed = engine.place_tenant(&tenant, events, &opts, cutoff).await;
-                    (indices, placed)
-                });
+                set.spawn(
+                    async move {
+                        let (indices, events): (Vec<usize>, Vec<_>) = events.into_iter().unzip();
+                        let placed = engine.place_tenant(&tenant, events, &opts, cutoff).await;
+                        (indices, placed)
+                    }
+                    .instrument(tracing::Span::current()),
+                );
             }
             while let Some(done) = set.join_next().await {
                 match done {
@@ -115,9 +121,11 @@ impl Engine {
                 }
             }
         }
+        crate::telemetry::placement_fallbacks(out.iter().filter(|p| p.error.is_some()).count());
         out
     }
 
+    #[tracing::instrument(name = "place_tenant", skip_all, fields(tenant = %tenant, events = events.len()))]
     async fn place_tenant(
         &self,
         tenant: &str,
@@ -151,8 +159,9 @@ impl Engine {
         let mut allowed = config.placement.classes.clone();
         allowed.extend(default.clone());
         let (tenant, opts) = (tenant.to_string(), opts.clone());
+        let span = tracing::Span::current();
         let answers = tokio::task::spawn_blocking(move || {
-            run_batch(&tenant, &script, &source, &config, &events, &opts, cutoff)
+            span.in_scope(|| run_batch(&tenant, &script, &source, &config, &events, &opts, cutoff))
         })
         .await;
         match answers {

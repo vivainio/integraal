@@ -27,10 +27,10 @@ const SEND_CONCURRENCY: usize = 16;
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let cfg = GlobalConfig::load()?;
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_new(cfg.log_filter())?)
-        .init();
+    let telemetry = std::sync::Arc::new(integraal_core::telemetry::init(
+        "integraal-ingress",
+        cfg.log_filter(),
+    )?);
 
     let ingress = cfg
         .ingress
@@ -41,7 +41,13 @@ async fn main() -> Result<(), Error> {
     let sqs = aws_sdk_sqs::Client::new(&aws_config::load_from_env().await);
 
     lambda_runtime::run(service_fn(|ev: LambdaEvent<Value>| {
-        let (engine, s3, sqs, ingress) = (engine.clone(), s3.clone(), sqs.clone(), ingress.clone());
+        let (engine, s3, sqs, ingress, telemetry) = (
+            engine.clone(),
+            s3.clone(),
+            sqs.clone(),
+            ingress.clone(),
+            telemetry.clone(),
+        );
         async move {
             let incoming = parse(&ev.payload);
             let now_ms = std::time::SystemTime::now()
@@ -71,6 +77,7 @@ async fn main() -> Result<(), Error> {
                 .into_iter()
                 .map(|id| json!({ "itemIdentifier": id }))
                 .collect();
+            telemetry.flush(); // the environment may freeze as soon as we return
             Ok::<_, Error>(json!({ "batchItemFailures": failures }))
         }
     }))

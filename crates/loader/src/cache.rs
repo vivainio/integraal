@@ -4,7 +4,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+use opentelemetry::{global, KeyValue};
+
 use crate::{Fetched, LoadError, Script, ScriptKey, ScriptStore};
+
+/// Counts script lookups by result: `hit`, `revalidated` (store said not modified) or `miss`.
+fn count(result: &'static str) {
+    static C: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("integraal")
+            .u64_counter("integraal.loader.lookups")
+            .with_description("Script loads by cache result")
+            .build()
+    })
+    .add(1, &[KeyValue::new("result", result)]);
+}
 
 struct Entry {
     script: Arc<Script>,
@@ -34,6 +49,7 @@ impl CachedLoader {
             let entries = self.entries.read().unwrap();
             match entries.get(key) {
                 Some(e) if key.is_immutable() || e.checked_at.elapsed() < self.revalidate_after => {
+                    count("hit");
                     return Ok(e.script.clone());
                 }
                 Some(e) => Some((e.script.clone(), e.script.etag.clone())),
@@ -47,9 +63,11 @@ impl CachedLoader {
                 let (script, _) = stale_etag
                     .ok_or_else(|| LoadError::Storage("304 without cached copy".into()))?;
                 self.put(key, script.clone());
+                count("revalidated");
                 Ok(script)
             }
             Fetched::Fresh(script) => {
+                count("miss");
                 tracing::debug!(key = %key.object_key(), "script loaded");
                 let script = Arc::new(script);
                 self.put(key, script.clone());

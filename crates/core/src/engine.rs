@@ -315,6 +315,40 @@ impl Engine {
         inv: Invocation,
         max_time: Option<Duration>,
     ) -> Result<serde_json::Value, Error> {
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "invoke",
+            tenant = %inv.tenant,
+            script = inv.script.as_deref().unwrap_or("<routed>"),
+            trigger = ?inv.trigger,
+            outcome = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        let (tenant, trigger) = (inv.tenant.clone(), inv.trigger);
+        let start = Instant::now();
+        let result = self
+            .invoke_inner(inv, max_time)
+            .instrument(span.clone())
+            .await;
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(Error::Timeout) => "timeout",
+            Err(Error::Script(_)) => "script_error",
+            Err(_) => "error",
+        };
+        span.record("outcome", outcome);
+        if result.is_err() {
+            span.record("otel.status_code", "ERROR");
+        }
+        crate::telemetry::invocation(&tenant, trigger, outcome, start.elapsed());
+        result
+    }
+
+    async fn invoke_inner(
+        &self,
+        inv: Invocation,
+        max_time: Option<Duration>,
+    ) -> Result<serde_json::Value, Error> {
         let config = Arc::new(self.tenant_config(&inv.tenant).await?);
         let mut limits = self.limits.resolve(&self.ceiling, &config.limits);
         if let Some(max) = max_time {
@@ -377,8 +411,9 @@ impl Engine {
                     event: inv.event,
                     attempt: inv.attempt,
                 };
+                let span = tracing::Span::current(); // the VM thread would otherwise lose the trace context
                 tokio::task::spawn_blocking(move || {
-                    run(&source.source, &call, &limits, &svc, &config)
+                    span.in_scope(|| run(&source.source, &call, &limits, &svc, &config))
                 })
                 .await
             }
@@ -390,17 +425,20 @@ impl Engine {
                     .load(&ScriptKey::new(&inv.tenant, &router, None)?)
                     .await?;
                 let (loader, handle) = (self.loader.clone(), tokio::runtime::Handle::current());
+                let span = tracing::Span::current();
                 tokio::task::spawn_blocking(move || {
-                    run_routed(
-                        &source.source,
-                        router,
-                        &inv,
-                        &limits,
-                        &svc,
-                        &config,
-                        &loader,
-                        &handle,
-                    )
+                    span.in_scope(|| {
+                        run_routed(
+                            &source.source,
+                            router,
+                            &inv,
+                            &limits,
+                            &svc,
+                            &config,
+                            &loader,
+                            &handle,
+                        )
+                    })
                 })
                 .await
             }
@@ -781,6 +819,78 @@ mod tests {
             e.invoke(inv(Trigger::Invoke, json!(null))).await,
             Err(Error::Timeout)
         ));
+    }
+
+    /// Spans must be exported and must follow the script onto the blocking VM thread, or every
+    /// log line and wrapper span inside a script would be orphaned from its invocation.
+    #[tokio::test]
+    async fn invocation_span_is_exported_and_reaches_the_vm_thread() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tracing_subscriber::{
+            layer::{Context, SubscriberExt},
+            registry::LookupSpan,
+            util::SubscriberInitExt,
+            Layer,
+        };
+
+        /// (message, name of the span the event was emitted in)
+        type Logged = Vec<(String, Option<String>)>;
+        #[derive(Clone, Default)]
+        struct LogSpans(Arc<std::sync::Mutex<Logged>>);
+        struct Msg(String);
+        impl tracing::field::Visit for Msg {
+            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                if f.name() == "message" {
+                    self.0 = format!("{v:?}");
+                }
+            }
+        }
+        impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for LogSpans {
+            fn on_event(&self, ev: &tracing::Event<'_>, ctx: Context<'_, S>) {
+                let mut msg = Msg(String::new());
+                ev.record(&mut msg);
+                let span = ctx.event_span(ev).map(|s| s.name().to_string());
+                self.0.lock().unwrap().push((msg.0, span));
+            }
+        }
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let logs = LogSpans::default();
+        // Global, not scoped: the VM runs on a blocking thread that has no thread-local subscriber.
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
+            .with(logs.clone())
+            .try_init()
+            .expect("no other test installs a global subscriber");
+
+        let e = engine(
+            r#"return { handle = function() native.log("info", "hello-otel") return 1 end }"#,
+            Limits::default(),
+        );
+        e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let invoke = spans
+            .iter()
+            .find(|s| s.name == "invoke")
+            .expect("an invoke span was exported");
+        let attr = |k: &str| {
+            invoke
+                .attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == k)
+                .map(|kv| kv.value.to_string())
+        };
+        assert_eq!(attr("tenant").as_deref(), Some("acme"));
+        assert_eq!(attr("outcome").as_deref(), Some("ok"));
+
+        let logged = logs.0.lock().unwrap();
+        let hello = logged.iter().find(|(m, _)| m == "hello-otel").unwrap();
+        assert_eq!(hello.1.as_deref(), Some("invoke"));
     }
 
     #[derive(Default)]

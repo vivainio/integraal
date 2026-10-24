@@ -27,10 +27,10 @@ fn reply(status: u16, body: Value) -> Value {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let cfg = GlobalConfig::load()?;
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_new(cfg.log_filter())?)
-        .init();
+    let telemetry = Arc::new(integraal_core::telemetry::init(
+        "integraal-webhook",
+        cfg.log_filter(),
+    )?);
 
     let table = cfg
         .db
@@ -50,9 +50,18 @@ async fn main() -> Result<(), Error> {
     let sqs = aws_sdk_sqs::Client::new(&aws_config::load_from_env().await);
 
     lambda_runtime::run(service_fn(|ev: LambdaEvent<Value>| {
-        let (db, signer, sqs, queue_url) =
-            (db.clone(), signer.clone(), sqs.clone(), queue_url.clone());
-        async move { Ok::<_, Error>(handle(ev.payload, db, signer, &sqs, &queue_url).await) }
+        let (db, signer, sqs, queue_url, telemetry) = (
+            db.clone(),
+            signer.clone(),
+            sqs.clone(),
+            queue_url.clone(),
+            telemetry.clone(),
+        );
+        async move {
+            let out = handle(ev.payload, db, signer, &sqs, &queue_url).await;
+            telemetry.flush(); // the environment may freeze as soon as we return
+            Ok::<_, Error>(out)
+        }
     }))
     .await
 }

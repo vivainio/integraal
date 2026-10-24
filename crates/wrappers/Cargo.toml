@@ -7,6 +7,7 @@ edition.workspace = true
 mlua.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+opentelemetry.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 getrandom = "0.4"

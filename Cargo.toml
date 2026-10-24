@@ -16,6 +16,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio", "testing"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"] }
+tracing-opentelemetry = "0.34"
 mlua = { version = "0.12", features = ["luau", "vendored", "serde", "send"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"

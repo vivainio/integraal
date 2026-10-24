@@ -23,6 +23,7 @@ mod ndjson;
 mod queue;
 mod sink;
 mod sql;
+mod telemetry;
 mod throttle;
 mod v1;
 mod vault;

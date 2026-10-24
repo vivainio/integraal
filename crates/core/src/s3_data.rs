@@ -79,6 +79,7 @@ struct S3Writer {
 }
 
 impl S3Writer {
+    #[tracing::instrument(name = "s3.upload_part", skip_all, fields(bucket = %self.bucket))]
     fn upload_part(&mut self, body: Vec<u8>) -> Result<(), String> {
         let (client, bucket, key) = (self.client.clone(), self.bucket.clone(), self.key.clone());
         let existing = self.upload_id.clone();
@@ -144,6 +145,7 @@ impl ObjectWriter for S3Writer {
         Ok(())
     }
 
+    #[tracing::instrument(name = "s3.commit", skip_all, fields(bucket = %self.bucket))]
     fn commit(mut self: Box<Self>) -> Result<(), String> {
         let tail = std::mem::take(&mut self.buf);
         if self.upload_id.is_none() {
@@ -224,6 +226,7 @@ impl ObjectBackend for S3Backend {
         }))
     }
 
+    #[tracing::instrument(name = "s3.open", skip_all, fields(bucket = %self.bucket))]
     fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String> {
         self.handle.block_on(async {
             match self
@@ -250,6 +253,7 @@ impl ObjectBackend for S3Backend {
         })
     }
 
+    #[tracing::instrument(name = "s3.get", skip_all, fields(bucket = %self.bucket))]
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.handle.block_on(async {
             match self
@@ -277,6 +281,7 @@ impl ObjectBackend for S3Backend {
         })
     }
 
+    #[tracing::instrument(name = "s3.put", skip_all, fields(bucket = %self.bucket))]
     fn put(&self, key: &str, body: Vec<u8>) -> Result<(), String> {
         self.handle.block_on(async {
             self.client
@@ -291,6 +296,7 @@ impl ObjectBackend for S3Backend {
         })
     }
 
+    #[tracing::instrument(name = "s3.delete", skip_all, fields(bucket = %self.bucket))]
     fn delete(&self, key: &str) -> Result<(), String> {
         self.handle.block_on(async {
             self.client
@@ -335,6 +341,7 @@ impl ObjectBackend for S3Backend {
         })
     }
 
+    #[tracing::instrument(name = "s3.list", skip_all, fields(bucket = %self.bucket))]
     fn list(&self, prefix: &str, limit: usize) -> Result<Vec<String>, String> {
         self.handle.block_on(async {
             let out = self

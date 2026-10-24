@@ -9,6 +9,7 @@ mod placement;
 mod s3_data;
 pub mod s3_events;
 mod sqs_queue;
+pub mod telemetry;
 
 pub use engine::{Placement, TenantConfig, TenantLimits};
 pub use placement::{PlaceOptions, Placed};

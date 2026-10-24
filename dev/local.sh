@@ -4,7 +4,7 @@
 # For dev/alb.sh also pass `--lua-services <roto>/services --alb-port 8888` to roto-server.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# Only the AWS SDK variables are environment; everything else is in dev/local.json.
+# Only the AWS SDK variables (and optional OTEL_*, see docs/observability.md) are environment; everything else is in dev/local.json.
 # AWS_DEFAULT_REGION is for the awscli v1 that uvx installs, which ignores AWS_REGION.
 export AWS_ENDPOINT_URL=http://localhost:5070 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
 DB_TABLE=integraal

@@ -8,6 +8,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+opentelemetry.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
 

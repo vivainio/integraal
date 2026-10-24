@@ -43,6 +43,7 @@ nav = [
   ] },
   { "Operations" = [
     { "Deployment" = "deployment.md" },
+    { "Observability" = "observability.md" },
     { "Local development" = "local-development.md" },
   ] },
   { "Roadmap" = "roadmap.md" },

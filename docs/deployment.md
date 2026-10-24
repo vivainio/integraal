@@ -41,8 +41,9 @@ process at startup.
 | `ceiling` | server, Lambda | operator ceilings for tenant `timeout_ms` and `memory_mb`; see [Limits](limits.md#deployment-ceiling) |
 | `log` | all | `tracing` filter, such as `info` or `integraal_core=debug` (default `info`) |
 
-Only the standard AWS SDK variables remain in the environment: credentials, region and
-`AWS_ENDPOINT_URL` (to point at a simulator such as roto).
+Apart from the standard AWS SDK variables (credentials, region and `AWS_ENDPOINT_URL`, to point at a
+simulator such as roto), the only environment variables are the standard `OTEL_*` ones, which turn on
+[OpenTelemetry export](observability.md).
 
 ## Credential vault {#vault}
 

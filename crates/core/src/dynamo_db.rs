@@ -47,6 +47,7 @@ fn parse(attrs: &std::collections::HashMap<String, AttributeValue>) -> Option<It
 }
 
 impl ItemBackend for DynamoBackend {
+    #[tracing::instrument(name = "dynamodb.get", skip_all, fields(table = %self.table))]
     fn get(&self, pk: &str, sk: &str) -> Result<Option<Item>, String> {
         self.handle.block_on(async {
             let out = self
@@ -63,6 +64,7 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.put", skip_all, fields(table = %self.table))]
     fn put(&self, pk: &str, item: Item) -> Result<(), String> {
         self.handle.block_on(async {
             self.client
@@ -79,6 +81,7 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.delete", skip_all, fields(table = %self.table))]
     fn delete(&self, pk: &str, sk: &str) -> Result<(), String> {
         self.handle.block_on(async {
             self.client
@@ -93,6 +96,7 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.put_if_absent", skip_all, fields(table = %self.table))]
     fn put_if_absent(&self, pk: &str, item: Item) -> Result<bool, String> {
         self.handle.block_on(async {
             let res = self
@@ -118,6 +122,7 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.put_if_free", skip_all, fields(table = %self.table))]
     fn put_if_free(&self, pk: &str, item: Item, now: u64) -> Result<bool, String> {
         self.handle.block_on(async {
             let res = self
@@ -145,6 +150,7 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.delete_if_value", skip_all, fields(table = %self.table))]
     fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String> {
         self.handle.block_on(async {
             let res = self
@@ -169,6 +175,7 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.take", skip_all, fields(table = %self.table))]
     fn take(&self, pk: &str, sk: &str) -> Result<Option<Item>, String> {
         self.handle.block_on(async {
             let out = self
@@ -185,6 +192,7 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.add", skip_all, fields(table = %self.table))]
     fn add(&self, pk: &str, sk: &str, delta: i64, ttl: u64, now: u64) -> Result<i64, String> {
         self.handle.block_on(async {
             // A row can be replaced between the two steps, so retry a few times before giving up.
@@ -246,6 +254,7 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.query", skip_all, fields(table = %self.table))]
     fn query(&self, pk: &str, sk_prefix: &str, limit: usize) -> Result<Vec<Item>, String> {
         self.handle.block_on(async {
             let mut q = self
