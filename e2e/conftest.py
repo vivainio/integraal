@@ -174,7 +174,7 @@ def stack(megalith):
         key = "11" * 32
         common = {
             "scripts": {"bucket": "scripts"},
-            "buckets": {"prefix": "tenants/", "map": {"In": "data-in", "Out": "data-out", "Temp": "data-temp"}},
+            "buckets": {"prefix": "tenants/", "map": {"In": "data-in", "Out": "data-out", "Temp": "data-temp", "Drops": "data-drops"}},
             "batch": {"bucket": "batch", "prefix": "tenants/"},
             "db": {"table": "integraal"},
             "callbacks": {"base_url": f"{roto_url}/roto-http"},

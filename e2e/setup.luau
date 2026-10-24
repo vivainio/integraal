@@ -20,6 +20,10 @@ roto.s3.bucket("data-temp")
 roto.s3.bucket("data-in", {
 	notify = { { queue = jobs, events = { "s3:ObjectCreated:*" } } },
 })
+-- Drops go to the intake queue, to be placed by size before any worker sees them.
+roto.s3.bucket("data-drops", {
+	notify = { { queue = intake, events = { "s3:ObjectCreated:*" } } },
+})
 roto.s3.bucket("batch", {
 	notify = { { queue = jobs, events = { "s3:ObjectCreated:*" }, suffix = "done.json" } },
 })
@@ -46,7 +50,7 @@ roto.s3.put(
 	"mega/config.json",
 	`\{"router":"router",`
 		.. `"vars":\{"megalith":"{roto.vars.MEGALITH}"},`
-		.. `"buckets":\{"In":"readwrite","Out":"readwrite","Temp":"readwrite"},`
+		.. `"buckets":\{"In":"readwrite","Out":"readwrite","Temp":"readwrite","Drops":"readwrite"},`
 		.. `"queue":true,"batch":true,`
 		.. `"placement":\{"class":"small","classes":["large"],"script":"place"},`
 		.. `"limits":\{"timeout_ms":20000},`
