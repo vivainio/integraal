@@ -19,6 +19,8 @@ HERE = Path(__file__).parent
 ROOT = HERE.parent
 ADMIN_TOKEN = "e2e-admin-token-0123456789abcdef"
 REGION = "us-east-1"
+BIN = HERE / ".bin"
+ROTO = os.environ.get("ROTO_SERVER") or shutil.which("roto-server")
 
 
 def free_port() -> int:
@@ -60,6 +62,7 @@ class Stack:
         self.s3 = boto3.client("s3", **kw)
         self.sqs = boto3.client("sqs", **kw)
         self.ddb = boto3.client("dynamodb", **kw)
+        self.lam = boto3.client("lambda", **kw)
 
     # -- HTTP into the server
     def invoke(self, script, event=None, version=None, tenant="mega"):
@@ -147,24 +150,50 @@ def megalith():
 
 @pytest.fixture(scope="session")
 def stack(megalith):
-    if not shutil.which("roto-server"):
-        pytest.skip("roto-server is not on PATH")
+    if not ROTO:
+        pytest.skip("roto-server is not on PATH (or set ROTO_SERVER)")
     work = Path(tempfile.mkdtemp(prefix="integraal-e2e-"))
     _WORKDIR[:] = [work]
     procs = []
     try:
-        subprocess.run(
-            ["cargo", "build", "-p", "integraal-server"],
-            cwd=ROOT, check=True,
-        )
-        # Lambda-style binaries are all called `bootstrap`; the server is its own name.
+        cargo_env = {**os.environ, "CARGO_INCREMENTAL": "0"}
+        subprocess.run(["cargo", "build", "-p", "integraal-server"], cwd=ROOT, check=True, env=cargo_env)
         server_bin = ROOT / "target/debug/integraal-server"
+        # Two Lambda entrypoints are both called `bootstrap`, so build one at a time and keep a copy.
+        BIN.mkdir(exist_ok=True)
+        for pkg, name, built in (("integraal-lambda", "lambda", "bootstrap"), ("integraal-ingress", "ingress", "bootstrap"),
+                                 ("integraal-webhook", "webhook", "integraal-webhook")):
+            subprocess.run(["cargo", "build", "-p", pkg], cwd=ROOT, check=True, env=cargo_env)
+            shutil.copy2(ROOT / "target/debug" / built, BIN / name)
 
         roto_port = free_port()
         roto_url = f"http://localhost:{roto_port}"
+        # Queue URLs are needed in the configs before roto (which creates the queues) is up.
+        queues = {n: f"{roto_url}/123456789012/{n}" for n in
+                  ("jobs", "jobs-dlq", "intake", "jobs-small", "jobs-large")}
+        key = "11" * 32
+        common = {
+            "scripts": {"bucket": "scripts"},
+            "buckets": {"prefix": "tenants/", "map": {"In": "data-in", "Out": "data-out", "Temp": "data-temp"}},
+            "batch": {"bucket": "batch", "prefix": "tenants/"},
+            "db": {"table": "integraal"},
+            "callbacks": {"base_url": f"{roto_url}/roto-http"},
+            "crypto": {"keys": {"1": "INTEGRAAL_KEY_1"}, "active": 1},
+            "queue": {"url": queues["jobs"]},
+            "log": "info",
+        }
+        lambda_cfg = work / "lambda.json"
+        lambda_cfg.write_text(json.dumps({
+            **common,
+            "ingress": {"queues": {"small": queues["jobs-small"], "large": queues["jobs-large"]}, "default": "small"},
+        }))
+        routes = work / "routes.json"
+        routes.write_text(json.dumps({"routes": [{"method": "POST", "path": "/cb/{tenant}/{token}", "function": "webhook"}]}))
         roto = _spawn(
-            ["roto-server", "--ephemeral", "--port", str(roto_port), "--setup", str(HERE / "setup.luau"),
-             "--set", f"FIXTURES={HERE / 'fixtures/mega'}", "--set", f"MEGALITH={megalith.base}/"],
+            [ROTO, "--ephemeral", "--port", str(roto_port), "--setup", str(HERE / "setup.luau"),
+             "--http-routes", str(routes),
+             "--set", f"FIXTURES={HERE / 'fixtures/mega'}", "--set", f"MEGALITH={megalith.base}/",
+             "--set", f"BIN_DIR={BIN}", "--set", f"LAMBDA_CFG={lambda_cfg}", "--set", f"KEY={key}"],
             work / "roto.log",
         )
         procs.append(roto)
@@ -175,27 +204,21 @@ def stack(megalith):
         os.environ.update({k: env[k] for k in ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION")})
 
         sqs = boto3.client("sqs", endpoint_url=roto_url, region_name=REGION, aws_access_key_id="test", aws_secret_access_key="test")
-        queues = {n: sqs.get_queue_url(QueueName=n)["QueueUrl"] for n in
-                  ("jobs", "jobs-dlq", "intake", "jobs-small", "jobs-large")}
+        for n, url in queues.items():
+            assert sqs.get_queue_url(QueueName=n)["QueueUrl"] == url, f"queue {n} is not where the configs say"
 
         server_port, admin_port = free_port(), free_port()
         cfg = {
-            "scripts": {"bucket": "scripts"},
-            "buckets": {"prefix": "tenants/", "map": {"In": "data-in", "Out": "data-out", "Temp": "data-temp"}},
-            "batch": {"bucket": "batch", "prefix": "tenants/"},
-            "db": {"table": "integraal"},
-            "callbacks": {"base_url": "http://localhost:0"},
-            "crypto": {"keys": {"1": "INTEGRAAL_KEY_1"}, "active": 1},
+            **common,
+            "callbacks": {"base_url": f"{roto_url}/roto-http"},
             "admin": {"port": admin_port, "token_env": "INTEGRAAL_ADMIN_TOKEN"},
-            "queue": {"url": queues["jobs"]},
             "ingress": {"queues": {"small": queues["jobs-small"], "large": queues["jobs-large"]}, "default": "small"},
             "server": {"port": server_port},
             "throttle": [{"url": f"{megalith.base}/slow/", "max_concurrent": 2, "per_second": 50}],
-            "log": "info",
         }
         cfg_path = work / "server.json"
         cfg_path.write_text(json.dumps(cfg))
-        senv = {**env, "INTEGRAAL_ADMIN_TOKEN": ADMIN_TOKEN, "INTEGRAAL_KEY_1": "11" * 32}
+        senv = {**env, "INTEGRAAL_ADMIN_TOKEN": ADMIN_TOKEN, "INTEGRAAL_KEY_1": key}
         procs.append(_spawn([str(server_bin), "--config", str(cfg_path)], work / "server.log", senv))
         server_url = f"http://127.0.0.1:{server_port}"
         wait_http(f"{server_url}/healthz")

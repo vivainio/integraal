@@ -40,6 +40,9 @@ uv run --project e2e pytest e2e
 The outside world is played by **megalith**, a small mock HTTP service (`e2e/megalith.py`). It
 stands in for the hypothetical system that integraal acts as the integration layer for: the
 back-office or partner system that integraal calls, that sends callbacks, and that works batch jobs.
+The Lambda entrypoints (`lambda`, `ingress`, `webhook`) run as the real `bootstrap` binaries, warm,
+behind roto's Lambda Runtime API (its `runtime` executor), so direct invoke, intake placement and
+the callback webhook are tested as deployed. Set `ROTO_SERVER` to use a roto build that is not on your `PATH`.
 Megalith records every request it gets and answers from a canned table, so tests can assert on what
 integraal sent (headers, bodies, concurrency) as well as on what came back.
 
