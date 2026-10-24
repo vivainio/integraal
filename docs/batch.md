@@ -192,8 +192,9 @@ end
   capped at `max_http_response_mb`.
 - **Fargate only.** The server performs the request in a thread, which Lambda cannot do because the
   sandbox freezes when the invocation returns; there `job:http` raises an error. The request lives
-  only in the process: if the task stops before it finishes (a deploy, a crash), the job never gets a
-  `done.json` and no retry happens. Treat the same way as a partner that never answers
+  only in the process: if the task is stopped (SIGTERM on a deploy or scale-in), its running jobs are
+  failed at once with `ok = false`; if it dies without warning (a crash, OOM), the job never gets a
+  `done.json`. No retry happens either way. Treat the same way as a partner that never answers
   ([Not covered](#not-covered)), and keep the calls idempotent.
 
 ## Tenant config and deployment

@@ -27,8 +27,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     gzip::Capped,
-    ndjson::Rows,
     http_job::{self, Prepared},
+    ndjson::Rows,
     xml::{ByteStream, Limited},
     BucketScope, Budget, Deadline, HostContext,
 };
@@ -186,26 +186,102 @@ impl Draft {
     }
 }
 
+/// Background http jobs still running in this process, by a per-process token. Whoever removes an
+/// entry owns writing that job's `done.json`: the job's thread when it finishes, or `fail_inflight_http`
+/// at shutdown, so exactly one of them writes it.
+#[derive(Default)]
+struct Inflight {
+    jobs: std::collections::HashMap<u64, (String, BucketScope)>,
+    next: u64,
+    stopping: bool,
+}
+
+static INFLIGHT: std::sync::LazyLock<Mutex<Inflight>> = std::sync::LazyLock::new(Default::default);
+
+fn inflight() -> std::sync::MutexGuard<'static, Inflight> {
+    INFLIGHT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn put_done(scope: &BucketScope, id: &str, done: &Json) {
+    let key = format!("{}done.json", job_dir(id));
+    let body = serde_json::to_vec(done).expect("done.json serializes");
+    if let Err(e) = scope.put(&key, body) {
+        tracing::error!(job = %id, error = %e, "could not write done.json for batch http job");
+    }
+}
+
+fn lost(reason: &str) -> Json {
+    json!({"ok": false, "error": format!("http job lost: {reason}")})
+}
+
+/// Fails every background http job still running in this process, and any submitted afterwards,
+/// by writing `done.json` with `ok: false`. Called when the server is told to stop (SIGTERM), so a
+/// deploy or scale-in ends those jobs at once instead of leaving them without an outcome.
+/// Returns how many jobs it failed.
+pub fn fail_inflight_http() -> usize {
+    inflight().stopping = true;
+    fail_inflight(|_| true)
+}
+
+fn fail_inflight(which: impl Fn(&str) -> bool) -> usize {
+    let mut g = inflight();
+    let tokens: Vec<u64> = g
+        .jobs
+        .iter()
+        .filter(|(_, (id, _))| which(id))
+        .map(|(t, _)| *t)
+        .collect();
+    // The lock is held across the writes so a thread that is just finishing cannot race them.
+    for t in &tokens {
+        let (id, scope) = g.jobs.remove(t).expect("token was just listed");
+        tracing::warn!(job = %id, "failing batch http job: server is stopping");
+        put_done(
+            &scope,
+            &id,
+            &lost("the server stopped before the request finished"),
+        );
+    }
+    tokens.len()
+}
+
 /// Runs the job's requests on their own threads and, when all have finished, commits the results:
 /// bodies first, then `done.json`. A request that fails fails the job with `ok: false`.
 fn spawn_http(env: http_job::Env, scope: BucketScope, id: String, reqs: Vec<(String, Prepared)>) {
+    let token = {
+        let mut g = inflight();
+        if g.stopping {
+            drop(g);
+            put_done(&scope, &id, &lost("the server is stopping"));
+            return;
+        }
+        g.next += 1;
+        let token = g.next;
+        g.jobs.insert(token, (id.clone(), scope.clone()));
+        token
+    };
     let span = tracing::Span::current();
     let spawned = std::thread::Builder::new()
         .name(format!("batch-http-{id}"))
-        .spawn(move || {
-            let _e = span.enter();
-            let done = run_http(&env, &scope, &id, reqs).unwrap_or_else(|e| {
-                tracing::warn!(job = %id, error = %e, "batch http job failed");
-                json!({"ok": false, "error": e})
-            });
-            let key = format!("{}done.json", job_dir(&id));
-            let body = serde_json::to_vec(&done).expect("done.json serializes");
-            if let Err(e) = scope.put(&key, body) {
-                tracing::error!(job = %id, error = %e, "could not write done.json for batch http job");
+        .spawn({
+            let (scope, id) = (scope.clone(), id.clone());
+            move || {
+                let _e = span.enter();
+                let done = run_http(&env, &scope, &id, reqs).unwrap_or_else(|e| {
+                    tracing::warn!(job = %id, error = %e, "batch http job failed");
+                    json!({"ok": false, "error": e})
+                });
+                // Already failed by `fail_inflight_http`: its outcome stands.
+                let mut g = inflight();
+                if g.jobs.remove(&token).is_some() {
+                    put_done(&scope, &id, &done);
+                }
             }
         });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "could not start batch http thread");
+        if inflight().jobs.remove(&token).is_some() {
+            put_done(&scope, &id, &lost("could not start the request thread"));
+        }
     }
 }
 
@@ -1046,5 +1122,56 @@ impl UserData for Hydrated {
         methods.add_meta_method(MetaMethod::ToString, |_, t, ()| {
             Ok(format!("BatchResult({})", t.id))
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ObjectBackend;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Mem(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl crate::ObjectBackend for Mem {
+        fn get(&self, k: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.0.lock().unwrap().get(k).cloned())
+        }
+        fn put(&self, k: &str, b: Vec<u8>) -> Result<(), String> {
+            self.0.lock().unwrap().insert(k.into(), b);
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn open(&self, _: &str) -> Result<Option<Box<dyn io::Read + Send>>, String> {
+            Err("unused".into())
+        }
+        fn list(&self, _: &str, _: usize) -> Result<Vec<String>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn shutdown_fails_a_running_job_once() {
+        let mem = Arc::new(Mem::default());
+        let scope = BucketScope::new(mem.clone(), "t/");
+        let token = {
+            let mut g = inflight();
+            g.next += 1;
+            let t = g.next;
+            g.jobs.insert(t, ("shutdown-test".into(), scope.clone()));
+            t
+        };
+        assert_eq!(fail_inflight(|id| id == "shutdown-test"), 1);
+        let done: Json =
+            serde_json::from_slice(&mem.get("t/jobs/shutdown-test/done.json").unwrap().unwrap())
+                .unwrap();
+        assert_eq!(done["ok"], false);
+        assert!(done["error"].as_str().unwrap().contains("server stopped"));
+        // The job's own thread finds its entry gone and writes nothing over the failure.
+        assert!(inflight().jobs.remove(&token).is_none());
+        assert_eq!(fail_inflight(|id| id == "shutdown-test"), 0);
     }
 }

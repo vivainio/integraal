@@ -34,7 +34,7 @@ mod xml_writer;
 mod zip;
 mod zip_writer;
 
-pub use batch::BATCH_BUCKET;
+pub use batch::{fail_inflight_http, BATCH_BUCKET};
 pub use bucket::{
     Access, BucketScope, BucketScopes, ObjectBackend, ObjectWriter, PresignMethod, MAX_LIST_KEYS,
     MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,

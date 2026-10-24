@@ -74,10 +74,32 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%port, "listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            stop_signal().await;
+            // Background http requests die with this process; give their jobs an outcome now rather
+            // than after the connections drain, which ECS may not wait for.
+            let failed = tokio::task::spawn_blocking(integraal_core::fail_inflight_http)
+                .await
+                .unwrap_or(0);
+            tracing::info!(failed, "stopping");
         })
         .await?;
     Ok(())
+}
+
+/// Resolves on SIGTERM (what ECS sends on a deploy or scale-in) or Ctrl-C.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[derive(Clone)]
