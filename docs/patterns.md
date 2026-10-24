@@ -100,12 +100,16 @@ sequenceDiagram
 
 ## Talking to the outside
 
-### Outbound HTTP
-Only URLs in the tenant's `http.allow`; no redirects, no private IPs. Streamable. [Outbound HTTP](http.md)
+### Outbound HTTP (allowlist and throttle)
+Only URLs in the tenant's `http.allow`; no redirects, no private IPs. The operator can also cap
+concurrency and request rate per target URL, for all tenants together. A throttled call waits for a
+slot, or fails with `throttled:` if the invocation deadline comes first. Limits are per Fargate
+process and not applied on Lambda. [Outbound HTTP](http.md), [Throttling](http.md#throttling)
 
 ```mermaid
 flowchart LR
-    S[script] -->|native.http.request| A{allowlist} --> X[External API]
+    S[script] -->|native.http.request| A{allowlist} --> T{{"throttle<br/>max_concurrent, per_second"}} --> X[External API]
+    T -. no slot before deadline .-> E[throttled error]
 ```
 
 ### Streaming transform (S3 → XML/zip/gzip → S3)
@@ -166,5 +170,6 @@ flowchart LR
 | Third party calls us back | Callback |
 | Partner does heavy work for us | Batch job |
 | Call an external API | Outbound HTTP |
+| Protect a partner API from overload | HTTP throttle (`max_concurrent`, `per_second`) |
 | Crunch large files | Streams, zip, gzip, SQL |
 | Avoid concurrent runs | Locks |
