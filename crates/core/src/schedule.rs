@@ -218,6 +218,7 @@ impl Engine {
                         body: body.to_string(),
                         delay_secs: offset_secs(&tenant, tick.every, window),
                         trace: None,
+                        group: None,
                     });
                 }
                 Ok(_) => {}

@@ -54,7 +54,7 @@ impl QueueBackend for SqsBackend {
                     SendMessageBatchRequestEntry::builder()
                         .id(i.to_string())
                         .message_body(&m.body)
-                        .message_group_id(integraal_wrappers::message_group_id(&m.body))
+                        .message_group_id(integraal_wrappers::group_id(&m.body, m.group.as_deref()))
                         .delay_seconds(m.delay_secs as i32)
                         .set_message_attributes(Some(
                             crate::telemetry::sqs_attributes(m.trace.as_ref().unwrap_or(&current))
@@ -96,6 +96,7 @@ mod tests {
                 body: "x".repeat(*n),
                 delay_secs: 0,
                 trace: None,
+                group: None,
             })
             .collect()
     }

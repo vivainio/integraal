@@ -27,6 +27,8 @@ pub struct OutMessage {
     pub delay_secs: u32,
     /// The trace the message belongs to; `None` means the sending invocation's own.
     pub trace: Option<crate::trace::TraceContext>,
+    /// Suffix for the SQS `MessageGroupId` (`<tenant>:<group>`); `None` derives it from the event type.
+    pub group: Option<String>,
 }
 
 /// Where `native.queue.send` delivers (SQS in production). Implementations may block and split the
@@ -42,13 +44,16 @@ pub const SYSTEM_GROUP: &str = "system";
 /// when it has one (`acme:schedule`), so a FIFO queue orders work per tenant and message type.
 /// Tenant names never contain `:`. Bodies without a tenant go to `SYSTEM_GROUP`. At most 128 bytes.
 pub fn message_group_id(body: &str) -> String {
+    group_id(body, None)
+}
+
+/// Like `message_group_id`, but an explicit `group` replaces the event type as the suffix.
+pub fn group_id(body: &str, group: Option<&str>) -> String {
     let v = serde_json::from_str::<serde_json::Value>(body).unwrap_or_default();
     let tenant = v["tenant"].as_str().filter(|t| !t.is_empty());
-    let kind = v["event"]["type"].as_str().filter(|k| {
-        !k.is_empty()
-            && k.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    });
+    let kind = group
+        .or_else(|| v["event"]["type"].as_str())
+        .filter(|k| valid_name(k));
     let mut id = tenant.unwrap_or(SYSTEM_GROUP).to_string();
     if let Some(k) = kind {
         id.push(':');
@@ -122,6 +127,12 @@ pub(crate) fn api(
                         "delay_s is at most {MAX_DELAY_SECS}"
                     )));
                 }
+                let group = m.get::<Option<String>>("group")?;
+                if let Some(g) = &group {
+                    if !valid_name(g) {
+                        return Err(mlua::Error::runtime(format!("invalid group name {g:?}")));
+                    }
+                }
                 let mut envelope = serde_json::json!({ "tenant": tenant, "event": event });
                 if let Some(s) = script {
                     envelope["script"] = s.into();
@@ -139,6 +150,7 @@ pub(crate) fn api(
                     body,
                     delay_secs: delay,
                     trace: None,
+                    group,
                 });
             }
             for chunk in out.chunks(SEND_CHUNK) {
@@ -162,6 +174,13 @@ mod group_tests {
         assert_eq!(
             message_group_id(r#"{"tenant":"acme","event":{"type":"schedule"}}"#),
             "acme:schedule"
+        );
+        assert_eq!(
+            group_id(
+                r#"{"tenant":"acme","event":{"type":"schedule"}}"#,
+                Some("orders")
+            ),
+            "acme:orders"
         );
         assert_eq!(message_group_id(r#"{"Records":[]}"#), SYSTEM_GROUP);
         assert_eq!(message_group_id("not json"), SYSTEM_GROUP);

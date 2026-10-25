@@ -329,6 +329,7 @@ impl Barriers {
             body: envelope.to_string(),
             delay_secs: 0,
             trace: Some(header.trace.clone()),
+            group: None,
         }])?;
         self.op()?.put(
             pk,

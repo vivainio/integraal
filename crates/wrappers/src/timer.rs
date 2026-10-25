@@ -228,6 +228,7 @@ pub fn sweep(
                     body: payload.envelope(tenant),
                     delay_secs: 0,
                     trace: payload.trace.clone(),
+                    group: None,
                 }]);
                 match sent {
                     Ok(()) => {

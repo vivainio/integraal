@@ -20,6 +20,7 @@ local sent = native.queue.send({
 | `version` | script version, default `latest` |
 | `event` | any JSON value, delivered as the handler's `event` |
 | `delay_s` | wait this long before the message becomes visible, at most 900 |
+| `group` | SQS `MessageGroupId` suffix: the message is sent as group `<tenant>:<group>`. Default: the event's `type`, if any. Letters, digits, `-`, `_`, `.`; matters on FIFO queues, where messages of one group are processed in order |
 
 The message is the normal envelope `{tenant, script?, version?, event}`, and the **tenant is always
 your own**: a script can only queue work for itself.
