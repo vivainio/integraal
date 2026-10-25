@@ -125,7 +125,7 @@ _WORKDIR: list[Path] = []
 
 
 @contextlib.contextmanager
-def launch(megalith, devtools=False):
+def launch(megalith, devtools=False, server_env=None):
     """Start roto and the server; `devtools` also turns on flow logs, debug captures and the local API for the `mega` tenant."""
     work = Path(tempfile.mkdtemp(prefix="integraal-e2e-"))
     _WORKDIR[:] = [work]
@@ -205,7 +205,7 @@ def launch(megalith, devtools=False):
             cfg["local_api"] = {"port": local_port}
         cfg_path = work / "server.json"
         cfg_path.write_text(json.dumps(cfg))
-        senv = {**env, "INTEGRAAL_ADMIN_TOKEN": ADMIN_TOKEN, "INTEGRAAL_KEY_1": key}
+        senv = {**env, "INTEGRAAL_ADMIN_TOKEN": ADMIN_TOKEN, "INTEGRAAL_KEY_1": key, **(server_env or {})}
         procs.append(_spawn([str(server_bin), "--config", str(cfg_path)], work / "server.log", senv))
         server_url = f"http://127.0.0.1:{server_port}"
         wait_http(f"{server_url}/healthz")

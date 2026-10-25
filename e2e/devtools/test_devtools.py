@@ -207,3 +207,64 @@ def test_integraal_client_fails_on_a_bad_request_and_prints_usage_for_nonsense(s
     assert code == 1 and err.startswith("4")
     code, _, err = dev.client("bogus")
     assert code == 2 and "usage" in err
+
+
+# -- OpenTelemetry export (the stack's server sends OTLP/HTTP to the test's collector)
+
+def spans_named(collector, trace, name):
+    return eventually(lambda: [s for s in collector.trace(trace) if s["name"] == name], what=f"{name} span in {trace}")
+
+
+def test_an_invocation_is_exported_under_the_trace_id_its_flow_log_uses(stack, dev, collector):
+    _, trace = run(stack, dev, "hello", {"x": uid()})
+    [inv] = spans_named(collector, trace, "invoke")
+    assert inv["service"] == "integraal-server"
+    assert (inv["attrs"]["tenant"], inv["attrs"]["script"]) == (TENANT, "hello")
+    [http] = spans_named(collector, trace, "http_request")
+    assert inv["parent"] == http["span_id"]
+    # The flow log's segment is the same span.
+    header = dev.json(f"/flows/{TENANT}/{trace}")[0]
+    assert header["span_id"] == inv["span_id"]
+
+
+def test_a_callers_traceparent_is_continued(stack, dev, collector):
+    import requests
+    trace, parent = "ab" * 16, "cd" * 8
+    r = requests.post(f"{stack.server_url}/v1/{TENANT}/hello", json={"x": 1}, headers={"traceparent": f"00-{trace}-{parent}-01"}, timeout=10)
+    assert r.status_code == 200
+    [http] = spans_named(collector, trace, "http_request")
+    assert http["parent"] == parent
+    # ...and the flow log files the invocation under the caller's trace.
+    [row] = eventually(lambda: dev.json(f"/flows/{TENANT}/{trace}/summary"), what="summary under caller's trace")
+    assert row["script"] == "hello"
+
+
+def test_messages_sent_to_the_queue_carry_the_trace_to_the_next_invocation(stack, dev, collector):
+    flow = uid()
+    r, trace = run(stack, dev, "worker", {"op": "scatter", "flow": flow, "n": 1})
+    assert r.status_code == 200
+    shard = eventually(lambda: [s for s in collector.trace(trace) if s["name"] == "invoke" and s["attrs"].get("script") == "shard"],
+                       timeout=30, what="shard invoke span in the same trace")
+    assert shard[0]["attrs"]["trigger"] == "Queue"
+    assert [s for s in collector.trace(trace) if s["name"] == "sqs_message"]
+    # worker -> shard -> gather: every hop of the scatter joins the one trace.
+    want = {"worker", "shard", "gather"}
+    eventually(lambda: {r["script"] for r in dev.json(f"/flows/{TENANT}/{trace}/summary")} == want, timeout=30, what="three hops in one flow")
+
+
+def test_a_barrier_deadline_timer_is_stamped_with_the_creating_trace_in_the_export(stack, dev, collector):
+    i = uid()
+    _, trace = run(stack, dev, "deadline_barrier", {"op": "create", "id": i, "deadline_s": 3600})
+    [t] = eventually(lambda: dev.json(f"/flows/{TENANT}/{trace}/state")["timers"], what="timer")
+    assert t["payload"]["trace"]["traceparent"].split("-")[1] == trace
+    assert spans_named(collector, trace, "invoke")
+
+
+def test_outbound_http_is_a_span_without_path_or_query(stack, dev, collector, megalith):
+    megalith.route("GET", "/secret/path", body=b"ok")
+    secret = uid()
+    r, trace = run(stack, dev, "http_out", {"method": "GET", "url": f"{megalith.base}/secret/path?token={secret}"})
+    assert r.json()["status"] == 200
+    [client] = spans_named(collector, trace, "http.client")
+    assert {"http.request.method", "http.method"} & set(client["attrs"]), client["attrs"]
+    assert secret not in repr(collector.trace(trace)) and "/secret/path" not in repr(collector.trace(trace))
