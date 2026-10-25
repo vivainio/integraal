@@ -406,6 +406,7 @@ mod tests {
             trigger: Trigger::Queue,
             event,
             attempt: 0,
+            continues_trace: false,
         }
     }
 

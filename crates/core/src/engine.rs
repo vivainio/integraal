@@ -13,6 +13,7 @@ use integraal_wrappers::{
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
 use crate::{Error, Invocation, Trigger};
+use integraal_wrappers::{now_ms, FlowLog};
 
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -143,6 +144,10 @@ pub struct TenantConfig {
     /// Allows `native.batch` (jobs handed to a partner through the deployment's batch bucket).
     #[serde(default)]
     pub batch: bool,
+    /// Keeps this tenant's invocation logs in the deployment's flow log bucket (`flow_logs` in
+    /// `integraal.json`), grouped by trace id.
+    #[serde(default)]
+    pub flow_logs: bool,
     /// Script whose `on_route`/`route` handler picks the script for messages that don't name one.
     #[serde(default)]
     pub router: Option<String>,
@@ -194,6 +199,7 @@ pub struct Engine {
     throttle: Option<Arc<Throttle>>,
     background_http: bool,
     master_keys: Option<MasterKeys>,
+    flow_logs: Option<crate::flow_log::FlowLogSink>,
 }
 
 /// Everything besides limits and config that one invocation's native API is wired to.
@@ -207,6 +213,7 @@ pub(crate) struct Services {
     throttle: Option<Arc<Throttle>>,
     background_http: bool,
     master_keys: Option<MasterKeys>,
+    flow_log: Option<FlowLog>,
     vault: Option<Arc<Vault>>,
     /// Source for `require`; absent in VMs that run no tenant code of their own.
     modules: Option<crate::modules::ModuleHost>,
@@ -226,6 +233,7 @@ impl Engine {
             throttle: None,
             background_http: false,
             master_keys: None,
+            flow_logs: None,
         }
     }
 
@@ -276,6 +284,22 @@ impl Engine {
     pub fn with_queue(mut self, backend: Arc<dyn QueueBackend>) -> Self {
         self.queue = Some(backend);
         self
+    }
+
+    /// Where the logs of tenants with `"flow_logs": true` go: `<base_prefix><tenant>/flows/...` in
+    /// this bucket, which tenants cannot reach.
+    pub fn with_flow_logs(
+        mut self,
+        backend: Arc<dyn ObjectBackend>,
+        base_prefix: impl Into<String>,
+    ) -> Self {
+        self.flow_logs = Some(crate::flow_log::FlowLogSink::new(backend, base_prefix));
+        self
+    }
+
+    /// The flow log store, for reading flows back.
+    pub fn flow_logs(&self) -> Option<&crate::flow_log::FlowLogSink> {
+        self.flow_logs.as_ref()
     }
 
     /// Enables `native.crypto`. Each tenant's keys are derived from these and the tenant name.
@@ -337,9 +361,11 @@ impl Engine {
             otel.status_code = tracing::field::Empty,
         );
         let (tenant, trigger) = (inv.tenant.clone(), inv.trigger);
+        let about = FlowSegment::about(&inv, now_ms());
         let start = Instant::now();
+        let flow_log = std::sync::OnceLock::new();
         let result = self
-            .invoke_inner(inv, max_time)
+            .invoke_inner(inv, max_time, &flow_log)
             .instrument(span.clone())
             .await;
         let outcome = match &result {
@@ -353,6 +379,12 @@ impl Engine {
             span.record("otel.status_code", "ERROR");
         }
         crate::telemetry::invocation(&tenant, trigger, outcome, start.elapsed());
+        if let (Some(log), Some(sink)) = (flow_log.into_inner(), &self.flow_logs) {
+            let error = result.as_ref().err().map(|e| e.to_string());
+            about
+                .write(sink, log, &span, outcome, start.elapsed(), error)
+                .await;
+        }
         result
     }
 
@@ -360,8 +392,13 @@ impl Engine {
         &self,
         inv: Invocation,
         max_time: Option<Duration>,
+        flow_slot: &std::sync::OnceLock<FlowLog>,
     ) -> Result<serde_json::Value, Error> {
         let config = Arc::new(self.tenant_config(&inv.tenant).await?);
+        let flow_log = (config.flow_logs && self.flow_logs.is_some()).then(FlowLog::new);
+        if let Some(f) = &flow_log {
+            let _ = flow_slot.set(f.clone());
+        }
         let mut limits = self.limits.resolve(&self.ceiling, &config.limits);
         if let Some(max) = max_time {
             limits.timeout = limits.timeout.min(max);
@@ -409,6 +446,7 @@ impl Engine {
             throttle: self.throttle.clone(),
             background_http: self.background_http,
             master_keys: self.master_keys.clone(),
+            flow_log,
             vault: self.vault().map(Arc::new),
             modules: Some(crate::modules::ModuleHost {
                 loader: self.loader.clone(),
@@ -464,6 +502,92 @@ impl Engine {
     }
 }
 
+/// What a flow log segment says about its invocation, taken before the invocation is consumed.
+struct FlowSegment {
+    tenant: String,
+    script: String,
+    version: Option<String>,
+    trigger: Trigger,
+    attempt: u32,
+    continues_trace: bool,
+    start_ms: u64,
+}
+
+impl FlowSegment {
+    fn about(inv: &Invocation, start_ms: u64) -> Self {
+        Self {
+            tenant: inv.tenant.clone(),
+            script: inv.script.clone().unwrap_or_else(|| "<routed>".into()),
+            version: inv.version.clone(),
+            trigger: inv.trigger,
+            attempt: inv.attempt,
+            continues_trace: inv.continues_trace,
+            start_ms,
+        }
+    }
+
+    /// Writes the segment, and for the first invocation of a flow the index entry. A failure is
+    /// logged and nothing more: the flow log must never fail the invocation it describes.
+    async fn write(
+        self,
+        sink: &crate::flow_log::FlowLogSink,
+        log: FlowLog,
+        span: &tracing::Span,
+        outcome: &str,
+        took: Duration,
+        error: Option<String>,
+    ) {
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        let cx = span.context();
+        let sc = cx.span().span_context().clone();
+        if !sc.is_valid() {
+            tracing::warn!("flow log skipped: the invocation has no trace id");
+            return;
+        }
+        let (trace_id, span_id) = (sc.trace_id().to_string(), sc.span_id().to_string());
+        if let Some(e) = &error {
+            log.event("error", e);
+        }
+        let header = serde_json::json!({
+            "type": "header", "v": 1, "tenant": self.tenant, "trace_id": trace_id,
+            "span_id": span_id, "script": self.script, "version": self.version,
+            "trigger": self.trigger, "attempt": self.attempt, "start_ms": self.start_ms,
+            "continues_trace": self.continues_trace,
+        });
+        let footer = serde_json::json!({
+            "type": "end", "t": now_ms(), "outcome": outcome,
+            "duration_ms": took.as_millis() as u64, "error": error,
+        });
+        let body = log.render(header, footer);
+        let segment = sink.segment_key(&self.tenant, &trace_id, self.start_ms, &span_id);
+        let index = (!self.continues_trace).then(|| {
+            let entry = serde_json::json!({
+                "trace_id": trace_id, "tenant": self.tenant, "script": self.script,
+                "trigger": self.trigger, "start_ms": self.start_ms,
+            });
+            (
+                sink.index_key(&self.tenant, self.start_ms, &trace_id),
+                entry.to_string().into_bytes(),
+            )
+        });
+        let sink = sink.clone();
+        let written = tokio::task::spawn_blocking(move || {
+            sink.put(&segment, body)?;
+            if let Some((key, entry)) = index {
+                sink.put(&key, entry)?;
+            }
+            Ok::<_, String>(())
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "could not write the flow log"),
+            Err(e) => tracing::warn!(error = %e, "flow log task failed"),
+        }
+    }
+}
+
 impl Services {
     /// No buckets, table, vault or keys: what a script that may only compute gets.
     pub(crate) fn bare() -> Self {
@@ -476,6 +600,7 @@ impl Services {
             throttle: None,
             background_http: false,
             master_keys: None,
+            flow_log: None,
             vault: None,
             modules: None,
         }
@@ -535,6 +660,7 @@ pub(crate) fn new_vm(
                 max_data_ops: limits.max_data_ops,
                 max_http_timeout: limits.max_http_timeout,
             },
+            flow_log: svc.flow_log.clone(),
         },
     )?;
     if let Some(host) = &svc.modules {
@@ -756,7 +882,7 @@ pub(crate) fn script_err(e: mlua::Error, deadline: Instant) -> Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::Trigger;
     use integraal_loader::{Fetched, MemoryStore, ScriptStore};
@@ -795,6 +921,7 @@ mod tests {
             trigger,
             event,
             attempt: 0,
+            continues_trace: false,
         }
     }
 
@@ -957,6 +1084,96 @@ mod tests {
         );
     }
 
+    /// A tenant with `flow_logs` gets one segment per invocation under its trace id, and the first
+    /// invocation of a flow also gets an index entry.
+    #[tokio::test]
+    async fn flow_logs_keep_native_log_lines_per_trace() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt;
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer.tracer("test"))),
+        );
+
+        let logs = Arc::new(MemBackend::default());
+        let e = engine_cfg(
+            r#"return { handle = function(ctx, ev)
+                 native.log("info", "step " .. ev.n)
+                 if ev.fail then error("boom") end
+                 return ev.n
+               end }"#,
+            Limits::default(),
+            r#"{"flow_logs": true}"#,
+        )
+        .with_flow_logs(logs.clone(), "logs/");
+        let sink = e.flow_logs().unwrap().clone();
+
+        // The first invocation starts a flow; the second claims to continue one, and fails.
+        e.invoke(inv(Trigger::Invoke, json!({"n": 1})))
+            .await
+            .unwrap();
+        let first_key = logs
+            .0
+            .lock()
+            .unwrap()
+            .keys()
+            .find(|k| k.starts_with("logs/acme/flows/"))
+            .cloned()
+            .unwrap();
+        let trace_id = first_key.split('/').nth(4).unwrap().to_string();
+        assert!(first_key.starts_with(&format!("logs/acme/flows/{}/", &trace_id[..2])));
+
+        let keys: Vec<_> = logs.0.lock().unwrap().keys().cloned().collect();
+        assert_eq!(keys.len(), 2, "segment and index entry: {keys:?}");
+        assert!(keys
+            .iter()
+            .any(|k| k.starts_with("logs/acme/flow-index/") && k.ends_with(&trace_id)));
+
+        let lines = sink.read_flow("acme", &trace_id).unwrap();
+        let kinds: Vec<_> = lines.iter().map(|l| l["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["header", "log", "end"]);
+        assert_eq!(lines[1]["msg"], "step 1");
+        assert_eq!(lines[2]["outcome"], "ok");
+        assert_eq!(lines[0]["trigger"], "invoke");
+
+        let mut second = inv(Trigger::Invoke, json!({"n": 2, "fail": true}));
+        second.continues_trace = true;
+        e.invoke(second).await.unwrap_err();
+        let after: Vec<_> = logs.0.lock().unwrap().keys().cloned().collect();
+        assert_eq!(
+            after.len(),
+            3,
+            "a continuing invocation adds a segment but no index entry"
+        );
+        let failed = after
+            .iter()
+            .find(|k| !keys.contains(k))
+            .map(|k| logs.0.lock().unwrap()[k].clone())
+            .unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&failed[..]), &mut text)
+            .unwrap();
+        assert!(text.contains(r#""outcome":"script_error""#), "{text}");
+        assert!(text.contains("boom"));
+
+        // A tenant without the flag writes nothing.
+        let quiet = engine_cfg(
+            "return { handle = function() return 1 end }",
+            Limits::default(),
+            "{}",
+        )
+        .with_flow_logs(logs.clone(), "logs/");
+        quiet
+            .invoke(inv(Trigger::Invoke, json!(null)))
+            .await
+            .unwrap();
+        assert_eq!(logs.0.lock().unwrap().len(), 3);
+    }
+
     #[tokio::test]
     async fn decimal_global_is_exact() {
         let e = engine(
@@ -1042,7 +1259,9 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MemBackend(Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>);
+    pub(crate) struct MemBackend(
+        pub(crate) Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+    );
     impl ObjectBackend for MemBackend {
         fn get(&self, k: &str) -> Result<Option<Vec<u8>>, String> {
             Ok(self.0.lock().unwrap().get(k).cloned())
@@ -2539,6 +2758,7 @@ mod tests {
             trigger: Trigger::Queue,
             event,
             attempt: 0,
+            continues_trace: false,
         }
     }
 

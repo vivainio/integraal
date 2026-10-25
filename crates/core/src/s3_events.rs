@@ -174,6 +174,7 @@ impl S3Events {
                 "event": name,
             }),
             attempt: 0,
+            continues_trace: false,
         }))
     }
 }

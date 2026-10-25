@@ -4,6 +4,7 @@
 mod config;
 mod dynamo_db;
 mod engine;
+pub mod flow_log;
 pub mod ingress;
 mod modules;
 mod placement;
@@ -73,6 +74,10 @@ pub struct Invocation {
     /// the entrypoint, never read from the wire, and exposed to scripts as `ctx.attempt`.
     #[serde(skip)]
     pub attempt: u32,
+    /// Whether the message carried the trace of the work that caused it, as opposed to starting a
+    /// flow. Set by the entrypoint; it decides which invocations write a flow index entry.
+    #[serde(skip)]
+    pub continues_trace: bool,
 }
 
 fn default_trigger() -> Trigger {

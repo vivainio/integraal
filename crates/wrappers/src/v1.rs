@@ -11,10 +11,14 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     native.set("version", 1)?;
 
     let (tenant, script_name) = (host.tenant.clone(), host.script.clone());
+    let flow_log = host.flow_log.clone();
     native.set(
         "log",
         lua.create_function(move |_, (level, msg): (String, String)| {
             let script = script_name.lock().unwrap().clone();
+            if let Some(f) = &flow_log {
+                f.log(&level, &script, &msg);
+            }
             match level.as_str() {
                 "error" => tracing::error!(%tenant, %script, "{msg}"),
                 "warn" => tracing::warn!(%tenant, %script, "{msg}"),
@@ -427,6 +431,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
     let policy = host.http.clone();
     let (vault, tenant) = (host.vault.clone(), host.tenant.clone());
     let throttle = host.throttle.clone();
+    let flow_log = host.flow_log.clone();
     let (max_timeout, max_body) = (
         host.limits.max_http_timeout,
         host.limits.max_http_response_bytes,
@@ -562,6 +567,9 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             .map_err(|e| {
                 span.record("otel.status_code", "ERROR");
                 crate::telemetry::http_request(&method, &host, None, started.elapsed());
+                if let Some(f) = &flow_log {
+                    f.http(&method, &host, None, started.elapsed().as_millis() as u64);
+                }
                 scrub(format!("http request failed: {e}"))
             })?;
         let status = resp.status().as_u16();
@@ -570,6 +578,14 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
             span.record("otel.status_code", "ERROR");
         }
         crate::telemetry::http_request(&method, &host, Some(status), started.elapsed());
+        if let Some(f) = &flow_log {
+            f.http(
+                &method,
+                &host,
+                Some(status),
+                started.elapsed().as_millis() as u64,
+            );
+        }
 
         let out = lua.create_table()?;
         out.set("status", status)?;

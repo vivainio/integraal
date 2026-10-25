@@ -181,15 +181,18 @@ pub fn sqs_message(disposition: &'static str) {
 
 /// Make `span` a child of the caller's trace, given a lookup for incoming W3C headers
 /// (`traceparent`, `tracestate`). Does nothing when the headers are absent or telemetry is off.
-pub fn adopt_parent(span: &tracing::Span, header: impl Fn(&str) -> Option<String>) {
+/// Returns whether the span now continues a caller's trace.
+pub fn adopt_parent(span: &tracing::Span, header: impl Fn(&str) -> Option<String>) -> bool {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     let trace: TraceContext = ["traceparent", "tracestate"]
         .into_iter()
         .filter_map(|k| header(k).map(|v| (k.to_string(), v)))
         .collect();
-    if !trace.is_empty() {
-        let _ = span.set_parent(integraal_wrappers::trace::extract(&trace));
+    if trace.is_empty() {
+        return false;
     }
+    span.set_parent(integraal_wrappers::trace::extract(&trace))
+        .is_ok()
 }
 
 /// Message attributes for `ctx`, ready for the SQS builders.

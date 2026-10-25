@@ -17,6 +17,7 @@ mod bucket;
 mod crypto;
 mod db;
 mod deadline;
+mod flow_log;
 mod gzip;
 mod http;
 mod http_job;
@@ -48,6 +49,7 @@ pub use db::{
     MAX_LOCK_LEASE, MAX_QUERY_ITEMS,
 };
 pub use deadline::Deadline;
+pub use flow_log::{now_ms, FlowLog};
 pub use http::{AllowRule, HttpPolicy};
 pub use queue::{
     OutMessage, QueueBackend, MAX_DELAY_SECS, MAX_MESSAGE_BYTES, MAX_SENT_PER_INVOCATION,
@@ -156,6 +158,8 @@ pub struct HostContext {
     /// Tenant `vars` from config.json, exposed read-only as `native.config`.
     pub vars: serde_json::Map<String, serde_json::Value>,
     pub limits: HostLimits,
+    /// Collects this invocation's log for the flow it belongs to; absent when the tenant has no flow logs.
+    pub flow_log: Option<FlowLog>,
 }
 
 /// Reads `--!runtime N` from the leading comment lines of a script.

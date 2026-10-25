@@ -27,6 +27,10 @@ use tracing::Instrument;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = GlobalConfig::load().map_err(anyhow::Error::msg)?;
+    if let Some(i) = std::env::args().position(|a| a == "flow") {
+        let args: Vec<String> = std::env::args().skip(i + 1).collect();
+        return flow_command(&cfg, &args).await;
+    }
     let _telemetry = integraal_core::telemetry::init("integraal-server", cfg.log_filter())
         .map_err(anyhow::Error::msg)?;
 
@@ -83,6 +87,32 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(failed, "stopping");
         })
         .await?;
+    Ok(())
+}
+
+/// `integraal-server flow show <tenant> <trace id>` prints a flow's log, merged from all its
+/// segments, as NDJSON. `flow list <tenant> <yyyy-mm-dd>` prints the flows that started that day.
+async fn flow_command(cfg: &GlobalConfig, args: &[String]) -> anyhow::Result<()> {
+    let usage =
+        "usage: integraal-server flow show <tenant> <trace id> | flow list <tenant> <yyyy-mm-dd>";
+    let [verb, tenant, what] = args else {
+        anyhow::bail!(usage);
+    };
+    let engine = cfg.engine().await.map_err(anyhow::Error::msg)?;
+    let sink = engine
+        .flow_logs()
+        .ok_or_else(|| anyhow::anyhow!("the config has no flow_logs section"))?
+        .clone();
+    let (tenant, what) = (tenant.clone(), what.clone());
+    let lines = match verb.as_str() {
+        "show" => tokio::task::spawn_blocking(move || sink.read_flow(&tenant, &what)).await?,
+        "list" => tokio::task::spawn_blocking(move || sink.list_day(&tenant, &what)).await?,
+        _ => anyhow::bail!(usage),
+    }
+    .map_err(anyhow::Error::msg)?;
+    for l in lines {
+        println!("{l}");
+    }
     Ok(())
 }
 
@@ -279,7 +309,7 @@ async fn run_http(
         otel.status_code = tracing::field::Empty,
         http.response.status_code = tracing::field::Empty,
     );
-    integraal_core::telemetry::adopt_parent(&span, |k| {
+    let continues_trace = integraal_core::telemetry::adopt_parent(&span, |k| {
         headers
             .get(k)
             .and_then(|v| v.to_str().ok())
@@ -298,6 +328,7 @@ async fn run_http(
             trigger: Trigger::Http,
             event: body.map(|b| b.0).unwrap_or(Value::Null),
             attempt: 0,
+            continues_trace,
         };
         match engine.invoke(inv).await {
             Ok(result) => (StatusCode::OK, Json(result)),
@@ -361,7 +392,7 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
                 s3.clone(),
             );
             let span = tracing::info_span!("sqs_message", otel.kind = "consumer");
-            integraal_core::telemetry::adopt_parent(&span, |k| {
+            let continues_trace = integraal_core::telemetry::adopt_parent(&span, |k| {
                 msg.message_attributes()?
                     .get(k)?
                     .string_value()
@@ -381,6 +412,7 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
                         &s3,
                         msg.body().unwrap_or_default(),
                         attempt,
+                        continues_trace,
                     )
                     .await;
                     integraal_core::telemetry::sqs_message(if acked { "acked" } else { "retry" });
@@ -412,6 +444,7 @@ async fn handle_message(
     s3: &S3Events,
     body: &str,
     attempt: u32,
+    continues_trace: bool,
 ) -> bool {
     match classify(body) {
         Err(e) => {
@@ -422,6 +455,7 @@ async fn handle_message(
         Ok(Message::Envelope(mut inv)) => {
             inv.trigger = Trigger::Queue;
             inv.attempt = attempt;
+            inv.continues_trace = continues_trace;
             match engine.invoke(inv).await {
                 Ok(_) => true,
                 Err(e) => {
@@ -437,6 +471,7 @@ async fn handle_message(
                     Ok(None) => Ok(()),
                     Ok(Some(mut inv)) => {
                         inv.attempt = attempt;
+                        inv.continues_trace = continues_trace;
                         engine
                             .invoke(inv)
                             .await

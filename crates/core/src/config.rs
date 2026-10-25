@@ -9,6 +9,7 @@
 //!   "scripts":   { "bucket": "scripts", "prefix": "" },
 //!   "buckets":   { "prefix": "tenants/", "map": { "In": "data-in", "Out": "data-out" } },
 //!   "batch":     { "bucket": "partner-batch", "prefix": "tenants/" },
+//!   "flow_logs": { "bucket": "integraal-flow-logs", "prefix": "" },
 //!   "db":        { "table": "integraal" },
 //!   "callbacks": { "base_url": "https://hooks.example.com" },
 //!   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
@@ -41,6 +42,10 @@ pub struct GlobalConfig {
     /// Dedicated bucket for `native.batch` jobs, kept apart from the data buckets.
     #[serde(default)]
     pub batch: Option<BatchConfig>,
+    /// Bucket for the invocation logs of tenants with `"flow_logs": true`, kept apart from the
+    /// tenant data buckets (scripts cannot reach it).
+    #[serde(default)]
+    pub flow_logs: Option<FlowLogsConfig>,
     /// DynamoDB table behind `native.db` and `native.callback`.
     #[serde(default)]
     pub db: Option<DbConfig>,
@@ -99,6 +104,15 @@ pub struct BucketsConfig {
 pub struct BatchConfig {
     pub bucket: String,
     /// Base prefix; empty or ending with `/`. A tenant's jobs are `<prefix><tenant>/jobs/<job>/`.
+    #[serde(default)]
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowLogsConfig {
+    pub bucket: String,
+    /// Base prefix; empty or ending with `/`. A tenant's logs are `<prefix><tenant>/flows/...`.
     #[serde(default)]
     pub prefix: String,
 }
@@ -252,6 +266,20 @@ impl GlobalConfig {
                 return Err("batch.bucket must not also be one of buckets.map".into());
             }
         }
+        if let Some(f) = &self.flow_logs {
+            if f.bucket.is_empty() || !(f.prefix.is_empty() || f.prefix.ends_with('/')) {
+                return Err(
+                    "flow_logs needs a bucket, and its prefix must be empty or end with '/'".into(),
+                );
+            }
+            if self.buckets.map.values().any(|d| *d == f.bucket)
+                || self.batch.as_ref().is_some_and(|b| b.bucket == f.bucket)
+            {
+                return Err(
+                    "flow_logs.bucket must not also be a data bucket or the batch bucket".into(),
+                );
+            }
+        }
         if self
             .callbacks
             .as_ref()
@@ -341,6 +369,10 @@ impl GlobalConfig {
             let backend = crate::S3Backend::from_env(&b.bucket).await;
             engine = engine.with_batch_bucket(Arc::new(backend), b.prefix.clone());
         }
+        if let Some(f) = &self.flow_logs {
+            let backend = crate::S3Backend::from_env(&f.bucket).await;
+            engine = engine.with_flow_logs(Arc::new(backend), f.prefix.clone());
+        }
         if let Some(db) = &self.db {
             engine = engine.with_db(Arc::new(crate::DynamoBackend::from_env(&db.table).await));
         }
@@ -383,6 +415,7 @@ mod tests {
             "scripts": {"bucket": "s", "prefix": "p/"},
             "buckets": {"prefix": "tenants/", "map": {"In": "data-in", "Out": "data-out"}},
             "batch": {"bucket": "partner-batch", "prefix": "tenants/"},
+            "flow_logs": {"bucket": "flow-logs", "prefix": "logs/"},
             "db": {"table": "t"}, "callbacks": {"base_url": "https://h.example.com"},
             "queue": {"url": "https://sqs/q"}, "admin": {"port": 9090, "token_env": "T"}, "crypto": {"keys": {"1": "K1", "2": "K2"}, "active": 2}, "server": {"port": 9000},
             "throttle": [{"url": "https://api.partner.com/", "max_concurrent": 2}],
@@ -443,6 +476,14 @@ mod tests {
         assert!(
             bad(r#""buckets": {"map": {"In": "same"}}, "batch": {"bucket": "same"}"#),
             "batch bucket shared with a data bucket"
+        );
+        assert!(
+            bad(r#""flow_logs": {"bucket": ""}"#),
+            "flow logs without a bucket"
+        );
+        assert!(
+            bad(r#""buckets": {"map": {"In": "same"}}, "flow_logs": {"bucket": "same"}"#),
+            "flow log bucket shared with a data bucket"
         );
         assert!(
             bad(r#""crypto": {"keys": {"1": "K"}, "active": 2}"#),

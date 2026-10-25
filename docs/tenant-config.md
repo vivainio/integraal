@@ -37,6 +37,7 @@ Each section is documented in the chapter for the feature it configures.
 | `buckets` | [Buckets (S3)](buckets.md#grants) |
 | `queue` | [Queue](queue.md#tenant-config-and-deployment) |
 | `batch` | [Batch jobs](batch.md#tenant-config-and-deployment) |
+| `flow_logs` | [Flow logs](observability.md#flow-logs) |
 | `http.allow` | [Outbound HTTP](http.md#tenant-config-httpallow) |
 | `limits` | [Limits](limits.md) |
 | `vars` | [below](#vars) |

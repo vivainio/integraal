@@ -50,6 +50,45 @@ propagated) without a collector.
 `native.log` lines are ordinary log events inside the invocation's span, so each carries the
 invocation's trace.
 
+## Flow logs
+
+CloudWatch holds the process logs; a **flow log** keeps what happened to one event and everything
+it caused, wherever it ran. A tenant opts in with `"flow_logs": true` in its `config.json`, and the
+deployment names the bucket with `flow_logs` in `integraal.json` ([Deployment](deployment.md)). The
+bucket is separate from the data buckets, and scripts cannot reach it.
+
+Each invocation of an opted-in tenant writes one **segment** when it ends: gzipped NDJSON holding
+a header (script, trigger, attempt, start time, trace id), the invocation's `native.log` lines,
+its outbound `native.http` calls (method, host, status and time, never the path or query), engine
+errors, and a footer (outcome, duration, error). A segment is written whatever the outcome,
+including timeouts. It keeps the first 192 KB and the last 64 KB of lines and says how many it
+dropped in between.
+
+```text
+<prefix><tenant>/flows/<first 2 hex of trace id>/<trace id>/<start ms>-<span id>.ndjson.gz
+<prefix><tenant>/flow-index/<yyyy>/<mm>/<dd>/<trace id>
+```
+
+- The **trace id** is the [flow](#one-trace-per-flow), so all the segments of a flow share a
+  folder, however many invocations, hops or days it took. The date is deliberately not in the
+  segment path. The two-character shard only keeps listings small.
+- The **index entry** is written by the invocation that starts a flow (one that did not continue
+  a caller's trace), under the day the flow started. It holds the tenant, script, trigger and
+  start time, so "what ran yesterday" is a listing of one folder. A batch job resumed by its
+  partner starts a flow of its own, and its entry is how you find it.
+- Segments are never appended to, so concurrent invocations of one flow cannot conflict. Expire
+  them with an S3 lifecycle rule on the `<tenant>/flows/` and `<tenant>/flow-index/` prefixes.
+- A failed segment write is logged as a warning and does not fail the invocation.
+
+Read a flow back, merged in time order, or list the flows of a UTC day:
+
+```bash
+integraal-server flow show acme 4bf92f3577b34da6a3ce929d0e0e4736
+integraal-server flow list acme 2026-10-25
+```
+
+The process needs `s3:ListBucket` and `s3:GetObject` on the flow log bucket for this.
+
 ## Metrics
 
 | Metric | Labels |
