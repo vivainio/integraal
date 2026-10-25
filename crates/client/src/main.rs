@@ -4,10 +4,12 @@
 //! integraal-client flows <tenant> [yyyy-mm-dd]
 //! integraal-client flow <tenant> <trace id> [--since <ms>]
 //! integraal-client summary <tenant> <trace id>
+//! integraal-client state <tenant> <trace id>
+//! integraal-client running
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: integraal-client flows <tenant> [yyyy-mm-dd]\n       integraal-client flow <tenant> <trace id> [--since <ms>]\n       integraal-client summary <tenant> <trace id>";
+const USAGE: &str = "usage: integraal-client flows <tenant> [yyyy-mm-dd]\n       integraal-client flow <tenant> <trace id> [--since <ms>]\n       integraal-client summary <tenant> <trace id>\n       integraal-client state <tenant> <trace id>\n       integraal-client running";
 
 fn path(args: &[String]) -> Option<String> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -17,6 +19,8 @@ fn path(args: &[String]) -> Option<String> {
         ["flow", t, id] => format!("/flows/{t}/{id}"),
         ["flow", t, id, "--since", ms] => format!("/flows/{t}/{id}?since={ms}"),
         ["summary", t, id] => format!("/flows/{t}/{id}/summary"),
+        ["state", t, id] => format!("/flows/{t}/{id}/state"),
+        ["running"] => "/running".into(),
         _ => return None,
     })
 }
@@ -63,6 +67,8 @@ mod tests {
         assert_eq!(p("flows acme 2026-10-25").unwrap(), "/flows/acme?day=2026-10-25");
         assert_eq!(p("flow acme abc --since 5").unwrap(), "/flows/acme/abc?since=5");
         assert_eq!(p("summary acme abc").unwrap(), "/flows/acme/abc/summary");
+        assert_eq!(p("state acme abc").unwrap(), "/flows/acme/abc/state");
+        assert_eq!(p("running").unwrap(), "/running");
         assert!(p("flow acme").is_none());
     }
 }

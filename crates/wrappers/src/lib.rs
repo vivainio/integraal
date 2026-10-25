@@ -58,8 +58,8 @@ pub use queue::{
 };
 pub use throttle::{Slot, Throttle, ThrottleRule};
 pub use timer::{
-    cancel as cancel_timer, register as register_timer, sweep as sweep_timers,
-    Payload as TimerPayload, SweepReport, MAX_TIMER_AHEAD_SECS,
+    cancel as cancel_timer, list as list_timers, register as register_timer, sweep as sweep_timers,
+    Payload as TimerPayload, Pending as PendingTimer, SweepReport, MAX_TIMER_AHEAD_SECS,
 };
 pub use vault::{Vault, VaultEntry, MAX_SECRET_BYTES, MIN_SECRET_BYTES};
 pub use xml::{ByteStream, MAX_STREAM_BYTES};

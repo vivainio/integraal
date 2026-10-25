@@ -204,6 +204,22 @@ pub struct Engine {
     background_http: bool,
     master_keys: Option<MasterKeys>,
     flow_logs: Option<crate::flow_log::FlowLogSink>,
+    /// Invocations in flight in this process, by span id; see `Engine::running`.
+    running: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
+}
+
+/// Removes an invocation from `Engine::running` when it ends, however it ends (including being dropped).
+struct RunningGuard {
+    map: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
+    span_id: String,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.map.lock() {
+            m.remove(&self.span_id);
+        }
+    }
 }
 
 /// Everything besides limits and config that one invocation's native API is wired to.
@@ -238,6 +254,7 @@ impl Engine {
             background_http: false,
             master_keys: None,
             flow_logs: None,
+            running: Arc::default(),
         }
     }
 
@@ -299,6 +316,48 @@ impl Engine {
     ) -> Self {
         self.flow_logs = Some(crate::flow_log::FlowLogSink::new(backend, base_prefix));
         self
+    }
+
+    /// The invocations in flight in this process, longest-running first: tenant, script, trigger,
+    /// attempt, trace and span id, start time and how long they have run. Another server or Lambda
+    /// has its own list.
+    pub fn running(&self) -> Vec<serde_json::Value> {
+        let now = now_ms();
+        let mut rows: Vec<_> = self
+            .running
+            .lock()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        for r in &mut rows {
+            r["running_ms"] = now.saturating_sub(r["start_ms"].as_u64().unwrap_or(now)).into();
+        }
+        rows.sort_by_key(|r| r["start_ms"].as_u64().unwrap_or(0));
+        rows
+    }
+
+    /// What `tenant`'s flow `trace_id` has pending that is indexed by trace: its timers (including
+    /// barrier deadlines), soonest first. Barriers, callbacks and batch jobs are keyed by their own
+    /// ids and are not listed here.
+    pub fn pending_timers(
+        &self,
+        tenant: &str,
+        trace_id: &str,
+    ) -> Result<Vec<integraal_wrappers::PendingTimer>, String> {
+        let Some(db) = self.item_backend() else {
+            return Err("the config has no db".into());
+        };
+        let trace_id = trace_id.to_ascii_lowercase();
+        Ok(integraal_wrappers::list_timers(&*db, tenant, 10_000)?
+            .into_iter()
+            .filter(|t| {
+                t.payload
+                    .trace
+                    .as_ref()
+                    .and_then(|c| c.get("traceparent"))
+                    .and_then(|p| p.split('-').nth(1))
+                    .is_some_and(|id| id == trace_id)
+            })
+            .collect())
     }
 
     /// The flow log store, for reading flows back.
@@ -374,6 +433,23 @@ impl Engine {
         );
         let (tenant, trigger) = (inv.tenant.clone(), inv.trigger);
         let about = FlowSegment::about(&inv, now_ms());
+        let _running = {
+            use opentelemetry::trace::TraceContextExt;
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+            let sc = span.context().span().span_context().clone();
+            let span_id = sc.span_id().to_string();
+            if let Ok(mut m) = self.running.lock() {
+                m.insert(
+                    span_id.clone(),
+                    serde_json::json!({
+                        "tenant": about.tenant, "script": about.script, "trigger": about.trigger,
+                        "attempt": about.attempt, "start_ms": about.start_ms,
+                        "trace_id": sc.trace_id().to_string(), "span_id": span_id,
+                    }),
+                );
+            }
+            RunningGuard { map: self.running.clone(), span_id }
+        };
         let start = Instant::now();
         let flow_log = std::sync::OnceLock::new();
         let result = self
@@ -1672,6 +1748,41 @@ pub(crate) mod tests {
         );
         let other = backend.get("TEN#other#hits", "").unwrap();
         assert!(other.is_none(), "counters never touch other tenants");
+    }
+
+    #[tokio::test]
+    async fn pending_timers_are_found_by_trace_and_running_empties_when_invocations_end() {
+        let backend = Arc::new(MemItems::default());
+        let e = engine(
+            r#"return { handle = function() return 1 end }"#,
+            Limits::default(),
+        )
+        .with_db(backend.clone());
+        let trace = |id: &str| {
+            Some(std::collections::BTreeMap::from([(
+                "traceparent".to_string(),
+                format!("00-{id}-00f067aa0ba902b7-01"),
+            )]))
+        };
+        let (a, b) = ("4bf92f3577b34da6a3ce929d0e0e4736", "5bf92f3577b34da6a3ce929d0e0e4736");
+        for (id, due, t) in [("t1", 200, trace(a)), ("t2", 100, trace(a)), ("t3", 150, trace(b)), ("t4", 120, None)] {
+            let payload = integraal_wrappers::TimerPayload {
+                script: None,
+                version: None,
+                event: json!({}),
+                trace: t,
+            };
+            integraal_wrappers::register_timer(&*backend, "acme", id, due, &payload, 50).unwrap();
+        }
+        let ids = |t: &str| -> Vec<String> {
+            e.pending_timers("acme", t).unwrap().into_iter().map(|p| p.id).collect()
+        };
+        assert_eq!(ids(a), ["t2", "t1"]);
+        assert_eq!(ids(&b.to_uppercase()), ["t3"]);
+        assert!(e.pending_timers("other", a).unwrap().is_empty());
+
+        e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
+        assert!(e.running().is_empty());
     }
 
     #[derive(Default)]

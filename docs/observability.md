@@ -99,6 +99,18 @@ so only processes on the same host (or its container) can connect. From elsewher
 | `GET /flows/{tenant}?day=yyyy-mm-dd` | the flows that started that UTC day (default today) |
 | `GET /flows/{tenant}/{trace}?since=<ms>` | the merged log; `since` keeps only later lines, for tailing |
 | `GET /flows/{tenant}/{trace}/summary` | one row per invocation: script, outcome, duration, error, log line count, failed http calls; `outcome` is `null` when the invocation wrote no footer |
+| `GET /flows/{tenant}/{trace}/state` | `{"covers": ["timers"], "timers": [...]}`: the flow's pending timers, soonest first, including barrier deadlines |
+| `GET /running` | the invocations in flight in this process (tenant, script, trigger, attempt, trace id, span id, `start_ms`, `running_ms`), longest-running first |
+
+Two limits to know when reading these:
+
+- `running` lists only this process's invocations. A flow log segment is written when an invocation
+  ends, so a running invocation shows up here and not in `flow`; match them by trace id. Other
+  servers and Lambdas have their own lists, and the Lambda has no local API.
+- `state` lists only timers. They sit in one sorted partition, so they can be filtered by the trace
+  stored with them. Barriers, callbacks and batch jobs are keyed by their own ids, so there is no
+  way to ask "which of those belong to this trace" without scanning the table. `covers` says what the
+  answer includes; an empty list does not mean nothing is pending.
 
 `integraal-client` is a thin wrapper that prints each response as it came (`INTEGRAAL_URL`
 overrides `http://127.0.0.1:9091`):
@@ -107,6 +119,8 @@ overrides `http://127.0.0.1:9091`):
 integraal-client flows acme 2026-10-25
 integraal-client summary acme 4bf92f3577b34da6a3ce929d0e0e4736
 integraal-client flow acme 4bf92f3577b34da6a3ce929d0e0e4736 --since 1761390000000
+integraal-client state acme 4bf92f3577b34da6a3ce929d0e0e4736
+integraal-client running
 ```
 
 The process needs `s3:ListBucket` and `s3:GetObject` on the flow log bucket for this.

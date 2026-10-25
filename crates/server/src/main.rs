@@ -70,15 +70,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(l) = &cfg.local_api {
-        let sink = engine
-            .flow_logs()
-            .expect("config validation requires flow_logs")
-            .clone();
+        let engine = engine.clone();
         // Loopback only: reaching the port at all is the access check.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", l.port)).await?;
         tracing::info!(port = %l.port, "local api listening");
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, local_router(sink)).await {
+            if let Err(e) = axum::serve(listener, local_router(engine)).await {
                 tracing::error!(error = %e, "local api stopped");
             }
         });
@@ -137,12 +134,39 @@ async fn flow_command(cfg: &GlobalConfig, args: &[String]) -> anyhow::Result<()>
 /// - `GET /flows/{tenant}?day=yyyy-mm-dd`          flows that started that UTC day (default: today)
 /// - `GET /flows/{tenant}/{trace}?since=<ms>`      the merged log; `since` keeps only later lines
 /// - `GET /flows/{tenant}/{trace}/summary`         one row per invocation
-fn local_router(sink: integraal_core::flow_log::FlowLogSink) -> Router {
-    Router::new()
+/// - `GET /flows/{tenant}/{trace}/state`           pending timers (incl. barrier deadlines) of the flow
+/// - `GET /running`                                invocations in flight in this process
+fn local_router(engine: Engine) -> Router {
+    let sink = engine
+        .flow_logs()
+        .expect("config validation requires flow_logs")
+        .clone();
+    let flows = Router::new()
         .route("/flows/{tenant}", get(local_list))
         .route("/flows/{tenant}/{trace}", get(local_show))
         .route("/flows/{tenant}/{trace}/summary", get(local_summary))
-        .with_state(sink)
+        .with_state(sink);
+    Router::new()
+        .route("/running", get(local_running))
+        .route("/flows/{tenant}/{trace}/state", get(local_state))
+        .with_state(engine)
+        .merge(flows)
+}
+
+async fn local_running(State(engine): State<Engine>) -> AdminResult {
+    (StatusCode::OK, Json(Value::Array(engine.running())))
+}
+
+async fn local_state(
+    State(engine): State<Engine>,
+    Path((tenant, trace)): Path<(String, String)>,
+) -> AdminResult {
+    blocking_read(move || {
+        let timers = engine.pending_timers(&tenant, &trace)?;
+        // Only timers are indexed by trace; say so, so an empty answer is not read as "nothing pending".
+        Ok(json!({ "covers": ["timers"], "timers": timers }))
+    })
+    .await
 }
 
 type Sink = State<integraal_core::flow_log::FlowLogSink>;

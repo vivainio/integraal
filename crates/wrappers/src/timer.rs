@@ -133,6 +133,50 @@ pub fn cancel(backend: &dyn ItemBackend, tenant: &str, id: &str, due_s: u64) -> 
     backend.delete(TIMERS, &sk(due_s, tenant, id))
 }
 
+/// A pending timer, as `list` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Pending {
+    pub due_s: u64,
+    pub tenant: String,
+    pub id: String,
+    pub payload: Payload,
+}
+
+/// The pending timers of one tenant, soonest first, at most `limit` of them. Rows that cannot be
+/// read are skipped. Reads the whole timer partition, so it is for operators, not for hot paths.
+pub fn list(backend: &dyn ItemBackend, tenant: &str, limit: usize) -> Result<Vec<Pending>, String> {
+    let mut out = Vec::new();
+    let mut after = String::new();
+    loop {
+        let page = backend.query(TIMERS, "", &after, MAX_QUERY_ITEMS)?;
+        let n = page.len();
+        for row in page {
+            after.clone_from(&row.sk);
+            let Some((due_s, t, id)) = parse_sk(&row.sk) else {
+                continue;
+            };
+            if t != tenant {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_str::<Payload>(&row.value) else {
+                continue;
+            };
+            out.push(Pending {
+                due_s,
+                tenant: t.to_string(),
+                id: id.to_string(),
+                payload,
+            });
+            if out.len() >= limit {
+                return Ok(out);
+            }
+        }
+        if n < MAX_QUERY_ITEMS {
+            return Ok(out);
+        }
+    }
+}
+
 /// Sends the envelope of every timer due at or before `now`, at most `limit` of them, oldest first.
 /// Safe to run on several tasks at once: each timer is claimed with a lease first.
 pub fn sweep(
@@ -302,6 +346,24 @@ mod tests {
     }
 
     const NOW: u64 = 1_000_000;
+
+    #[test]
+    fn list_returns_one_tenants_pending_timers_in_due_order() {
+        let db = Mem::default();
+        let p = |n: &str| Payload {
+            script: Some(n.into()),
+            version: None,
+            event: json!({}),
+            trace: None,
+        };
+        register(&db, "acme", "b", 200, &p("b"), 100).unwrap();
+        register(&db, "acme", "a", 150, &p("a"), 100).unwrap();
+        register(&db, "other", "c", 120, &p("c"), 100).unwrap();
+        let got = list(&db, "acme", 10).unwrap();
+        let ids: Vec<_> = got.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert_eq!(list(&db, "acme", 1).unwrap().len(), 1);
+    }
 
     #[test]
     fn due_timers_fire_oldest_first_and_only_once() {
