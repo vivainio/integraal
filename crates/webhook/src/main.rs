@@ -126,11 +126,12 @@ async fn handle(
             "state": cb.state,
         },
     });
+    let body = message.to_string();
     match sqs
         .send_message()
         .queue_url(queue_url)
-        .message_body(message.to_string())
-        .message_group_id(tenant)
+        .message_group_id(integraal_core::message_group_id(&body))
+        .message_body(body)
         .set_message_attributes(Some(
             integraal_core::telemetry::sqs_attributes(&cb.trace)
                 .into_iter()

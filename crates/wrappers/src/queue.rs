@@ -38,13 +38,24 @@ pub trait QueueBackend: Send + Sync {
 /// Group for messages that belong to no single tenant (ticks, S3 notification batches).
 pub const SYSTEM_GROUP: &str = "system";
 
-/// The SQS `MessageGroupId` of an envelope body: the tenant code it names, so a FIFO queue orders
-/// and spreads work per tenant. Bodies without a tenant go to `SYSTEM_GROUP`.
+/// The SQS `MessageGroupId` of an envelope body: the tenant code, then `:` and the event's `type`
+/// when it has one (`acme:schedule`), so a FIFO queue orders work per tenant and message type.
+/// Tenant names never contain `:`. Bodies without a tenant go to `SYSTEM_GROUP`. At most 128 bytes.
 pub fn message_group_id(body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v["tenant"].as_str().filter(|t| !t.is_empty()).map(String::from))
-        .unwrap_or_else(|| SYSTEM_GROUP.to_string())
+    let v = serde_json::from_str::<serde_json::Value>(body).unwrap_or_default();
+    let tenant = v["tenant"].as_str().filter(|t| !t.is_empty());
+    let kind = v["event"]["type"].as_str().filter(|k| {
+        !k.is_empty()
+            && k.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    });
+    let mut id = tenant.unwrap_or(SYSTEM_GROUP).to_string();
+    if let Some(k) = kind {
+        id.push(':');
+        id.push_str(k);
+    }
+    id.truncate(128);
+    id
 }
 
 pub(crate) fn valid_name(s: &str) -> bool {
@@ -148,6 +159,10 @@ mod group_tests {
     #[test]
     fn group_is_the_tenant_code() {
         assert_eq!(message_group_id(r#"{"tenant":"acme","event":1}"#), "acme");
+        assert_eq!(
+            message_group_id(r#"{"tenant":"acme","event":{"type":"schedule"}}"#),
+            "acme:schedule"
+        );
         assert_eq!(message_group_id(r#"{"Records":[]}"#), SYSTEM_GROUP);
         assert_eq!(message_group_id("not json"), SYSTEM_GROUP);
     }
