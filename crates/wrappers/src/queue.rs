@@ -35,6 +35,18 @@ pub trait QueueBackend: Send + Sync {
     fn send(&self, messages: &[OutMessage]) -> Result<(), String>;
 }
 
+/// Group for messages that belong to no single tenant (ticks, S3 notification batches).
+pub const SYSTEM_GROUP: &str = "system";
+
+/// The SQS `MessageGroupId` of an envelope body: the tenant code it names, so a FIFO queue orders
+/// and spreads work per tenant. Bodies without a tenant go to `SYSTEM_GROUP`.
+pub fn message_group_id(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["tenant"].as_str().filter(|t| !t.is_empty()).map(String::from))
+        .unwrap_or_else(|| SYSTEM_GROUP.to_string())
+}
+
 pub(crate) fn valid_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
@@ -127,4 +139,16 @@ pub(crate) fn api(
         })?,
     )?;
     Ok(queue)
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    #[test]
+    fn group_is_the_tenant_code() {
+        assert_eq!(message_group_id(r#"{"tenant":"acme","event":1}"#), "acme");
+        assert_eq!(message_group_id(r#"{"Records":[]}"#), SYSTEM_GROUP);
+        assert_eq!(message_group_id("not json"), SYSTEM_GROUP);
+    }
 }

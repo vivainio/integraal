@@ -50,7 +50,7 @@ pub use deadline::{Deadline, TIMEOUT as TIMEOUT_MARKER};
 pub use flow_log::{now_ms, FlowLog};
 pub use http::{AllowRule, HttpPolicy};
 pub use queue::{
-    OutMessage, QueueBackend, MAX_DELAY_SECS, MAX_MESSAGE_BYTES, MAX_SENT_PER_INVOCATION,
+    message_group_id, OutMessage, QueueBackend, MAX_DELAY_SECS, MAX_MESSAGE_BYTES, MAX_SENT_PER_INVOCATION,
     SEND_CHUNK,
 };
 pub use store::{

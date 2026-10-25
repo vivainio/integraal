@@ -675,6 +675,7 @@ async fn handle_message(
                     let sent = client
                         .send_message()
                         .queue_url(queue_url)
+                        .message_group_id(integraal_core::message_group_id(&body))
                         .message_body(body)
                         .delay_seconds(delay_secs)
                         .set_message_attributes(Some(

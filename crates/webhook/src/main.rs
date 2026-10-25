@@ -130,6 +130,7 @@ async fn handle(
         .send_message()
         .queue_url(queue_url)
         .message_body(message.to_string())
+        .message_group_id(tenant)
         .set_message_attributes(Some(
             integraal_core::telemetry::sqs_attributes(&cb.trace)
                 .into_iter()

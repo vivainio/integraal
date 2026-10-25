@@ -23,7 +23,7 @@ pub use placement::{PlaceOptions, Placed};
 pub use config::{GlobalConfig, IngressConfig};
 pub use dynamo_db::DynamoBackend;
 pub use engine::{Engine, Limits};
-pub use integraal_wrappers::{fail_inflight_http, Vault, VaultEntry};
+pub use integraal_wrappers::{fail_inflight_http, message_group_id, Vault, VaultEntry};
 pub use s3_data::S3Backend;
 pub use s3_events::{S3Events, Tick};
 pub use schedule::{Every, ScheduleConfig, Spread, TickReport};

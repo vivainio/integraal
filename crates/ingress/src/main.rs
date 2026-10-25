@@ -158,6 +158,7 @@ async fn send_batch(
     for (i, body, trace) in entries {
         match SendMessageBatchRequestEntry::builder()
             .id(i.to_string())
+            .message_group_id(integraal_core::message_group_id(&body))
             .message_body(body)
             .set_message_attributes(Some(
                 integraal_core::telemetry::sqs_attributes(&trace)
