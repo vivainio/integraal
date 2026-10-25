@@ -49,12 +49,12 @@ class Collector:
     def url(self):
         return f"http://127.0.0.1:{self.port}"
 
-    def trace(self, trace_id: str):
-        """Spans of one trace as plain dicts (name, ids, attributes, links)."""
+    def trace(self, trace_id: str | None = None):
+        """Spans of one trace (every span when none is named) as plain dicts: name, ids, attributes, links."""
         with self._lock:
-            found = [(r, s) for r, s in self.spans if s.trace_id.hex() == trace_id]
+            found = [(r, s) for r, s in self.spans if trace_id is None or s.trace_id.hex() == trace_id]
         return [{
-            "name": s.name, "span_id": s.span_id.hex(), "parent": s.parent_span_id.hex(),
+            "trace_id": s.trace_id.hex(), "name": s.name, "span_id": s.span_id.hex(), "parent": s.parent_span_id.hex(),
             "service": r.get("service.name"),
             "attrs": {a.key: a.value.string_value or a.value.int_value for a in s.attributes},
             "links": [(l.trace_id.hex(), l.span_id.hex()) for l in s.links],

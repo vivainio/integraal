@@ -268,3 +268,23 @@ def test_outbound_http_is_a_span_without_path_or_query(stack, dev, collector, me
     [client] = spans_named(collector, trace, "http.client")
     assert {"http.request.method", "http.method"} & set(client["attrs"]), client["attrs"]
     assert secret not in repr(collector.trace(trace)) and "/secret/path" not in repr(collector.trace(trace))
+
+
+def test_a_batch_job_resumed_by_the_partner_starts_a_new_trace_linked_to_the_submitter(stack, dev, collector):
+    job = uid()
+    r, trace = run(stack, dev, "batch_start", {"id": job, "ids": [], "ref": "r"})
+    assert r.status_code == 200
+    [submit] = spans_named(collector, trace, "invoke")
+
+    stack.put("batch", f"tenants/mega/jobs/{job}/done.json", json.dumps({"ok": False, "error": "e2e"}))
+    eventually(lambda: stack.get("data-out", f"tenants/mega/batch/{job}"), timeout=30, what="continuation report")
+
+    # done.json is an S3 notification with no trace, so the continuation is a flow of its own...
+    def resumed():
+        return [s for s in collector.trace() if s["name"] == "invoke" and (trace, submit["span_id"]) in s["links"]]
+    [cont] = eventually(resumed, what="invoke span linked to the submitter")
+    assert cont["trace_id"] != trace
+    assert cont["attrs"]["tenant"] == TENANT and cont["attrs"]["trigger"] == "Queue"  # routed by the router, so the script is not named yet
+    # ...which the flow log lists under its own trace id, not the submitter's.
+    assert cont["trace_id"] in {f["trace_id"] for f in dev.json(f"/flows/{TENANT}")}
+    assert {r["script"] for r in dev.json(f"/flows/{TENANT}/{trace}/summary")} == {"batch_start"}
