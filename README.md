@@ -24,7 +24,7 @@ Scripts return a table; the handler is `on_invoke` / `on_http` / `on_queue`, fal
 
 ## Native API (`--!runtime 1`)
 `native.log`, `native.json.{encode,decode}`, `native.time.now_ms`,
-`native.bucket.<name>.{get,put,delete,list,open,presign_get,presign_put}` for each bucket in `buckets.map` that the tenant's `config.json` `buckets` block grants (`read`/`write`/`delete`/`readwrite`; `upload`/`download` separately allow `presign_put`/`presign_get`) (confined to `<buckets.prefix><tenant>/`),
+`native.bucket.<name>.{get,put,delete,list,open,presign_get,presign_put}` for each store in `buckets.stores` that the tenant's `config.json` `buckets` block grants (`read`/`write`/`delete`/`readwrite`; `upload`/`download` separately allow `presign_put`/`presign_get`) (confined to `<prefix><tenant>/` in the store),
 `native.db.{get,put,put_if_absent,add,delete,query}` (small items under `TEN#<tenant>#` partition keys, one-week TTL on every write; needs `db.table`),
 `native.lock.with` (named mutual exclusion within the process or across processes via the table, with an enforced lease), `native.deadline.with` (time-boxed blocks),
 `native.queue.send` (new work for the tenant on the job queue),

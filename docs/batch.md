@@ -4,7 +4,7 @@
 continuation when the partner is done. There is no connection to the partner and nothing waits: the
 invocation that submits the job ends, and the partner's answer arrives later as an S3 notification.
 
-The batch bucket is separate from the data buckets in [`buckets.map`](buckets.md). Give the partner
+The batch bucket is separate from the data buckets in [`buckets.stores`](buckets.md). Give the partner
 access to it and to nothing else.
 
 ## Layout
@@ -87,7 +87,7 @@ Point an S3 notification (`s3:ObjectCreated:*`, **suffix filter `done.json`**) f
 bucket at the same [queue](triggers.md#s3-notifications) as your data buckets. Only `done.json`
 should notify, so parts do not each wake a script. The event is routed like any other S3 event, with
 `bucket = "$batch"` and a `key` relative to the tenant's folder. `$batch` is not a valid
-`buckets.map` name, so it never collides with a data bucket, and an object in a data bucket named
+`buckets.stores` name, so it never collides with a data bucket, and an object in a data bucket named
 `jobs/x/done.json` is not a batch event.
 
 The router asks `native.batch.route` which script owns the job:
@@ -206,7 +206,7 @@ error, not the bucket). Deployment config:
 { "batch": { "bucket": "partner-batch", "prefix": "tenants/" } }
 ```
 
-`batch.prefix` is empty or ends in `/`. The bucket may not also be in `buckets.map`. It needs the same
+`batch.prefix` is empty or ends in `/`. The bucket may not also be an `s3` store. It needs the same
 runtime permissions as a data bucket (`GetObject`, `PutObject`, `DeleteObject`, `ListBucket`, multipart
 upload for large inputs).
 

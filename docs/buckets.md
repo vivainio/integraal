@@ -1,11 +1,12 @@
-# Buckets (S3)
+# Buckets
 
 Tenant data lives in **buckets**, separate from the script bucket. Scripts reach them through
-`native.bucket.<bucket>`; the operator defines the buckets and the tenant's config grants access.
+`native.bucket.<bucket>`; the operator defines the buckets (S3, a host directory, or an FTP or SFTP server)
+and the tenant's config grants access.
 
 ## Script API: `native.bucket.<bucket>`
 Object storage, one table per bucket the tenant's [grants](#grants) allow.
-Everything is confined to `<buckets.prefix><tenant>/` in that bucket and keys are **relative** to it.
+Everything is confined to `<prefix><tenant>/` in that bucket's store and keys are **relative** to it.
 Bucket names are case-sensitive and operator-defined; the conventional ones are `In`, `Out`, `Backup` and `Temp`.
 (Avoid lowercase `in`: it is a Luau keyword, so `native.bucket.in` does not parse.)
 Using a bucket you were not granted raises an error.
@@ -35,7 +36,7 @@ characters, or exceed 512 bytes. Calls count against `max_data_ops`.
 deletes those objects after the handler succeeds; see [Triggers](triggers.md#deleting-the-object-when-done).
 
 ## Tenant config: `buckets` {#grants}
-Which buckets the tenant may use, and how. Names refer to the deployment's `buckets.map`;
+Which buckets the tenant may use, and how. Names refer to the deployment's `buckets.stores`;
 a tenant gets nothing it isn't listed for, and naming a bucket the deployment doesn't have fails
 the invocation.
 
@@ -63,14 +64,37 @@ to read anything back.
 
 In the [global config](deployment.md#configuration):
 
-- `buckets.map` names the buckets (letters, digits and `_`) and maps them to real S3 bucket names.
-  This enables `native.bucket.<name>`.
-- `buckets.dirs` maps names to whitelisted host directories instead of S3 buckets; see [File system](filesystem.md).
-- `buckets.prefix` is the base prefix in every data bucket (empty or ending in `/`). Tenant data lives
-  at `<prefix><tenant>/`.
+`buckets.stores` names the stores (letters, digits and `_`) and says what each one is. This enables
+`native.bucket.<name>`. Every store is an object with a `type`, and each type allows only its own fields:
+
+```json
+{ "buckets": { "stores": {
+  "In":     { "type": "s3", "bucket": "acme-in", "prefix": "tenants/" },
+  "Out":    { "type": "s3", "bucket": "acme-out", "prefix": "tenants/", "max_write_mb": 500 },
+  "Local":  { "type": "dir", "path": "/srv/integraal/data" },
+  "Partner": { "type": "ftp", "host": "ftp.partner.com", "path": "/outbox/", "user": "acme", "password_env": "PARTNER_FTP_PASSWORD", "tls": "explicit" }
+} } }
+```
+
+| `type` | Backend | Details |
+| --- | --- | --- |
+| `s3` | an S3 bucket | `bucket`; below |
+| `dir` | a whitelisted host directory | [File system](filesystem.md) |
+| `ftp` | an FTP or FTPS server, through `curl` | [FTP and SFTP](remote.md) |
+| `sftp` | an SFTP server, through `curl` | [FTP and SFTP](remote.md) |
+
+Fields every type takes:
+
+| Field | Meaning |
+| --- | --- |
+| `prefix` | base prefix in the store (empty or ending in `/`). Tenant data lives at `<prefix><tenant>/` |
+| `max_read_mb`, `max_write_mb` | bytes one invocation may read or write; unlimited when absent. See [I/O limits](filesystem.md#io-limits-and-accounting) |
+
+Unknown fields, and fields of another type, make the config invalid, so the file can be checked against
+a JSON Schema that selects on `type`.
 
 ```
-<each buckets.map bucket>/<buckets.prefix><tenant>/...   tenant data
+<s3 store's bucket>/<prefix><tenant>/...   tenant data
 ```
 
 IAM for the runtime role: `s3:GetObject`, `PutObject`, `DeleteObject` and `ListBucket` on each
@@ -85,7 +109,7 @@ To react to uploads, point S3 event notifications at the queue: see
 | Bucket | Contents | Who writes |
 | --- | --- | --- |
 | **Script bucket** (`scripts.bucket`) | scripts and `<tenant>/config.json` | operator / deployment pipeline |
-| **Buckets** (`buckets.map`) | tenant data under `buckets.prefix<tenant>/` | tenant scripts and third parties, as the tenant's `buckets` grants allow |
+| **Buckets** (`buckets.stores`) | tenant data under `<prefix><tenant>/` | tenant scripts and third parties, as the tenant's `buckets` grants allow |
 
 Scripts can reach only the buckets their config grants, and only their own prefix in each.
 Because policy lives in the script bucket, a tenant cannot widen its own grants, HTTP allowlist or

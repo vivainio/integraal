@@ -10,7 +10,7 @@ process at startup.
 ```json
 {
   "scripts":   { "bucket": "scripts", "prefix": "" },
-  "buckets":   { "prefix": "tenants/", "map": { "In": "acme-in", "Out": "acme-out", "Backup": "acme-bak", "Temp": "acme-tmp" } },
+  "buckets":   { "stores": { "In": { "type": "s3", "bucket": "acme-in", "prefix": "tenants/" }, "Out": { "type": "s3", "bucket": "acme-out", "prefix": "tenants/" } } },
   "batch":     { "bucket": "partner-batch", "prefix": "tenants/" },
   "flow_logs": { "bucket": "acme-flow-logs", "prefix": "" },
   "debug": { "dir": "/var/lib/integraal/debug", "bucket": "acme-debug", "prefix": "", "retention_hours": 48 },
@@ -30,10 +30,8 @@ process at startup.
 | --- | --- | --- |
 | `scripts.bucket` | all (required) | bucket holding scripts and tenant `config.json` files |
 | `scripts.prefix` | all | key prefix, concatenated as-is (end it with `/`) |
-| `buckets.map` | server, Lambda | named buckets (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`). Enables `native.bucket.<name>`; see [Buckets](buckets.md#deployment) |
-| `buckets.dirs` | server, Lambda | named whitelisted host directories, used like `buckets.map` buckets (absolute paths; no presigning or event notifications); see [File system](filesystem.md) |
-| `buckets.prefix` | server, Lambda | base prefix applied in every bucket; empty or ending in `/`. Tenant data lives at `<prefix><tenant>/` |
-| `batch.bucket`, `batch.prefix` | server, Lambda | the dedicated bucket behind `native.batch`, kept apart from `buckets.map`; its [S3 notifications](batch.md#wiring-the-continuation) go to the same queue. See [Batch jobs](batch.md#tenant-config-and-deployment) |
+| `buckets.stores` | server, Lambda | named stores (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`), each `{ "type": ... }` of `s3`, `dir` ([File system](filesystem.md)), `ftp` or `sftp` ([FTP and SFTP](remote.md)). Enables `native.bucket.<name>`; see [Buckets](buckets.md#deployment) |
+| `batch.bucket`, `batch.prefix` | server, Lambda | the dedicated bucket behind `native.batch`, kept apart from the `s3` stores; its [S3 notifications](batch.md#wiring-the-continuation) go to the same queue. See [Batch jobs](batch.md#tenant-config-and-deployment) |
 | `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |
 | `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
 | `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
@@ -41,7 +39,7 @@ process at startup.
 | `local_api.port` | server | read-only [flow log queries](observability.md#local-query-api) on `127.0.0.1` only, no token. Requires `flow_logs` |
 | `admin.port`, `admin.token_env` | server | operator API for the [credential vault](#vault) on its own port. Requires `db` and `crypto` |
 | `flow_logs.bucket`, `flow_logs.prefix` | server, Lambda | the dedicated bucket for [flow logs](observability.md#flow-logs) of tenants that enable them; not a data bucket, and scripts cannot reach it. The process needs `s3:PutObject` (and `s3:ListBucket`, `s3:GetObject` to read flows back) |
-| `queue.url` | server, webhook, Lambda | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `buckets.map` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it, and so does [`native.queue.send`](queue.md) for tenants that enable it |
+| `queue.url` | server, webhook, Lambda | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `s3` stores' buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it, and so does [`native.queue.send`](queue.md) for tenants that enable it |
 | `schedule.spread_s` | server | seconds over which each [tick](schedules.md#spreading-the-load) spreads its per-tenant messages: `{ "minute": 20, "hour": 300, "day": 900 }` are the defaults |
 | `server.port` | server | HTTP port (default `8080`) |
 | `throttle` | server | outbound HTTP limits, see [Throttling](http.md#throttling) |
@@ -94,7 +92,7 @@ fails loudly beyond that.
 <scripts.bucket>/<tenant>/<script>/latest.luau      mutable, revalidated
 <scripts.bucket>/<tenant>/<script>/<version>.luau   immutable
 <scripts.bucket>/<tenant>/config.json               operator-owned policy
-<each buckets.map bucket>/<buckets.prefix><tenant>/...   tenant data, see Buckets
+<each s3 store's bucket>/<prefix><tenant>/...   tenant data, see Buckets
 <batch.bucket>/<batch.prefix><tenant>/jobs|state/...      batch jobs, see Batch jobs
 ```
 

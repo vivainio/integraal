@@ -33,7 +33,7 @@ Details in [Buckets](buckets.md#trust-levels).
 | Bucket | Contents | Who writes |
 | --- | --- | --- |
 | **Script bucket** (`scripts.bucket`) | scripts and `<tenant>/config.json` | operator / deployment pipeline |
-| **Buckets** (`buckets.map`, e.g. `In`, `Out`, `Backup`, `Temp`) | tenant data under `buckets.prefix<tenant>/` | tenant scripts and third parties, as the tenant's `buckets` grants allow |
+| **Buckets** (`buckets.stores`, e.g. `In`, `Out`, `Backup`, `Temp`) | tenant data under `<prefix><tenant>/` | tenant scripts and third parties, as the tenant's `buckets` grants allow |
 
 Scripts can reach only the buckets their config grants, and only their own prefix in each. Because policy lives in the
 script bucket, a tenant cannot widen its own HTTP allowlist or raise its own limits.

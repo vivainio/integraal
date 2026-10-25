@@ -8,14 +8,14 @@ difference is where the bytes go.
 
 ## Deployment
 
-In the [global config](deployment.md#configuration), `buckets.dirs` maps a name (letters, digits and `_`,
-not also used in `buckets.map`) to an absolute directory:
+In the [global config](deployment.md#configuration), a store of `"type": "dir"` maps a name (letters,
+digits and `_`) to an absolute directory:
 
 ```json
-{ "buckets": { "prefix": "tenants/", "dirs": { "Local": "/srv/integraal/data" } } }
+{ "buckets": { "stores": { "Local": { "type": "dir", "path": "/srv/integraal/data", "prefix": "tenants/" } } } }
 ```
 
-A tenant's files live in `<dir>/<buckets.prefix><tenant>/`. The tenant's `config.json` grants access
+A tenant's files live in `<path>/<prefix><tenant>/`. The tenant's `config.json` grants access
 exactly as for S3 (`{ "buckets": { "Local": ["read", "write"] } }`), and scripts then call
 `native.bucket.Local.get(key)`, `put`, `list`, `open`, `create` and `delete`.
 
@@ -30,12 +30,12 @@ not outlive the invocation.
 - `presign_get`, `presign_put` and S3 event notifications are not available for directories.
 
 ## I/O limits and accounting
-A directory can carry byte limits for one invocation, which may differ per directory:
+Any store can carry byte limits for one invocation, which may differ per store:
 
 ```json
-{ "buckets": { "dirs": {
-  "Local":   { "path": "/srv/integraal/data", "max_read_mb": 200, "max_write_mb": 50 },
-  "Scratch": "/srv/integraal/scratch"
+{ "buckets": { "stores": {
+  "Local":   { "type": "dir", "path": "/srv/integraal/data", "max_read_mb": 200, "max_write_mb": 50 },
+  "Scratch": { "type": "dir", "path": "/srv/integraal/scratch" }
 } } }
 ```
 

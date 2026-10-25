@@ -34,7 +34,7 @@ use crate::{
 };
 
 /// The `bucket` name carried by events and `delete` entries for the batch bucket. It is not a valid
-/// `buckets.map` name, so it can never collide with one of the tenant's data buckets.
+/// `buckets.stores` name, so it can never collide with one of the tenant's data buckets.
 pub const BATCH_BUCKET: &str = "$batch";
 const JOBS: &str = "jobs/";
 const STATES: &str = "state/";

@@ -10,6 +10,7 @@ pub mod flow_log;
 pub mod ingress;
 mod modules;
 mod placement;
+pub mod remote;
 mod s3_data;
 pub mod s3_events;
 pub mod schedule;

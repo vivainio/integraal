@@ -85,7 +85,7 @@ Intake config (`integraal.json` next to `bootstrap`):
 ```json
 {
   "scripts": { "bucket": "scripts" },
-  "buckets": { "prefix": "tenants/", "map": { "In": "data-in" } },
+  "buckets": { "stores": { "In": { "type": "s3", "bucket": "data-in", "prefix": "tenants/" } } },
   "ingress": {
     "queues": {
       "small": "https://sqs.eu-west-1.amazonaws.com/123/jobs-small",

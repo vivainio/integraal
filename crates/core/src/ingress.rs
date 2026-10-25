@@ -241,7 +241,11 @@ mod tests {
     }
 
     fn s3() -> S3Events {
-        S3Events::new([("In".to_string(), "acme-in".to_string())], "tenants/")
+        S3Events::new([(
+            "In".to_string(),
+            "acme-in".to_string(),
+            "tenants/".to_string(),
+        )])
     }
 
     #[tokio::test]

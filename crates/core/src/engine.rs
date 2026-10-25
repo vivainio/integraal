@@ -139,7 +139,7 @@ pub struct TenantConfig {
     pub limits: TenantLimits,
     /// Buckets this tenant may use as `native.bucket.<name>`, and how: a grant or list of grants from
     /// `read`, `write` (put), `delete`, `readwrite` (all three), `upload` (presigned PUT) and `download` (presigned GET).
-    /// Absent = no access. Names must match the deployment's `buckets.map`.
+    /// Absent = no access. Names must match the deployment's `buckets.stores`.
     #[serde(default)]
     pub buckets: HashMap<String, Access>,
     /// Allows `native.queue.send` (new work for this tenant on the deployment's job queue).

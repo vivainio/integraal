@@ -64,7 +64,7 @@ handled by the server itself and fanned out to the tenants that opted in; see
 Point an S3 event notification (`s3:ObjectCreated:*`) from each bucket at the queue. The
 server recognises the notification and splits it into **one invocation per object record**:
 
-- the tenant is the first path segment after `buckets.prefix`, so one notification serves all tenants;
+- the tenant is the first path segment after the store's `prefix`, so one notification serves all tenants;
 - no script is named, so the tenant's [router](router.md) picks one;
 - the event is `{ type = "s3.object", bucket, key, size, etag, event }`, where `bucket` is the logical name (`In`) and
   `key` is relative to the tenant's prefix, so both can go straight to `native.bucket`;
@@ -74,7 +74,7 @@ If every record succeeds the message is deleted. If only some fail, **just those
 back** as a new message (with a growing delay and an attempt counter) and the original is deleted,
 so successful records are not run again. After 5 rounds the narrowed message is left alone and the
 queue's redrive policy moves it to the DLQ. A record that cannot be mapped (unknown bucket, key
-outside `buckets.prefix`) counts as failed, so it ends up in the DLQ instead of vanishing.
+outside the store's `prefix`) counts as failed, so it ends up in the DLQ instead of vanishing.
 
 Delivery is at-least-once, so handlers must treat a missing object (`get` returns `nil`) as already
 handled.

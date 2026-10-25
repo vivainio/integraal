@@ -93,24 +93,20 @@ pub fn disposition(failed: Vec<Value>, attempt: u32) -> Disposition {
 /// Maps the object records of S3 notifications to invocations.
 #[derive(Debug, Clone, Default)]
 pub struct S3Events {
-    /// physical bucket name -> logical name (`In`, ...)
-    buckets: HashMap<String, String>,
-    prefix: String,
+    /// physical bucket name -> (logical name (`In`, ...), the store's prefix)
+    buckets: HashMap<String, (String, String)>,
     /// The dedicated batch bucket and its prefix, if configured.
     batch: Option<(String, String)>,
 }
 
 impl S3Events {
-    pub fn new(
-        buckets: impl IntoIterator<Item = (String, String)>,
-        prefix: impl Into<String>,
-    ) -> Self {
+    /// `buckets` are `(logical, physical, prefix)`.
+    pub fn new(buckets: impl IntoIterator<Item = (String, String, String)>) -> Self {
         Self {
             buckets: buckets
                 .into_iter()
-                .map(|(logical, physical)| (physical, logical))
+                .map(|(logical, physical, prefix)| (physical, (logical, prefix)))
                 .collect(),
-            prefix: prefix.into(),
             batch: None,
         }
     }
@@ -124,13 +120,10 @@ impl S3Events {
 
     /// From the global config's `buckets` section.
     pub fn from_config(cfg: &crate::GlobalConfig) -> Self {
-        let events = Self::new(
-            cfg.buckets
-                .map
-                .iter()
-                .map(|(name, bucket)| (name.clone(), bucket.clone())),
-            cfg.buckets.prefix.clone(),
-        );
+        let events = Self::new(cfg.buckets.stores.iter().filter_map(|(name, store)| {
+            let bucket = store.s3_bucket()?;
+            Some((name.clone(), bucket.to_string(), store.prefix().to_string()))
+        }));
         match &cfg.batch {
             Some(b) => events.with_batch(b.bucket.clone(), b.prefix.clone()),
             None => events,
@@ -160,13 +153,13 @@ impl S3Events {
             .ok_or("record has no object key")?;
         let (bucket, prefix) = match &self.batch {
             Some((name, prefix)) if name == physical => (integraal_wrappers::BATCH_BUCKET, prefix),
-            _ => (
-                self.buckets
+            _ => {
+                let (logical, prefix) = self
+                    .buckets
                     .get(physical)
-                    .map(String::as_str)
-                    .ok_or_else(|| format!("bucket {physical:?} is not in buckets.map"))?,
-                &self.prefix,
-            ),
+                    .ok_or_else(|| format!("bucket {physical:?} is not an s3 store"))?;
+                (logical.as_str(), prefix)
+            }
         };
 
         let key = percent_decode(raw_key)?;
@@ -227,7 +220,11 @@ mod tests {
     use super::*;
 
     fn events() -> S3Events {
-        S3Events::new([("In".to_string(), "acme-in".to_string())], "tenants/")
+        S3Events::new([(
+            "In".to_string(),
+            "acme-in".to_string(),
+            "tenants/".to_string(),
+        )])
     }
 
     fn record(bucket: &str, key: &str) -> Value {

@@ -25,6 +25,7 @@ nav = [
     { "Native API overview" = "native-api.md" },
     { "Buckets (S3)" = "buckets.md" },
     { "File system" = "filesystem.md" },
+    { "FTP and SFTP" = "remote.md" },
     { "DynamoDB" = "dynamodb.md" },
     { "Locks" = "locks.md" },
     { "Queue" = "queue.md" },
