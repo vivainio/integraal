@@ -26,16 +26,16 @@
 | `integraal-ingress` | Intake Lambda: places each queue message in a worker size class and forwards it to that class's job queue. |
 | `integraal-server` | Fargate entrypoint: HTTP server and SQS poller. |
 
-## Script bucket and buckets, different trust levels
+## Script bucket and stores, different trust levels
 
-Details in [Buckets](buckets.md#trust-levels).
+Details in [Stores](stores.md#trust-levels).
 
-| Bucket | Contents | Who writes |
+| Location | Contents | Who writes |
 | --- | --- | --- |
 | **Script bucket** (`scripts.bucket`) | scripts and `<tenant>/config.json` | operator / deployment pipeline |
-| **Buckets** (`buckets.stores`, e.g. `In`, `Out`, `Backup`, `Temp`) | tenant data under `<prefix><tenant>/` | tenant scripts and third parties, as the tenant's `buckets` grants allow |
+| **Stores** (`stores`, e.g. `In`, `Out`, `Backup`, `Temp`) | tenant data under `<prefix><tenant>/` | tenant scripts and third parties, as the tenant's `stores` grants allow |
 
-Scripts can reach only the buckets their config grants, and only their own prefix in each. Because policy lives in the
+Scripts can reach only the stores their config grants, and only their own prefix in each. Because policy lives in the
 script bucket, a tenant cannot widen its own HTTP allowlist or raise its own limits.
 
 ## Script caching
@@ -50,5 +50,5 @@ Scripts are cached in memory per process:
 
 - A fresh Luau state per invocation, then Luau's sandbox mode (read-only globals, no `os`/`io`).
 - An instruction-count interrupt enforces the wall-clock timeout; a heap limit caps Luau memory.
-- Native calls are tenant-scoped: wrappers receive the tenant's context, never a bucket handle.
+- Native calls are tenant-scoped: wrappers receive the tenant's context, never a store handle.
 - Tenant, script and version names are validated (`[A-Za-z0-9._-]`, no `.`/`..`).

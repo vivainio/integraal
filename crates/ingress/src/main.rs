@@ -5,7 +5,7 @@
 //! `MaximumBatchingWindowInSeconds`, a `MaximumConcurrency`, and `ReportBatchItemFailures` enabled.
 //! Senders may also write to a job queue directly and skip this function.
 //!
-//! Config: `integraal.json` bundled next to `bootstrap`; uses its `scripts`, `buckets` and `ingress`
+//! Config: `integraal.json` bundled next to `bootstrap`; uses its `scripts`, `stores` and `ingress`
 //! sections.
 
 use std::{collections::BTreeSet, time::Duration};

@@ -6,7 +6,7 @@ local end-to-end runs.
 ```bash
 uv tool install roto-aws
 roto-server --port 5070        # leave running
-dev/local.sh                   # creates buckets, uploads examples/, starts the server
+dev/local.sh                   # creates S3 buckets, uploads examples/, starts the server
 ```
 
 `dev/local.sh` points the SDK at roto with `AWS_ENDPOINT_URL=http://localhost:5070` and uploads
@@ -18,7 +18,7 @@ curl -X POST localhost:8080/v1/acme/hello \
 # {"count":1,"event":{"x":1},"trigger":"http"}
 ```
 
-Running it again increments `count`, which is stored in the `Out` bucket through `native.bucket.Out`.
+Running it again increments `count`, which is stored in the `Out` store through `native.store.Out`.
 
 ## Tests
 

@@ -58,7 +58,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     )?;
     native.set("time", time)?;
 
-    native.set("bucket", buckets_api(lua, host, budget.clone())?)?;
+    native.set("store", stores_api(lua, host, budget.clone())?)?;
     native.set("batch", crate::batch::api(lua, host, budget.clone())?)?;
     native.set(
         "ndjson",
@@ -142,17 +142,17 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     lua.globals().set("native", native)
 }
 
-/// One table of object functions per bucket the tenant was granted: `native.bucket.In.get(key)`.
-/// Naming any other bucket raises a clear error instead of indexing nil.
-fn buckets_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
+/// One table of object functions per store the tenant was granted: `native.store.In.get(key)`.
+/// Naming any other store raises a clear error instead of indexing nil.
+fn stores_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     let data = lua.create_table()?;
-    for (name, scope) in &host.buckets {
+    for (name, scope) in &host.stores {
         let scope = scope
             .clone()
             .with_max_object_bytes(host.limits.max_object_bytes);
         data.set(
             name.as_str(),
-            bucket_api(lua, scope, budget.clone(), &host.limits)?,
+            store_api(lua, scope, budget.clone(), &host.limits)?,
         )?;
     }
     let mt = lua.create_table()?;
@@ -160,7 +160,7 @@ fn buckets_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Resu
         "__index",
         lua.create_function(|_, (_, name): (Table, String)| -> mlua::Result<Value> {
             Err(mlua::Error::runtime(format!(
-                "data bucket {name:?} is not available to this tenant"
+                "data store {name:?} is not available to this tenant"
             )))
         })?,
     )?;
@@ -168,13 +168,13 @@ fn buckets_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Resu
     Ok(data)
 }
 
-fn bucket_api(
+fn store_api(
     lua: &Lua,
-    scope: crate::BucketScope,
+    scope: crate::StoreScope,
     budget: Arc<Budget>,
     limits: &crate::HostLimits,
 ) -> mlua::Result<Table> {
-    let bucket = lua.create_table()?;
+    let store = lua.create_table()?;
     let need = move || {
         budget.take_data().map_err(mlua::Error::runtime)?;
         Ok::<_, mlua::Error>(scope.clone())
@@ -182,7 +182,7 @@ fn bucket_api(
     let err = |e: String| mlua::Error::runtime(e);
 
     let n = need.clone();
-    bucket.set(
+    store.set(
         "get",
         lua.create_function(move |lua, key: String| match n()?.get(&key).map_err(err)? {
             Some(bytes) => Ok(Value::String(lua.create_string(bytes)?)),
@@ -191,7 +191,7 @@ fn bucket_api(
     )?;
 
     let n = need.clone();
-    bucket.set(
+    store.set(
         "open",
         lua.create_function(
             move |lua, key: String| match n()?.open(&key).map_err(err)? {
@@ -204,7 +204,7 @@ fn bucket_api(
     )?;
 
     let n = need.clone();
-    bucket.set(
+    store.set(
         "put",
         lua.create_function(move |_, (key, body): (String, mlua::LuaString)| {
             n()?.put(&key, body.as_bytes().to_vec()).map_err(err)
@@ -214,7 +214,7 @@ fn bucket_api(
     // Streaming upload; the object appears when the sink is closed.
     let n = need.clone();
     let (max_stream, deadline) = (limits.max_stream_bytes, limits.deadline.clone());
-    bucket.set(
+    store.set(
         "create",
         lua.create_function(move |lua, key: String| {
             let w = n()?.create(&key).map_err(err)?;
@@ -227,7 +227,7 @@ fn bucket_api(
         ("presign_put", crate::PresignMethod::Put),
     ] {
         let n = need.clone();
-        bucket.set(
+        store.set(
             name,
             lua.create_function(move |_, (key, ttl_s): (String, Option<u64>)| {
                 n()?.presign(method, &key, ttl_s.map(std::time::Duration::from_secs))
@@ -237,19 +237,19 @@ fn bucket_api(
     }
 
     let n = need.clone();
-    bucket.set(
+    store.set(
         "delete",
         lua.create_function(move |_, key: String| n()?.delete(&key).map_err(err))?,
     )?;
 
     let n = need;
-    bucket.set(
+    store.set(
         "list",
         lua.create_function(move |_, prefix: Option<String>| {
             n()?.list(prefix.as_deref().unwrap_or("")).map_err(err)
         })?,
     )?;
-    Ok(bucket)
+    Ok(store)
 }
 
 /// Values are any JSON-serializable Lua value, stored as JSON text. Shares the `max_data_ops` budget.

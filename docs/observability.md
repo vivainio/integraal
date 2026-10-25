@@ -25,7 +25,7 @@ The `log` setting still filters spans and logs. A span below that level is not e
 | `invoke` | each script invocation (`tenant`, `script`, `trigger`, `outcome`) |
 | `place_batch`, `place_tenant` | intake placement |
 | `http.client` | each outbound `native.http` request: method, host and status only, never the path or query |
-| `dynamodb.*`, `s3.*`, `sqs.send` | calls the runtime makes for `native.db`, buckets and `native.queue` |
+| `dynamodb.*`, `s3.*`, `sqs.send` | calls the runtime makes for `native.db`, stores and `native.queue` |
 
 ## One trace per flow
 
@@ -55,7 +55,7 @@ invocation's trace.
 CloudWatch holds the process logs; a **flow log** keeps what happened to one event and everything
 it caused, wherever it ran. A tenant opts in with `"flow_logs": true` in its `config.json`, and the
 deployment names the bucket with `flow_logs` in `integraal.json` ([Deployment](deployment.md)). The
-bucket is separate from the data buckets, and scripts cannot reach it.
+bucket is separate from the data stores, and scripts cannot reach it.
 
 Each invocation of an opted-in tenant writes one **segment** when it ends: gzipped NDJSON holding
 a header (script, trigger, attempt, start time, trace id), the invocation's `native.log` lines,

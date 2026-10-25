@@ -54,7 +54,7 @@ declare extern type XmlWriter with
     finish: (self) -> string?
 end
 
--- Streaming upload from `Bucket.create`; the object appears on `close`.
+-- Streaming upload from `Store.create`; the object appears on `close`.
 declare extern type Sink with
     write: (self, data: string) -> ()
     close: (self) -> number
@@ -124,7 +124,7 @@ declare extern type BatchResult with
     -- Rows of every part in order; raises if a part is missing, corrupt or the row count is off.
     rows: (self, name: string) -> () -> any?
     -- Every object of the job, for a queue handler's `delete =` result (at most 100).
-    keys: (self) -> { { bucket: string, key: string } }
+    keys: (self) -> { { store: string, key: string } }
 end
 
 -- What an ack records for a member. `ok = false` still resolves the member.
@@ -157,12 +157,12 @@ declare extern type DbRow with
     value: any
 end
 
--- Object functions for one bucket, scoped to the tenant's prefix. Which buckets exist, and whether
--- they are read, write or readwrite, comes from the tenant's config.json `buckets` block.
--- Bucket names are operator-defined; the conventional ones are In, Out, Backup and Temp.
+-- Object functions for one store, scoped to the tenant's prefix. Which stores exist, and whether
+-- they are read, write or readwrite, comes from the tenant's config.json `stores` block.
+-- Store names are operator-defined; the conventional ones are In, Out, Backup and Temp.
 -- A name may also be a whitelisted host directory (see docs/filesystem.md); the functions are the same,
 -- except presign_get and presign_put, which directories do not support.
-declare extern type Bucket with
+declare extern type Store with
     get: (key: string) -> string?
     put: (key: string, body: string) -> ()
     delete: (key: string) -> ()
@@ -184,7 +184,7 @@ declare native: {
     time: {
         now_ms: () -> number,
     },
-    bucket: { [string]: Bucket },
+    store: { [string]: Store },
     db: {
         get: (pk: string, sk: string?) -> any,
         put: (pk: string, sk: string?, value: any) -> (),

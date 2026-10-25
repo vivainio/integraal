@@ -35,7 +35,7 @@ Each section is documented in the chapter for the feature it configures.
 | `router` | [Router](router.md#tenant-config-router) |
 | `schedule` | [Schedules](schedules.md#which-tenants) |
 | `placement` | [Worker classes](ingress.md#tenant-config-placement) |
-| `buckets` | [Buckets (S3)](buckets.md#grants) |
+| `stores` | [Stores](stores.md#grants) |
 | `queue` | [Queue](queue.md#tenant-config-and-deployment) |
 | `batch` | [Batch jobs](batch.md#tenant-config-and-deployment) |
 | `flow_logs` | [Flow logs](observability.md#flow-logs) |

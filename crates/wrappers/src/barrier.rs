@@ -1,6 +1,6 @@
 //! `native.barrier`: wait for a known set of acknowledgements, then continue once.
 //!
-//! A barrier is a work list: a set of member names (usually bucket keys) and one outcome per member.
+//! A barrier is a work list: a set of member names (usually object keys) and one outcome per member.
 //! Acks arrive by any channel (S3 events, queue messages, callbacks), each through
 //! `native.barrier.ack`; the ack that resolves the last pending member sends the continuation.
 //!

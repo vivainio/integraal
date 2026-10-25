@@ -3,7 +3,7 @@
 -- One shard of a scatter: writes its part, counts itself once, and the last one sends the gather.
 local function handle(_ctx, event)
 	local flow, i = event.flow, event.i
-	native.bucket.Out.put("shards/" .. flow .. "/" .. i, "part-" .. i)
+	native.store.Out.put("shards/" .. flow .. "/" .. i, "part-" .. i)
 	if not native.db.put_if_absent("flow-seen", flow .. "#" .. i, true) then
 		return { counted = false }
 	end

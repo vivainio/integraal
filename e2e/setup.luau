@@ -51,7 +51,7 @@ roto.s3.put(
 	"mega/config.json",
 	`\{"router":"router",`
 		.. `"vars":\{"megalith":"{roto.vars.MEGALITH}"},`
-		.. `"buckets":\{"In":"readwrite","Out":"readwrite","Temp":"readwrite","Drops":"readwrite"},`
+		.. `"stores":\{"In":"readwrite","Out":"readwrite","Temp":"readwrite","Drops":"readwrite"},`
 		.. `"queue":true,"batch":true,"schedule":["hour"],{roto.vars.CONFIG_EXTRA}`
 		.. `"placement":\{"class":"small","classes":["large"],"script":"place"},`
 		.. `"limits":\{"timeout_ms":20000},`

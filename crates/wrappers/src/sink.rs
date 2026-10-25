@@ -1,4 +1,4 @@
-//! Write side of streams: `native.bucket.<name>.create(key)` returns a sink that uploads as it is
+//! Write side of streams: `native.store.<name>.create(key)` returns a sink that uploads as it is
 //! written, so output larger than memory works. `native.zip.writer` writes into one.
 
 use std::{

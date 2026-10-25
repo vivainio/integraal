@@ -56,10 +56,10 @@ end
 return { on_place = on_place }
 ```
 
-- `event` is what the worker's script would receive. For S3 notifications that is `{ bucket, key, size, etag, event }`.
+- `event` is what the worker's script would receive. For S3 notifications that is `{ store, key, size, etag, event }`.
 - Return a class name, `{ class = "large" }`, or `nil` for the tenant's `class`.
 - `ctx.trigger == "place"`.
-- The script runs under a **stripped sandbox**: it cannot reach buckets, the table, the vault or the network.
+- The script runs under a **stripped sandbox**: it cannot reach stores, the table, the vault or the network.
   Each run gets 500 ms and a 16 MB heap by default (`ingress.place_timeout_ms`,
   `ingress.place_memory_mb`).
 - Placement **never fails a message**. A script error, timeout, missing script or invalid answer falls back
@@ -85,7 +85,7 @@ Intake config (`integraal.json` next to `bootstrap`):
 ```json
 {
   "scripts": { "bucket": "scripts" },
-  "buckets": { "stores": { "In": { "type": "s3", "bucket": "data-in", "prefix": "tenants/" } } },
+  "stores": { "In": { "type": "s3", "bucket": "data-in", "prefix": "tenants/" } },
   "ingress": {
     "queues": {
       "small": "https://sqs.eu-west-1.amazonaws.com/123/jobs-small",
@@ -101,7 +101,7 @@ Intake config (`integraal.json` next to `bootstrap`):
   `MaximumConcurrency` that keeps intake from using up the account's Lambda concurrency, and
   `ReportBatchItemFailures` enabled. The function returns the ids of intake messages it could not forward.
 - Give each job queue a dead-letter queue, and size its visibility timeout for the class's `ceiling`.
-- The `buckets` section is needed only so S3 notifications can be mapped to a tenant and a logical bucket.
+- The `stores` section is needed only so S3 notifications can be mapped to a tenant and a logical store.
 
 ## Delivery
 

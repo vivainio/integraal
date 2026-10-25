@@ -1,15 +1,15 @@
-# Buckets
+# Stores
 
-Tenant data lives in **buckets**, separate from the script bucket. Scripts reach them through
-`native.bucket.<bucket>`; the operator defines the buckets (S3, a host directory, or an FTP or SFTP server)
+Tenant data lives in **stores**, separate from the script bucket. Scripts reach them through
+`native.store.<name>`; the operator defines the stores (S3, a host directory, or an FTP or SFTP server)
 and the tenant's config grants access.
 
-## Script API: `native.bucket.<bucket>`
-Object storage, one table per bucket the tenant's [grants](#grants) allow.
-Everything is confined to `<prefix><tenant>/` in that bucket's store and keys are **relative** to it.
-Bucket names are case-sensitive and operator-defined; the conventional ones are `In`, `Out`, `Backup` and `Temp`.
-(Avoid lowercase `in`: it is a Luau keyword, so `native.bucket.in` does not parse.)
-Using a bucket you were not granted raises an error.
+## Script API: `native.store.<name>`
+Object storage, one table per store the tenant's [grants](#grants) allow.
+Everything is confined to `<prefix><tenant>/` in that store and keys are **relative** to it.
+Store names are case-sensitive and operator-defined; the conventional ones are `In`, `Out`, `Backup` and `Temp`.
+(Avoid lowercase `in`: it is a Luau keyword, so `native.store.in` does not parse.)
+Using a store you were not granted raises an error.
 
 | Function | Needs | Result |
 | --- | --- | --- |
@@ -32,19 +32,19 @@ characters, or exceed 512 bytes. Calls count against `max_data_ops`.
 
 ### Deleting after a queue handler
 
-`queue` handlers may return `delete = true` or `delete = { { bucket, key }, ... }` and the engine
+`queue` handlers may return `delete = true` or `delete = { { store, key }, ... }` and the engine
 deletes those objects after the handler succeeds; see [Triggers](triggers.md#deleting-the-object-when-done).
 
-## Tenant config: `buckets` {#grants}
-Which buckets the tenant may use, and how. Names refer to the deployment's `buckets.stores`;
-a tenant gets nothing it isn't listed for, and naming a bucket the deployment doesn't have fails
+## Tenant config: `stores` {#grants}
+Which stores the tenant may use, and how. Names refer to the deployment's `stores`;
+a tenant gets nothing it isn't listed for, and naming a store the deployment doesn't have fails
 the invocation.
 
 ```json
-{ "buckets": { "In": ["read", "delete", "upload"], "Out": ["write", "download"], "Backup": "write" } }
+{ "stores": { "In": ["read", "delete", "upload"], "Out": ["write", "download"], "Backup": "write" } }
 ```
 
-Each bucket takes one grant or a list of grants:
+Each store takes one grant or a list of grants:
 
 | Grant | Allows |
 | --- | --- |
@@ -64,16 +64,16 @@ to read anything back.
 
 In the [global config](deployment.md#configuration):
 
-`buckets.stores` names the stores (letters, digits and `_`) and says what each one is. This enables
-`native.bucket.<name>`. Every store is an object with a `type`, and each type allows only its own fields:
+`stores` names the stores (letters, digits and `_`) and says what each one is. This enables
+`native.store.<name>`. Every store is an object with a `type`, and each type allows only its own fields:
 
 ```json
-{ "buckets": { "stores": {
+{ "stores": {
   "In":     { "type": "s3", "bucket": "acme-in", "prefix": "tenants/" },
   "Out":    { "type": "s3", "bucket": "acme-out", "prefix": "tenants/", "max_write_mb": 500 },
   "Local":  { "type": "dir", "path": "/srv/integraal/data" },
   "Partner": { "type": "ftp", "host": "ftp.partner.com", "path": "/outbox/", "user": "acme", "password_env": "PARTNER_FTP_PASSWORD", "tls": "explicit" }
-} } }
+} }
 ```
 
 | `type` | Backend | Details |
@@ -106,12 +106,12 @@ To react to uploads, point S3 event notifications at the queue: see
 
 ## Trust levels
 
-| Bucket | Contents | Who writes |
+| Location | Contents | Who writes |
 | --- | --- | --- |
 | **Script bucket** (`scripts.bucket`) | scripts and `<tenant>/config.json` | operator / deployment pipeline |
-| **Buckets** (`buckets.stores`) | tenant data under `<prefix><tenant>/` | tenant scripts and third parties, as the tenant's `buckets` grants allow |
+| **Stores** (`stores`) | tenant data under `<prefix><tenant>/` | tenant scripts and third parties, as the tenant's `stores` grants allow |
 
-Scripts can reach only the buckets their config grants, and only their own prefix in each.
+Scripts can reach only the stores their config grants, and only their own prefix in each.
 Because policy lives in the script bucket, a tenant cannot widen its own grants, HTTP allowlist or
 limits. Give tenants no direct access to the script bucket.
 
@@ -122,10 +122,10 @@ the script ending (or failing) without `close`, discards the upload. Total size 
 `max_stream_mb`, and each `create` counts as one data operation.
 
 ```lua
-local out = native.bucket.Out.create("export.zip")
+local out = native.store.Out.create("export.zip")
 local z = native.zip.writer(out)
-for _, key in native.bucket.In.list("batch/") do
-  z:add(key, native.bucket.In.open(key))   -- streamed, never held in memory
+for _, key in native.store.In.list("batch/") do
+  z:add(key, native.store.In.open(key))   -- streamed, never held in memory
 end
 z:finish()
 out:close()

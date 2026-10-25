@@ -709,13 +709,13 @@ mod tests {
 
     #[test]
     fn dir_io_is_metered_and_capped_per_scope() {
-        use integraal_wrappers::{BucketScope, IoDir, IoLimits};
+        use integraal_wrappers::{IoDir, IoLimits, StoreScope};
         use std::sync::Mutex;
         let dir = std::env::temp_dir().join(format!("integraal-io-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let seen = Arc::new(Mutex::new((0u64, 0u64)));
         let obs = seen.clone();
-        let scope = BucketScope::new(Arc::new(FsBackend::new(&dir)), "acme/").with_io(
+        let scope = StoreScope::new(Arc::new(FsBackend::new(&dir)), "acme/").with_io(
             IoLimits {
                 max_read_bytes: Some(10),
                 max_write_bytes: Some(8),

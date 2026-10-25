@@ -1,8 +1,8 @@
 # FTP and SFTP
 
 Scripts can use files on an FTP, FTPS or SFTP server. As with [directories](filesystem.md), there is
-no separate API: the server is a **bucket**, so scripts use `native.bucket.<name>` with the same
-functions, grants and key rules as for [S3 buckets](buckets.md).
+no separate API: the server is a **store**, so scripts use `native.store.<name>` with the same
+functions, grants and key rules as for [S3 stores](stores.md).
 
 The protocols are not built into Integraal. Each operation runs the `curl` binary, so **`curl` must be
 installed on the host**, built with the protocols you use (SFTP needs a build with libssh; macOS and
@@ -14,7 +14,7 @@ startup and refuses to start with a clear error otherwise.
 In the [global config](deployment.md#configuration), a store of `"type": "ftp"` or `"type": "sftp"`:
 
 ```json
-{ "buckets": { "stores": {
+{ "stores": {
   "PartnerFtp": {
     "type": "ftp", "host": "ftp.partner.com", "path": "/outbox/",
     "user": "acme", "password_env": "PARTNER_FTP_PASSWORD", "tls": "explicit"
@@ -24,7 +24,7 @@ In the [global config](deployment.md#configuration), a store of `"type": "ftp"` 
     "user": "acme", "key_file": "/etc/integraal/partner_ed25519",
     "host_key_sha256": "q3r1nO5pYtYVfKFXhVqZxqJmKkQTVhP0pQmK3mG7yCc="
   }
-} } }
+} }
 ```
 
 | Field | Types | Meaning |
@@ -38,12 +38,12 @@ In the [global config](deployment.md#configuration), a store of `"type": "ftp"` 
 | `tls` | `ftp` | `none` (default), `explicit` (`AUTH TLS`, refused if the server will not) or `implicit` (`ftps://`) |
 | `timeout_s` | both | longest one operation may take; default 60 |
 | `curl` | both | the `curl` binary; default `curl` from `PATH` |
-| `prefix`, `max_read_mb`, `max_write_mb` | both | as for every [store](buckets.md#deployment) |
+| `prefix`, `max_read_mb`, `max_write_mb` | both | as for every [store](stores.md#deployment) |
 
 Credentials are passed to `curl` through a private temporary file that is removed when it exits, so they
 never appear in the process list.
 
-Tenants are granted access as for S3 (`{ "buckets": { "PartnerSftp": ["read", "write"] } }`).
+Tenants are granted access as for S3 (`{ "stores": { "PartnerSftp": ["read", "write"] } }`).
 
 ## Behaviour
 - `get`, `open`, `put`, `create`, `delete` and `list` all work. `open` and `create` stream, so objects

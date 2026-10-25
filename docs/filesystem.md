@@ -1,8 +1,8 @@
 # File system
 
 Scripts can use directories on the host's file system, but only the ones the operator whitelists.
-There is no separate API: a whitelisted directory is exposed as a **bucket**, so scripts use
-`native.bucket.<name>` with the same functions, grants and key rules as for [S3 buckets](buckets.md).
+There is no separate API: a whitelisted directory is exposed as a **store**, so scripts use
+`native.store.<name>` with the same functions, grants and key rules as for [S3 stores](stores.md).
 Reusing it means the grants, streaming, limits and accounting work the same way. The only
 difference is where the bytes go.
 
@@ -12,12 +12,12 @@ In the [global config](deployment.md#configuration), a store of `"type": "dir"` 
 digits and `_`) to an absolute directory:
 
 ```json
-{ "buckets": { "stores": { "Local": { "type": "dir", "path": "/srv/integraal/data", "prefix": "tenants/" } } } }
+{ "stores": { "Local": { "type": "dir", "path": "/srv/integraal/data", "prefix": "tenants/" } } }
 ```
 
 A tenant's files live in `<path>/<prefix><tenant>/`. The tenant's `config.json` grants access
-exactly as for S3 (`{ "buckets": { "Local": ["read", "write"] } }`), and scripts then call
-`native.bucket.Local.get(key)`, `put`, `list`, `open`, `create` and `delete`.
+exactly as for S3 (`{ "stores": { "Local": ["read", "write"] } }`), and scripts then call
+`native.store.Local.get(key)`, `put`, `list`, `open`, `create` and `delete`.
 
 On Lambda the directory must be a mounted volume such as EFS, because the function's own disk does
 not outlive the invocation.
@@ -33,10 +33,10 @@ not outlive the invocation.
 Any store can carry byte limits for one invocation, which may differ per store:
 
 ```json
-{ "buckets": { "stores": {
+{ "stores": {
   "Local":   { "type": "dir", "path": "/srv/integraal/data", "max_read_mb": 200, "max_write_mb": 50 },
   "Scratch": { "type": "dir", "path": "/srv/integraal/scratch" }
-} } }
+} }
 ```
 
 Once an invocation has read or written more than a limit, further calls and streams in progress fail.

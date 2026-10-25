@@ -5,7 +5,7 @@ local function handle(_ctx, event)
 	local flow = string.match(event.key, "incoming/orders/(.+)%.zip$")
 	local db = native.sql.open()
 	db:exec("create table o (id text primary key, qty integer)")
-	for entry in native.zip.entries(native.bucket.In.open(event.key)) do
+	for entry in native.zip.entries(native.store.In.open(event.key)) do
 		if not entry.is_dir then
 			for ev in native.xml.events(entry:open(), { trim = true }) do
 				if ev.type == "start" and ev.tag == "order" then
@@ -15,7 +15,7 @@ local function handle(_ctx, event)
 		end
 	end
 	local orders = db:query("select id, qty from o order by id")
-	local sink = native.bucket.Temp.create("flows/" .. flow .. ".sqlite")
+	local sink = native.store.Temp.create("flows/" .. flow .. ".sqlite")
 	db:save(sink)
 	sink:close()
 

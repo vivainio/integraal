@@ -23,7 +23,7 @@ Names are `<source>.<what>`; anything you send yourself keeps its own fields.
 | `schedule` | an operator tick | `every` (`minute`, `hour`, `day`), `at` |
 | `barrier.complete` | the last member of a [barrier](barrier.md) resolved | `barrier` |
 | `barrier.overdue` | a barrier is still open past its `deadline_s` | `barrier` |
-| `s3.object` | an [S3 notification](triggers.md#s3-notifications) | `bucket`, `key`, `size`, `etag`, `event` |
+| `s3.object` | an [S3 notification](triggers.md#s3-notifications) | `store`, `key`, `size`, `etag`, `event` |
 
 ```lua
 local function on_route(_ctx, event)

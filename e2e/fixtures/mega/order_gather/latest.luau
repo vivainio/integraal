@@ -4,8 +4,8 @@
 local function handle(_ctx, event)
 	local flow = event.flow
 	local rows = {}
-	for _, key in ipairs(native.bucket.Out.list("orders/" .. flow .. "/")) do
-		table.insert(rows, native.json.decode(native.bucket.Out.get(key)))
+	for _, key in ipairs(native.store.Out.list("orders/" .. flow .. "/")) do
+		table.insert(rows, native.json.decode(native.store.Out.get(key)))
 	end
 	table.sort(rows, function(a, b) return a.id < b.id end)
 	local job = native.batch.new({ id = flow })

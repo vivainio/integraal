@@ -16,7 +16,7 @@ A small shared key-value store for state that doesn't belong in an S3 object. It
 
 `sk` defaults to the empty string. Values are stored as JSON, at most 64 KB each.
 **Every write sets a one week expiry**, so this is for short-lived state; use
-[`native.bucket`](buckets.md) for anything that must stay. Calls count against `max_data_ops`.
+[`native.store`](stores.md) for anything that must stay. Calls count against `max_data_ops`.
 
 ```lua
 native.db.put("session", "u42", { step = 2 })

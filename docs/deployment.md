@@ -10,7 +10,7 @@ process at startup.
 ```json
 {
   "scripts":   { "bucket": "scripts", "prefix": "" },
-  "buckets":   { "stores": { "In": { "type": "s3", "bucket": "acme-in", "prefix": "tenants/" }, "Out": { "type": "s3", "bucket": "acme-out", "prefix": "tenants/" } } },
+  "stores":    { "In": { "type": "s3", "bucket": "acme-in", "prefix": "tenants/" }, "Out": { "type": "s3", "bucket": "acme-out", "prefix": "tenants/" } },
   "batch":     { "bucket": "partner-batch", "prefix": "tenants/" },
   "flow_logs": { "bucket": "acme-flow-logs", "prefix": "" },
   "debug": { "dir": "/var/lib/integraal/debug", "bucket": "acme-debug", "prefix": "", "retention_hours": 48 },
@@ -26,13 +26,13 @@ process at startup.
 }
 ```
 
-A JSON Schema for the file is in [`types/integraal.schema.json`](https://github.com/vivainio/integraal/blob/main/types/integraal.schema.json). Point `"$schema"` at it (the server ignores that key) and editors will complete and check the config, including the fields each `buckets.stores` `type` allows.
+A JSON Schema for the file is in [`types/integraal.schema.json`](https://github.com/vivainio/integraal/blob/main/types/integraal.schema.json). Point `"$schema"` at it (the server ignores that key) and editors will complete and check the config, including the fields each `stores` `type` allows.
 
 | Key | Used by | Meaning |
 | --- | --- | --- |
 | `scripts.bucket` | all (required) | bucket holding scripts and tenant `config.json` files |
 | `scripts.prefix` | all | key prefix, concatenated as-is (end it with `/`) |
-| `buckets.stores` | server, Lambda | named stores (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`), each `{ "type": ... }` of `s3`, `dir` ([File system](filesystem.md)), `ftp` or `sftp` ([FTP and SFTP](remote.md)). Enables `native.bucket.<name>`; see [Buckets](buckets.md#deployment) |
+| `stores` | server, Lambda | named stores (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`), each `{ "type": ... }` of `s3`, `dir` ([File system](filesystem.md)), `ftp` or `sftp` ([FTP and SFTP](remote.md)). Enables `native.store.<name>`; see [Stores](stores.md#deployment) |
 | `batch.bucket`, `batch.prefix` | server, Lambda | the dedicated bucket behind `native.batch`, kept apart from the `s3` stores; its [S3 notifications](batch.md#wiring-the-continuation) go to the same queue. See [Batch jobs](batch.md#tenant-config-and-deployment) |
 | `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |
 | `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
@@ -94,7 +94,7 @@ fails loudly beyond that.
 <scripts.bucket>/<tenant>/<script>/latest.luau      mutable, revalidated
 <scripts.bucket>/<tenant>/<script>/<version>.luau   immutable
 <scripts.bucket>/<tenant>/config.json               operator-owned policy
-<each s3 store's bucket>/<prefix><tenant>/...   tenant data, see Buckets
+<each s3 store's bucket>/<prefix><tenant>/...   tenant data, see Stores
 <batch.bucket>/<batch.prefix><tenant>/jobs|state/...      batch jobs, see Batch jobs
 ```
 
@@ -116,7 +116,7 @@ aws scheduler create-schedule --name integraal-minute --schedule-expression 'rat
 
 ## IAM
 
-Per-feature permissions are listed in each chapter: [Buckets](buckets.md#deployment),
+Per-feature permissions are listed in each chapter: [Stores](stores.md#deployment),
 [DynamoDB](dynamodb.md#deployment), [Callbacks](callbacks.md#deployment-webhook-lambda). In
 addition the runtime role needs `s3:GetObject` on the script bucket and, for the server,
 `sqs:ReceiveMessage`/`DeleteMessage` on the queue (and `sqs:SendMessage` for ticks and timers). Give tenants no direct access to the script bucket.

@@ -17,7 +17,7 @@ local function handle(ctx, event)
 		end
 		report.customers, report.orders = customers, orders
 	end
-	native.bucket.Out.put("batch/" .. job.id, native.json.encode(report))
+	native.store.Out.put("batch/" .. job.id, native.json.encode(report))
 	return { delete = job:keys() }
 end
 

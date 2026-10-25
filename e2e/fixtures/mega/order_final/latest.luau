@@ -3,7 +3,7 @@
 -- The approval system called back: writes the flow's final report.
 local function handle(_ctx, event)
 	local state = event.state
-	native.bucket.Out.put("reports/" .. state.flow, native.json.encode({
+	native.store.Out.put("reports/" .. state.flow, native.json.encode({
 		flow = state.flow,
 		orders = state.count,
 		total = state.total,

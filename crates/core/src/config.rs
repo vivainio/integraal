@@ -7,7 +7,7 @@
 //! ```json
 //! {
 //!   "scripts":   { "bucket": "scripts", "prefix": "" },
-//!   "buckets":   { "stores": { "In": { "type": "s3", "bucket": "data-in", "prefix": "tenants/" } } },
+//!   "stores":    { "In": { "type": "s3", "bucket": "data-in", "prefix": "tenants/" } },
 //!   "batch":     { "bucket": "partner-batch", "prefix": "tenants/" },
 //!   "flow_logs": { "bucket": "integraal-flow-logs", "prefix": "" },
 //!   "debug":     { "dir": "/var/lib/integraal/debug", "bucket": "integraal-debug", "prefix": "", "retention_hours": 48 },
@@ -42,14 +42,15 @@ pub struct GlobalConfig {
     _schema: Option<String>,
     /// Where scripts and each tenant's `config.json` live.
     pub scripts: ScriptsConfig,
-    /// Named tenant buckets (`native.bucket.<name>`).
+    /// Logical name (letters, digits, `_`; by convention `In`, `Out`, `Backup`, `Temp`) to the store
+    /// behind `native.store.<name>`. Tenant data is `<prefix><tenant>/` in each store.
     #[serde(default)]
-    pub buckets: BucketsConfig,
-    /// Dedicated bucket for `native.batch` jobs, kept apart from the data buckets.
+    pub stores: BTreeMap<String, StoreConfig>,
+    /// Dedicated bucket for `native.batch` jobs, kept apart from the data stores.
     #[serde(default)]
     pub batch: Option<BatchConfig>,
     /// Bucket for the invocation logs of tenants with `"flow_logs": true`, kept apart from the
-    /// tenant data buckets (scripts cannot reach it).
+    /// tenant data stores (scripts cannot reach it).
     #[serde(default)]
     pub flow_logs: Option<FlowLogsConfig>,
     /// Where the captures of tenants with a `debug` section go: a directory, a bucket, or both.
@@ -102,17 +103,8 @@ pub struct ScriptsConfig {
     pub prefix: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BucketsConfig {
-    /// Logical name (letters, digits, `_`; by convention `In`, `Out`, `Backup`, `Temp`) to the store
-    /// behind `native.bucket.<name>`. Tenant data is `<prefix><tenant>/` in each store.
-    #[serde(default)]
-    pub stores: BTreeMap<String, StoreConfig>,
-}
-
 /// One data store. `type` picks the kind and with it the fields allowed; the grants and the
-/// `native.bucket.<name>` API are the same for all of them.
+/// `native.store.<name>` API are the same for all of them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum StoreConfig {
@@ -535,27 +527,24 @@ impl GlobalConfig {
 
     /// The S3 buckets behind the `s3` stores.
     pub fn s3_buckets(&self) -> impl Iterator<Item = &str> {
-        self.buckets
-            .stores
-            .values()
-            .filter_map(StoreConfig::s3_bucket)
+        self.stores.values().filter_map(StoreConfig::s3_bucket)
     }
 
     fn validate(&self) -> Result<(), String> {
         if self.scripts.bucket.is_empty() {
             return Err("scripts.bucket is empty".into());
         }
-        for (name, store) in &self.buckets.stores {
+        for (name, store) in &self.stores {
             let ok =
                 !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !ok {
                 return Err(format!(
-                    "buckets.stores entry {name:?} is invalid (names are letters, digits and _)"
+                    "stores entry {name:?} is invalid (names are letters, digits and _)"
                 ));
             }
             store
                 .validate()
-                .map_err(|e| format!("buckets.stores.{name}: {e}"))?;
+                .map_err(|e| format!("stores.{name}: {e}"))?;
         }
         if let Some(b) = &self.batch {
             if b.bucket.is_empty() || !(b.prefix.is_empty() || b.prefix.ends_with('/')) {
@@ -685,7 +674,7 @@ impl GlobalConfig {
         Throttle::new(self.throttle.clone()).map(Some)
     }
 
-    /// Builds the engine: script loader, data buckets, table and callback URL as configured.
+    /// Builds the engine: script loader, data stores, table and callback URL as configured.
     /// Does not apply `throttle`; only the server does that. Must be called within a Tokio runtime.
     pub async fn engine(&self) -> Result<Engine, String> {
         let store = S3Store::from_env(&self.scripts.bucket, &self.scripts.prefix).await;
@@ -694,7 +683,7 @@ impl GlobalConfig {
             self.ceiling.timeout_ms,
             self.ceiling.memory_mb,
         ));
-        for (name, store) in &self.buckets.stores {
+        for (name, store) in &self.stores {
             let backend: Arc<dyn integraal_wrappers::ObjectBackend> = match store {
                 StoreConfig::S3(s) => Arc::new(crate::S3Backend::from_env(&s.bucket).await),
                 StoreConfig::Dir(d) => Arc::new(crate::debug::FsBackend::new(&d.path)),
@@ -708,8 +697,8 @@ impl GlobalConfig {
                 }
             };
             engine = engine
-                .with_bucket(name, backend, store.prefix().to_string())
-                .with_bucket_io(name, store.io_limits());
+                .with_store(name, backend, store.prefix().to_string())
+                .with_store_io(name, store.io_limits());
         }
         if let Some(b) = &self.batch {
             let backend = crate::S3Backend::from_env(&b.bucket).await;
@@ -766,7 +755,7 @@ mod tests {
     fn minimal_and_full_configs_parse() {
         let c = GlobalConfig::parse(r#"{"scripts":{"bucket":"s"}}"#).unwrap();
         assert_eq!(
-            (c.server.port, c.log_filter(), c.buckets.stores.len()),
+            (c.server.port, c.log_filter(), c.stores.len()),
             (8080, "info", 0)
         );
         assert!(c.throttle().unwrap().is_none());
@@ -777,13 +766,13 @@ mod tests {
 
         let full = r#"{
             "scripts": {"bucket": "s", "prefix": "p/"},
-            "buckets": {"stores": {
+            "stores": {
                 "In": {"type": "s3", "bucket": "data-in", "prefix": "tenants/"},
                 "Local": {"type": "dir", "path": "/srv/data", "max_read_mb": 5},
                 "Partner": {"type": "ftp", "host": "ftp.partner.com", "path": "/out/", "user": "acme", "password_env": "P", "tls": "explicit"},
                 "Sftp": {"type": "sftp", "host": "sftp.partner.com", "port": 2222, "path": "/home/acme/", "user": "acme",
                          "key_file": "/k", "host_key_sha256": "q3r1nO5pYtYVfKFXhVqZxqJmKkQTVhP0pQmK3mG7yCc="}
-            }},
+            },
             "batch": {"bucket": "partner-batch", "prefix": "tenants/"},
             "flow_logs": {"bucket": "flow-logs", "prefix": "logs/"},
             "db": {"table": "t"}, "callbacks": {"base_url": "https://h.example.com"},
@@ -813,7 +802,7 @@ mod tests {
         };
         assert!(GlobalConfig::parse("{}").is_err(), "scripts is required");
         assert!(bad(r#""bucket": "x""#), "unknown top-level key");
-        let store = |body: &str| format!(r#""buckets": {{"stores": {{"X": {body}}}}}"#);
+        let store = |body: &str| format!(r#""stores": {{"X": {body}}}"#);
         let host_key = "q3r1nO5pYtYVfKFXhVqZxqJmKkQTVhP0pQmK3mG7yCc=";
         assert!(!bad(&store(
             r#"{"type": "dir", "path": "/d", "max_read_mb": 5, "max_write_mb": 1}"#
@@ -846,7 +835,7 @@ mod tests {
             "empty bucket"
         );
         assert!(
-            bad(r#""buckets": {"stores": {"in-box": {"type": "s3", "bucket": "b"}}}"#),
+            bad(r#""stores": {"in-box": {"type": "s3", "bucket": "b"}}"#),
             "bad store name"
         );
         let ftp = |extra: &str| {
@@ -926,7 +915,7 @@ mod tests {
         );
         assert!(
             bad(
-                r#""buckets": {"stores": {"In": {"type": "s3", "bucket": "same"}}}, "batch": {"bucket": "same"}"#
+                r#""stores": {"In": {"type": "s3", "bucket": "same"}}, "batch": {"bucket": "same"}"#
             ),
             "batch bucket shared with a data bucket"
         );
@@ -936,7 +925,7 @@ mod tests {
         );
         assert!(
             bad(
-                r#""buckets": {"stores": {"In": {"type": "s3", "bucket": "same"}}}, "flow_logs": {"bucket": "same"}"#
+                r#""stores": {"In": {"type": "s3", "bucket": "same"}}, "flow_logs": {"bucket": "same"}"#
             ),
             "flow log bucket shared with a data bucket"
         );

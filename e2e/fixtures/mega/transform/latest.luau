@@ -2,8 +2,8 @@
 --!runtime 1
 -- Streams a zip of XML files from In into an ndjson object and a summary zip in Out.
 local function handle(_ctx, event)
-	local src = native.bucket.In.open(event.key)
-	local out = native.bucket.Out.create("transform/rows.ndjson")
+	local src = native.store.In.open(event.key)
+	local out = native.store.Out.create("transform/rows.ndjson")
 	local n = 0
 	for entry in native.zip.entries(src) do
 		if not entry.is_dir then
@@ -16,7 +16,7 @@ local function handle(_ctx, event)
 		end
 	end
 	out:close()
-	local zsink = native.bucket.Out.create("transform/summary.zip")
+	local zsink = native.store.Out.create("transform/summary.zip")
 	local z = native.zip.writer(zsink)
 	z:add("summary.json", native.json.encode({ items = n }))
 	z:finish()

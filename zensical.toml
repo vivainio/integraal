@@ -23,7 +23,7 @@ nav = [
   ] },
   { "Features" = [
     { "Native API overview" = "native-api.md" },
-    { "Buckets (S3)" = "buckets.md" },
+    { "Stores" = "stores.md" },
     { "File system" = "filesystem.md" },
     { "FTP and SFTP" = "remote.md" },
     { "DynamoDB" = "dynamodb.md" },

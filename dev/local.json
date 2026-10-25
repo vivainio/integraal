@@ -1,11 +1,11 @@
 {
   "$schema": "../types/integraal.schema.json",
   "scripts": { "bucket": "scripts" },
-  "buckets": { "stores": {
+  "stores": {
     "In":   { "type": "s3", "bucket": "data-in",   "prefix": "tenants/" },
     "Out":  { "type": "s3", "bucket": "data-out",  "prefix": "tenants/" },
     "Temp": { "type": "s3", "bucket": "data-temp", "prefix": "tenants/" }
-  } },
+  },
   "db": { "table": "integraal" },
   "server": { "port": 8080 },
   "log": "info"

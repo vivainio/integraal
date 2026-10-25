@@ -6,9 +6,9 @@ use std::{
 
 use integraal_loader::{CachedLoader, LoadError, ScriptKey};
 use integraal_wrappers::{
-    install, parse_runtime_version, Access, BucketScope, BucketScopes, DbScope, Deadline,
-    HostContext, HostLimits, HttpPolicy, ItemBackend, MasterKeys, ObjectBackend, QueueBackend,
-    ScriptName, Throttle, Vault,
+    install, parse_runtime_version, Access, DbScope, Deadline, HostContext, HostLimits, HttpPolicy,
+    ItemBackend, MasterKeys, ObjectBackend, QueueBackend, ScriptName, StoreScope, StoreScopes,
+    Throttle, Vault,
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
@@ -125,7 +125,7 @@ pub struct TenantLimits {
 }
 
 /// Per-tenant policy, read from `<tenant>/config.json` in the script bucket.
-/// Tenants cannot write there (scripts only reach the data bucket), so it is
+/// Tenants cannot write there (scripts only reach the data stores), so it is
 /// the operator's lever over what a tenant may touch. Absent file = no access.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct TenantConfig {
@@ -137,11 +137,11 @@ pub struct TenantConfig {
     pub vars: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub limits: TenantLimits,
-    /// Buckets this tenant may use as `native.bucket.<name>`, and how: a grant or list of grants from
+    /// Stores this tenant may use as `native.store.<name>`, and how: a grant or list of grants from
     /// `read`, `write` (put), `delete`, `readwrite` (all three), `upload` (presigned PUT) and `download` (presigned GET).
-    /// Absent = no access. Names must match the deployment's `buckets.stores`.
+    /// Absent = no access. Names must match the deployment's `stores`.
     #[serde(default)]
-    pub buckets: HashMap<String, Access>,
+    pub stores: HashMap<String, Access>,
     /// Allows `native.queue.send` (new work for this tenant on the deployment's job queue).
     #[serde(default)]
     pub queue: bool,
@@ -198,11 +198,11 @@ pub struct Engine {
     loader: Arc<CachedLoader>,
     limits: Limits,
     ceiling: Limits,
-    /// Named buckets with the base key prefix each tenant's directory sits under.
-    buckets: HashMap<String, (Arc<dyn ObjectBackend>, String)>,
-    /// Per-invocation byte limits of buckets that are metered (host directories).
-    bucket_io: HashMap<String, integraal_wrappers::IoLimits>,
-    /// The one bucket behind `native.batch`, kept apart from the data buckets.
+    /// Named stores with the base key prefix each tenant's directory sits under.
+    stores: HashMap<String, (Arc<dyn ObjectBackend>, String)>,
+    /// Per-invocation byte limits of stores that are metered (host directories).
+    store_io: HashMap<String, integraal_wrappers::IoLimits>,
+    /// The one bucket behind `native.batch`, kept apart from the data stores.
     batch: Option<(Arc<dyn ObjectBackend>, String)>,
     db: Option<(
         Arc<dyn ItemBackend>,
@@ -236,8 +236,8 @@ impl Drop for RunningGuard {
 /// Everything besides limits and config that one invocation's native API is wired to.
 #[derive(Clone)]
 pub(crate) struct Services {
-    buckets: BucketScopes,
-    batch: Option<BucketScope>,
+    stores: StoreScopes,
+    batch: Option<StoreScope>,
     db: Option<DbScope>,
     cb_url: Option<String>,
     queue: Option<Arc<dyn QueueBackend>>,
@@ -257,8 +257,8 @@ impl Engine {
             loader,
             limits,
             ceiling: Limits::ceiling(),
-            buckets: HashMap::new(),
-            bucket_io: HashMap::new(),
+            stores: HashMap::new(),
+            store_io: HashMap::new(),
             batch: None,
             db: None,
             callback_base_url: None,
@@ -278,26 +278,26 @@ impl Engine {
         self
     }
 
-    /// Registers a named bucket for `native.bucket.<name>`. Each tenant is confined to
+    /// Registers a named store for `native.store.<name>`. Each tenant is confined to
     /// `<base_prefix><tenant>/` in it, and only reaches it if its config grants access.
-    pub fn with_bucket(
+    pub fn with_store(
         mut self,
         name: impl Into<String>,
         backend: Arc<dyn ObjectBackend>,
         base_prefix: impl Into<String>,
     ) -> Self {
-        self.buckets
+        self.stores
             .insert(name.into(), (backend, base_prefix.into()));
         self
     }
 
-    /// Meters the named bucket: its I/O is counted in telemetry and capped per invocation.
-    pub fn with_bucket_io(
+    /// Meters the named store: its I/O is counted in telemetry and capped per invocation.
+    pub fn with_store_io(
         mut self,
         name: impl Into<String>,
         limits: integraal_wrappers::IoLimits,
     ) -> Self {
-        self.bucket_io.insert(name.into(), limits);
+        self.store_io.insert(name.into(), limits);
         self
     }
 
@@ -606,17 +606,17 @@ impl Engine {
         if let Some(max) = max_time {
             limits.timeout = limits.timeout.min(max);
         }
-        let mut buckets = BucketScopes::new();
-        for (name, access) in &config.buckets {
-            let (backend, base) = self.buckets.get(name).ok_or_else(|| {
+        let mut stores = StoreScopes::new();
+        for (name, access) in &config.stores {
+            let (backend, base) = self.stores.get(name).ok_or_else(|| {
                 Error::Config(format!(
-                    "bucket {name:?} is not configured on this deployment"
+                    "store {name:?} is not configured on this deployment"
                 ))
             })?;
-            let mut scope = BucketScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
+            let mut scope = StoreScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
                 .with_max_object_bytes(limits.max_object_bytes)
                 .with_access(*access);
-            if let Some(io) = self.bucket_io.get(name) {
+            if let Some(io) = self.store_io.get(name) {
                 let (tenant, dir) = (inv.tenant.clone(), name.clone());
                 scope = scope.with_io(
                     *io,
@@ -625,14 +625,14 @@ impl Engine {
                     })),
                 );
             }
-            buckets.insert(name.clone(), scope);
+            stores.insert(name.clone(), scope);
         }
         let batch = if config.batch {
             let (backend, base) = self.batch.as_ref().ok_or_else(|| {
                 Error::Config("the batch bucket is not configured on this deployment".into())
             })?;
             Some(
-                BucketScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
+                StoreScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
                     .with_max_object_bytes(limits.max_object_bytes),
             )
         } else {
@@ -650,7 +650,7 @@ impl Engine {
             None
         };
         let svc = Services {
-            buckets,
+            stores,
             batch,
             db,
             cb_url: self.callback_base_url.clone(),
@@ -837,10 +837,10 @@ impl FlowSegment {
 }
 
 impl Services {
-    /// No buckets, table, vault or keys: what a script that may only compute gets.
+    /// No stores, table, vault or keys: what a script that may only compute gets.
     pub(crate) fn bare() -> Self {
         Self {
-            buckets: BucketScopes::new(),
+            stores: StoreScopes::new(),
             batch: None,
             db: None,
             cb_url: None,
@@ -862,8 +862,8 @@ pub(crate) struct Vm {
     pub(crate) version: u32,
     deadline: Instant,
     script: ScriptName,
-    buckets: BucketScopes,
-    batch: Option<BucketScope>,
+    stores: StoreScopes,
+    batch: Option<StoreScope>,
     capture: CaptureSlot,
     flow_log: Option<FlowLog>,
     debug: Option<DebugRun>,
@@ -884,14 +884,14 @@ pub(crate) fn new_vm(
     lua.set_memory_limit(limits.memory_bytes)
         .map_err(internal)?;
     let script = Arc::new(Mutex::new(script.to_string()));
-    let vm_buckets = svc.buckets.clone();
+    let vm_stores = svc.stores.clone();
     install(
         &lua,
         version,
         &HostContext {
             tenant: tenant.to_string(),
             script: script.clone(),
-            buckets: svc.buckets.clone(),
+            stores: svc.stores.clone(),
             batch: svc.batch.clone(),
             db: svc.db.clone(),
             queue: svc.queue.clone(),
@@ -946,7 +946,7 @@ pub(crate) fn new_vm(
         version,
         deadline: hard,
         script,
-        buckets: vm_buckets,
+        stores: vm_stores,
         batch: svc.batch.clone(),
         capture,
         flow_log: svc.flow_log.clone(),
@@ -1059,7 +1059,7 @@ fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Va
         .from_value(out)
         .map_err(|e| vm.bad_result(format!("handler result is not JSON-serializable: {e}")))?;
     if call.trigger == Trigger::Queue {
-        apply_deletes(&result, &call.event, &vm.buckets, vm.batch.as_ref())?;
+        apply_deletes(&result, &call.event, &vm.stores, vm.batch.as_ref())?;
     }
     Ok(result)
 }
@@ -1067,51 +1067,51 @@ fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Va
 /// Most objects one handler result may ask the engine to delete.
 const MAX_RESULT_DELETES: usize = 100;
 
-/// Queue handlers can return `delete = true` (the object named by the event's `bucket` and `key`) or
-/// `delete = { { bucket = "In", key = "a.xml" }, ... }`. The engine deletes them only after the handler
+/// Queue handlers can return `delete = true` (the object named by the event's `store` and `key`) or
+/// `delete = { { store = "In", key = "a.xml" }, ... }`. The engine deletes them only after the handler
 /// returned without error, through the tenant's own grants (so it still needs the `delete` grant).
 fn apply_deletes(
     result: &serde_json::Value,
     event: &serde_json::Value,
-    buckets: &BucketScopes,
-    batch: Option<&BucketScope>,
+    stores: &StoreScopes,
+    batch: Option<&StoreScope>,
 ) -> Result<(), Error> {
     use serde_json::Value;
     let bad = |m: &str| Error::Script(format!("invalid delete in handler result: {m}"));
     let str_of = |v: &Value, field: &str| v.get(field).and_then(Value::as_str).map(str::to_string);
     let targets: Vec<(String, String)> = match result.get("delete") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => return Ok(()),
-        Some(Value::Bool(true)) => match (str_of(event, "bucket"), str_of(event, "key")) {
+        Some(Value::Bool(true)) => match (str_of(event, "store"), str_of(event, "key")) {
             (Some(b), Some(k)) => vec![(b, k)],
-            _ => return Err(bad("`true` needs an event with `bucket` and `key`")),
+            _ => return Err(bad("`true` needs an event with `store` and `key`")),
         },
         Some(Value::Array(items)) if items.len() <= MAX_RESULT_DELETES => items
             .iter()
-            .map(|i| match (str_of(i, "bucket"), str_of(i, "key")) {
+            .map(|i| match (str_of(i, "store"), str_of(i, "key")) {
                 (Some(b), Some(k)) => Ok((b, k)),
-                _ => Err(bad("each entry needs `bucket` and `key`")),
+                _ => Err(bad("each entry needs `store` and `key`")),
             })
             .collect::<Result<_, _>>()?,
         Some(Value::Array(_)) => {
             return Err(bad(&format!("more than {MAX_RESULT_DELETES} entries")))
         }
         Some(Value::Object(o)) if o.is_empty() => return Ok(()), // an empty Lua table
-        Some(_) => return Err(bad("expected true or a list of { bucket, key }")),
+        Some(_) => return Err(bad("expected true or a list of { store, key }")),
     };
-    for (bucket, key) in targets {
-        let scope = if bucket == integraal_wrappers::BATCH_BUCKET {
+    for (store, key) in targets {
+        let scope = if store == integraal_wrappers::BATCH_STORE {
             batch
         } else {
-            buckets.get(&bucket)
+            stores.get(&store)
         };
         let scope = scope.ok_or_else(|| {
             Error::Script(format!(
-                "delete: bucket {bucket:?} is not available to this tenant"
+                "delete: store {store:?} is not available to this tenant"
             ))
         })?;
         scope
             .delete(&key)
-            .map_err(|e| Error::Script(format!("delete {bucket}/{key}: {e}")))?;
+            .map_err(|e| Error::Script(format!("delete {store}/{key}: {e}")))?;
     }
     Ok(())
 }
@@ -1847,7 +1847,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn data_buckets_are_confined_and_access_controlled() {
+    async fn data_stores_are_confined_and_access_controlled() {
         let (inbox, outbox) = (
             Arc::new(MemBackend::default()),
             Arc::new(MemBackend::default()),
@@ -1856,24 +1856,24 @@ pub(crate) mod tests {
         inbox.put("data/acme/drop.csv", b"a,b".to_vec()).unwrap();
         let e = engine_cfg(
             r#"return { handle = function()
-                local out, inn = native.bucket.Out, native.bucket.In
+                local out, inn = native.store.Out, native.store.In
                 out.put("notes/a", "hello")
                 return {
                     got = out.get("notes/a"), keys = out.list("notes/"), missing = out.get("nope") == nil,
                     escaped = pcall(out.get, "../other/secret"),
                     read_in = inn.get("drop.csv"), listed_in = inn.list(),
                     put_in = pcall(inn.put, "x", "y"), delete_in = pcall(inn.delete, "drop.csv"), gone = inn.get("drop.csv") == nil,
-                    ungranted = pcall(function() return native.bucket.Backup.get("x") end),
+                    ungranted = pcall(function() return native.store.Backup.get("x") end),
                     put_url = inn.presign_put("up/new.csv", 60), get_url = out.presign_get("res.csv"),
                     get_url_in = pcall(inn.presign_get, "drop.csv"), put_url_out = pcall(out.presign_put, "res.csv"),
                 }
             end }"#,
             Limits::default(),
-            r#"{"buckets":{"In":["read","delete","upload"],"Out":["readwrite","download"]}}"#,
+            r#"{"stores":{"In":["read","delete","upload"],"Out":["readwrite","download"]}}"#,
         )
-        .with_bucket("In", inbox.clone(), "data/")
-        .with_bucket("Out", outbox.clone(), "data/")
-        .with_bucket("Backup", Arc::new(MemBackend::default()), "data/");
+        .with_store("In", inbox.clone(), "data/")
+        .with_store("Out", outbox.clone(), "data/")
+        .with_store("Backup", Arc::new(MemBackend::default()), "data/");
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!({"got":"hello","keys":["notes/a"],"missing":true,"escaped":false,
@@ -1896,9 +1896,9 @@ pub(crate) mod tests {
         let backend = Arc::new(MemBackend::default());
         backend.put("data/acme/a.csv", b"1".to_vec()).unwrap();
         backend.put("data/acme/b.csv", b"2".to_vec()).unwrap();
-        let cfg = format!(r#"{{"buckets":{{"In":{grants}}}}}"#);
+        let cfg = format!(r#"{{"stores":{{"In":{grants}}}}}"#);
         (
-            engine_cfg(src, Limits::default(), &cfg).with_bucket("In", backend.clone(), "data/"),
+            engine_cfg(src, Limits::default(), &cfg).with_store("In", backend.clone(), "data/"),
             backend,
         )
     }
@@ -1906,7 +1906,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn queue_result_deletes_after_success_only() {
         let present = |b: &MemBackend, k: &str| b.get(&format!("data/acme/{k}")).unwrap().is_some();
-        let ev = json!({"bucket": "In", "key": "a.csv"});
+        let ev = json!({"store": "In", "key": "a.csv"});
 
         // `delete = true` removes the event's own object, and nothing else
         let (e, b) = delete_engine(
@@ -1918,7 +1918,7 @@ pub(crate) mod tests {
 
         // an explicit list can name several objects
         let (e, b) = delete_engine(
-            r#"return { on_queue = function() return { delete = { { bucket = "In", key = "a.csv" }, { bucket = "In", key = "b.csv" } } } end }"#,
+            r#"return { on_queue = function() return { delete = { { store = "In", key = "a.csv" }, { store = "In", key = "b.csv" } } } end }"#,
             r#"["delete"]"#,
         );
         e.invoke(inv(Trigger::Queue, ev.clone())).await.unwrap();
@@ -1944,7 +1944,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn result_delete_obeys_grants_and_shape() {
         let present = |b: &MemBackend| b.get("data/acme/a.csv").unwrap().is_some();
-        let ev = json!({"bucket": "In", "key": "a.csv"});
+        let ev = json!({"store": "In", "key": "a.csv"});
         // no delete grant: the invocation fails and the object stays
         let (e, b) = delete_engine(
             "return { on_queue = function() return { delete = true } end }",
@@ -1955,9 +1955,9 @@ pub(crate) mod tests {
             Err(Error::Script(_))
         ));
         assert!(present(&b));
-        // a bucket the tenant was not granted
+        // a store the tenant was not granted
         let (e, b) = delete_engine(
-            r#"return { on_queue = function() return { delete = { { bucket = "Out", key = "a.csv" } } } end }"#,
+            r#"return { on_queue = function() return { delete = { { store = "Out", key = "a.csv" } } } end }"#,
             r#""delete""#,
         );
         assert!(matches!(
@@ -1965,7 +1965,7 @@ pub(crate) mod tests {
             Err(Error::Script(_))
         ));
         assert!(present(&b));
-        // `true` without bucket and key in the event, and malformed entries
+        // `true` without store and key in the event, and malformed entries
         let (e, _) = delete_engine(
             "return { on_queue = function() return { delete = true } end }",
             r#""delete""#,
@@ -1995,11 +1995,11 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn granting_an_unconfigured_bucket_fails_the_invocation() {
+    async fn granting_an_unconfigured_store_fails_the_invocation() {
         let e = engine_cfg(
             "return { handle = function() return 1 end }",
             Limits::default(),
-            r#"{"buckets":{"nope":"read"}}"#,
+            r#"{"stores":{"nope":"read"}}"#,
         );
         assert!(matches!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await,
@@ -2760,7 +2760,7 @@ pub(crate) mod tests {
         let e = engine_cfg(
             r#"return { handle = function()
                 local n, last, text = 0, nil, nil
-                for ev in native.xml.events(native.bucket.In.open("big.xml")) do
+                for ev in native.xml.events(native.store.In.open("big.xml")) do
                     if ev.type == "start" and ev.tag == "entry" then n += 1; last = ev.attrs.id end
                     if ev.type == "text" then text = ev.text end
                 end
@@ -2770,9 +2770,9 @@ pub(crate) mod tests {
                 return { n = n, last = last, text = text, depths = depths, dtd = dtd }
             end }"#,
             Limits { timeout: Duration::from_secs(60), ..Limits::default() },
-            r#"{"buckets":{"In":"read"}}"#,
+            r#"{"stores":{"In":"read"}}"#,
         )
-        .with_bucket("In", backend, "data/");
+        .with_store("In", backend, "data/");
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!({"n":200000,"last":"199999","text":"x & y","depths":["start0","start1","end1","end0"],"dtd":false})
@@ -2830,8 +2830,8 @@ pub(crate) mod tests {
     async fn run_zip(script: &str, zip: Vec<u8>) -> Result<serde_json::Value, crate::Error> {
         let backend = Arc::new(MemBackend::default());
         backend.put("data/acme/z.zip", zip).unwrap();
-        engine_cfg(script, Limits::default(), r#"{"buckets":{"In":"read"}}"#)
-            .with_bucket("In", backend, "data/")
+        engine_cfg(script, Limits::default(), r#"{"stores":{"In":"read"}}"#)
+            .with_store("In", backend, "data/")
             .invoke(inv(Trigger::Invoke, json!(null)))
             .await
     }
@@ -2841,7 +2841,7 @@ pub(crate) mod tests {
         let script = r#"return { handle = function()
             local seen, a, n, stale = {}, nil, 0, nil
             local first
-            for entry in native.zip.entries(native.bucket.In.open("z.zip")) do
+            for entry in native.zip.entries(native.store.In.open("z.zip")) do
                 table.insert(seen, entry.name)
                 if entry.name == "a.txt" then
                     a = entry:read()
@@ -2869,7 +2869,7 @@ pub(crate) mod tests {
         ]);
         let script = r#"return { handle = function()
             local seen = {}
-            for entry in native.zip.entries(native.bucket.In.open("z.zip")) do
+            for entry in native.zip.entries(native.store.In.open("z.zip")) do
                 table.insert(seen, entry.name .. ":" .. (entry.size or "?"))
                 if entry.name ~= "two" then seen[#seen] ..= ":" .. entry:read() end
             end
@@ -2885,7 +2885,7 @@ pub(crate) mod tests {
         let at = bad.windows(5).position(|w| w == b"plain").unwrap();
         bad[at] = b'X';
         let script = r#"return { handle = function()
-            for entry in native.zip.entries(native.bucket.In.open("z.zip")) do entry:read() end
+            for entry in native.zip.entries(native.store.In.open("z.zip")) do entry:read() end
         end }"#;
         let err = run_zip(script, bad).await.unwrap_err().to_string();
         assert!(err.contains("checksum"), "{err}");
@@ -2908,21 +2908,21 @@ pub(crate) mod tests {
         let output = Arc::new(MemBackend::default());
         let e = engine_cfg(
             r#"return { handle = function()
-                local out = native.bucket.Out.create("pack.zip")
+                local out = native.store.Out.create("pack.zip")
                 local z = native.zip.writer(out)
                 z:add("hello.txt", "hello")
-                z:add("dir/copy.xml", native.bucket.In.open("src.xml"))
+                z:add("dir/copy.xml", native.store.In.open("src.xml"))
                 z:add("parts.txt"); z:write("a"); z:write("b")
                 z:add("empty/")
                 z:finish()
                 local bytes = out:close()
                 local closed = pcall(function() out:write("x") end)
 
-                local aborted = native.bucket.Out.create("aborted.zip")
+                local aborted = native.store.Out.create("aborted.zip")
                 aborted:write("junk"); aborted:abort()
 
                 local seen = {}
-                for e in native.zip.entries(native.bucket.Out.open("pack.zip")) do
+                for e in native.zip.entries(native.store.Out.open("pack.zip")) do
                     seen[#seen + 1] = e.name .. "=" .. #e:read()
                 end
                 local mem = native.zip.writer(); mem:add("m.txt", "mem")
@@ -2930,13 +2930,13 @@ pub(crate) mod tests {
                 local n = 0
                 for e in native.zip.entries(s) do n += #e:read() end
                 return { seen = seen, wrote = bytes > 0, closed = closed, mem_n = n,
-                         gone = native.bucket.Out.get("aborted.zip") == nil }
+                         gone = native.store.Out.get("aborted.zip") == nil }
             end }"#,
             Limits::default(),
-            r#"{"buckets":{"In":"read","Out":"readwrite"}}"#,
+            r#"{"stores":{"In":"read","Out":"readwrite"}}"#,
         )
-        .with_bucket("In", input, "in/")
-        .with_bucket("Out", output.clone(), "out/");
+        .with_store("In", input, "in/")
+        .with_store("Out", output.clone(), "out/");
         let res = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         assert_eq!(
             res,
@@ -2984,27 +2984,27 @@ pub(crate) mod tests {
         let e = engine_cfg(
             r#"return { handle = function()
                 local n = 0
-                for ev in native.xml.events(native.gzip.open(native.bucket.In.open("f.xml.gz"))) do
+                for ev in native.xml.events(native.gzip.open(native.store.In.open("f.xml.gz"))) do
                     if ev.type == "start" and ev.tag == "i" then n += 1 end
                 end
                 local s = native.gzip.compress(string.rep("abc", 1000))
                 local back = native.gzip.decompress(s)
-                local out = native.bucket.Out.create("o.gz")
+                local out = native.store.Out.create("o.gz")
                 local w = native.gzip.writer(out)
                 for i = 1, 200 do w:write(string.rep("line " .. i .. "\n", 100)) end
                 w:finish(); out:close()
                 local mem = native.gzip.writer(); mem:write("hi"); 
                 local bad = pcall(function()
-                    local st = native.gzip.open(native.bucket.In.open("bad.gz"))
+                    local st = native.gzip.open(native.store.In.open("bad.gz"))
                     for _ in native.xml.events(st) do end
                 end)
                 return { n = n, small = #s < 100, back = #back, mem = native.gzip.decompress(mem:finish()), bad = bad }
             end }"#,
             Limits::default(),
-            r#"{"buckets":{"In":"read","Out":"readwrite"}}"#,
+            r#"{"stores":{"In":"read","Out":"readwrite"}}"#,
         )
-        .with_bucket("In", input, "in/")
-        .with_bucket("Out", output.clone(), "out/");
+        .with_store("In", input, "in/")
+        .with_store("Out", output.clone(), "out/");
         let res = e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         assert_eq!(
             res,
@@ -3027,13 +3027,13 @@ pub(crate) mod tests {
                 for i = 1, 1000 do
                     db:exec("insert into seen values (?, ?, ?)", { "id" .. i, i * 1.5, native.sql.null })
                 end
-                local out = native.bucket.Temp.create("job.db")
+                local out = native.store.Temp.create("job.db")
                 local bytes = db:save(out)
                 out:close()
                 return { bytes = bytes > 0 }
             end,
             handle = function()
-                local db = native.sql.load(native.bucket.Temp.open("job.db"))
+                local db = native.sql.load(native.store.Temp.open("job.db"))
                 local top = db:query("select id, amount, note from seen order by amount desc limit 2")
                 db:exec("insert into seen values ('new', 1, 'x')")  -- a loaded db is writable
                 local c = db:get("select count(*) as n, sum(amount) as total from seen")
@@ -3055,16 +3055,16 @@ pub(crate) mod tests {
             engine_cfg(
                 script,
                 Limits::default(),
-                r#"{"buckets":{"Temp":"readwrite"}}"#,
+                r#"{"stores":{"Temp":"readwrite"}}"#,
             )
-            .with_bucket("Temp", store, "tmp/")
+            .with_store("Temp", store, "tmp/")
         };
         let first = mk(store.clone())
             .invoke(inv(Trigger::Queue, json!({})))
             .await
             .unwrap();
         assert_eq!(first, json!({"bytes": true}));
-        // A later invocation, with a fresh engine, picks the file up from the bucket.
+        // A later invocation, with a fresh engine, picks the file up from the store.
         let out = mk(store)
             .invoke(inv(Trigger::Invoke, json!(null)))
             .await
@@ -3390,20 +3390,20 @@ pub(crate) mod tests {
             &ScriptKey::new("acme", "s", None).unwrap(),
             r#"return { handle = function()
                 local n = 0
-                for i = 1, 10 do if pcall(native.bucket.Out.get, "k") then n += 1 end end
+                for i = 1, 10 do if pcall(native.store.Out.get, "k") then n += 1 end end
                 return n
             end }"#,
         );
         store.put(
             &ScriptKey::config("acme").unwrap(),
-            r#"{"buckets":{"Out":"read"},"limits":{"max_data_ops":3}}"#,
+            r#"{"stores":{"Out":"read"},"limits":{"max_data_ops":3}}"#,
         );
         let backend = Arc::new(MemBackend::default());
         let e = Engine::new(
             Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)),
             Limits::default(),
         )
-        .with_bucket("Out", backend, "data/");
+        .with_store("Out", backend, "data/");
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!(3)
@@ -3427,8 +3427,8 @@ pub(crate) mod tests {
             Limits::default(),
             config,
         )
-        .with_bucket("In", backend, "data/")
-        .with_bucket("Out", Arc::new(MemBackend::default()), "data/");
+        .with_store("In", backend, "data/")
+        .with_store("Out", Arc::new(MemBackend::default()), "data/");
         let out = e
             .invoke(inv(Trigger::Queue, json!({"key": "in.xml"})))
             .await
@@ -3440,8 +3440,8 @@ pub(crate) mod tests {
             Limits::default(),
             config,
         )
-        .with_bucket("In", Arc::new(MemBackend::default()), "data/")
-        .with_bucket("Out", Arc::new(MemBackend::default()), "data/");
+        .with_store("In", Arc::new(MemBackend::default()), "data/")
+        .with_store("Out", Arc::new(MemBackend::default()), "data/");
         let out = e.invoke(inv(Trigger::Http, json!({"x": 1}))).await.unwrap();
         assert_eq!(
             out,
@@ -3521,22 +3521,22 @@ pub(crate) mod tests {
         put(
             &store,
             "router",
-            r#"return { on_route = function() native.bucket.Out.get("a"); native.bucket.Out.get("b"); return "t" end }"#,
+            r#"return { on_route = function() native.store.Out.get("a"); native.store.Out.get("b"); return "t" end }"#,
         );
         put(
             &store,
             "t",
             r#"return { on_queue = function()
                 local ok = 0
-                for _ = 1, 5 do if pcall(native.bucket.Out.get, "k") then ok += 1 end end
+                for _ = 1, 5 do if pcall(native.store.Out.get, "k") then ok += 1 end end
                 return ok
             end }"#,
         );
         store.put(
             &ScriptKey::config("acme").unwrap(),
-            r#"{"router":"router","buckets":{"Out":"read"},"limits":{"max_data_ops":3}}"#,
+            r#"{"router":"router","stores":{"Out":"read"},"limits":{"max_data_ops":3}}"#,
         );
-        let e = routed(&store).with_bucket("Out", Arc::new(MemBackend::default()), "data/");
+        let e = routed(&store).with_store("Out", Arc::new(MemBackend::default()), "data/");
         // 3 allowed in total; the router used 2, so the target gets exactly 1
         assert_eq!(e.invoke(msg(json!({}))).await.unwrap(), json!(1));
     }
@@ -3640,7 +3640,7 @@ pub(crate) mod tests {
     }
 
     fn done_event() -> serde_json::Value {
-        json!({"bucket": "$batch", "key": "jobs/j1/done.json"})
+        json!({"store": "$batch", "key": "jobs/j1/done.json"})
     }
 
     fn direct(script: &str, event: serde_json::Value) -> Invocation {
@@ -3718,8 +3718,8 @@ pub(crate) mod tests {
             e.invoke(msg(done_event())).await.unwrap(),
             json!({"gone": true})
         );
-        // A data-bucket object that merely looks like a done.json is not a batch event.
-        let mut other = msg(json!({"bucket": "In", "key": "jobs/j1/done.json", "ids": []}));
+        // A data-store object that merely looks like a done.json is not a batch event.
+        let mut other = msg(json!({"store": "In", "key": "jobs/j1/done.json", "ids": []}));
         other.trigger = Trigger::Invoke;
         assert_eq!(e.invoke(other).await.unwrap()["id"], "j1");
     }
@@ -3813,16 +3813,16 @@ pub(crate) mod tests {
         let e = engine_cfg(
             r#"return { handle = function()
                 local out = {}
-                for v in native.ndjson.rows(native.bucket.In.open("a.ndjson")) do table.insert(out, v) end
+                for v in native.ndjson.rows(native.store.In.open("a.ndjson")) do table.insert(out, v) end
                 local n = 0
                 for _ in native.ndjson.rows('{"x":1}\n{"x":2}\n') do n += 1 end
                 local ok = pcall(function() for _ in native.ndjson.rows("{oops}\n") do end end)
                 return { first = out[1].a, second = out[2][1], third = out[3], n = n, bad = ok }
             end }"#,
             Limits::default(),
-            r#"{"buckets":{"In":"read"}}"#,
+            r#"{"stores":{"In":"read"}}"#,
         )
-        .with_bucket("In", backend, "data/");
+        .with_store("In", backend, "data/");
         assert_eq!(
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!({"first": 1, "second": 2, "third": 3, "n": 2, "bad": false})
@@ -4006,7 +4006,7 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(backend.get(done).unwrap().is_some(), "no done.json");
-        let mut after = msg(json!({"bucket": "$batch", "key": "jobs/h1/done.json"}));
+        let mut after = msg(json!({"store": "$batch", "key": "jobs/h1/done.json"}));
         after.script = Some("after".into());
         let out = e.invoke(after).await.unwrap();
         assert_eq!(
@@ -4034,7 +4034,7 @@ pub(crate) mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        let mut after = msg(json!({"bucket": "$batch", "key": "jobs/h1/done.json"}));
+        let mut after = msg(json!({"store": "$batch", "key": "jobs/h1/done.json"}));
         after.script = Some("after".into());
         let out = e.invoke(after).await.unwrap();
         assert!(

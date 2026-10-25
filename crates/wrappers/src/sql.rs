@@ -1,6 +1,6 @@
 //! `native.sql`: scratch SQLite databases for working data and bookkeeping within a run.
 //!
-//! Databases live in memory and vanish with the invocation. They can be written to a bucket
+//! Databases live in memory and vanish with the invocation. They can be written to a store
 //! (`db:save(sink)`) and opened again later (`native.sql.load(stream)`), which is how work is
 //! handed from one invocation to the next.
 
@@ -214,7 +214,7 @@ impl UserData for Db {
                 })
             })
         });
-        // Streams the database file into a sink from `bucket.create`; close the sink to commit.
+        // Streams the database file into a sink from `store.create`; close the sink to commit.
         methods.add_method("save", |_, this, sink: AnyUserData| {
             let sink = Sink::from_userdata(&sink)
                 .ok_or_else(|| mlua::Error::runtime("db:save expects a sink"))?;
@@ -275,7 +275,7 @@ pub fn api(
             move |_, ()| open(caps.clone(), None)
         })?,
     )?;
-    // Opens a database file saved earlier, from a string or a stream (e.g. `bucket.open(key)`).
+    // Opens a database file saved earlier, from a string or a stream (e.g. `store.open(key)`).
     sql.set(
         "load",
         lua.create_function(move |_, source: Value| {

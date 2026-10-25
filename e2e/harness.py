@@ -154,7 +154,7 @@ def launch(megalith, devtools=False, server_env=None):
             tenant_extra = f'"flow_logs":true,"debug":{{"until":"{until}"}},'
         common = {
             "scripts": {"bucket": "scripts"},
-            "buckets": {"stores": {name: {"type": "s3", "bucket": bucket, "prefix": "tenants/"} for name, bucket in {"In": "data-in", "Out": "data-out", "Temp": "data-temp", "Drops": "data-drops"}.items()}},
+            "stores": {name: {"type": "s3", "bucket": bucket, "prefix": "tenants/"} for name, bucket in {"In": "data-in", "Out": "data-out", "Temp": "data-temp", "Drops": "data-drops"}.items()},
             "batch": {"bucket": "batch", "prefix": "tenants/"},
             "db": {"table": "integraal"},
             "callbacks": {"base_url": f"{roto_url}/roto-http"},

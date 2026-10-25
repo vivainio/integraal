@@ -8,7 +8,7 @@ deployment settings behind it:
 
 | Namespace | Chapter |
 | --- | --- |
-| `native.bucket.<bucket>` | [Buckets (S3)](buckets.md), also whitelisted host directories: [File system](filesystem.md) |
+| `native.store.<name>` | [Stores](stores.md), also whitelisted host directories: [File system](filesystem.md) |
 | `native.db` | [DynamoDB](dynamodb.md) |
 | `native.lock` | [Locks](locks.md) |
 | `native.queue` | [Queue](queue.md) |
@@ -50,7 +50,7 @@ when that runs out first the invocation fails with a timeout as usual. Blocks ne
 earliest deadline wins. When an outer block runs out while an inner one is open, the error
 surfaces at the outer `with`, so a `pcall` inside the block cannot swallow it.
 
-Calls to `native.http`, `native.bucket`, `native.sql`, streams and the like are cut off at the
+Calls to `native.http`, `native.store`, `native.sql`, streams and the like are cut off at the
 same deadline (HTTP timeouts, stream reads and SQL queries all stop on time). A write that was
 already in flight when time ran out can still complete, so do not rely on a deadline to undo it.
 

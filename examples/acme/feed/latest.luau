@@ -2,7 +2,7 @@
 --!runtime 1
 -- Counts <entry> elements in a (possibly huge) XML object, streaming.
 local function handle(ctx: Context, event: { key: string })
-	local stream = native.bucket.In.open(event.key)
+	local stream = native.store.In.open(event.key)
 	if not stream then
 		return { entries = 0, found = false }
 	end

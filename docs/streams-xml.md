@@ -1,7 +1,7 @@
 # Streams and XML
 
 ## Streams
-`native.bucket.<bucket>.open` and `native.http.request{stream=true}` return a byte stream. A stream is
+`native.store.<name>.open` and `native.http.request{stream=true}` return a byte stream. A stream is
 consumed by the first parser that takes it; `stream:close()` releases it early. Streams are read
 in chunks, so a multi-gigabyte object never sits in memory (limited by `max_stream_mb`, see
 [Limits](limits.md)).
@@ -76,7 +76,7 @@ text only and compare returned values in Lua.
 ## `native.xml.writer(sink?, opts?)`
 Generates XML. Text and attribute values are escaped, names and characters are validated and the
 writer refuses to produce anything but a well-formed document (balanced tags, one root). With a
-sink from `native.bucket.<name>.create(key)` it streams straight into a bucket; with no sink the
+sink from `native.store.<name>.create(key)` it streams straight into a store; with no sink the
 document is built in memory, capped at the object size limit, and `finish()` returns it.
 
 | method | |
@@ -102,7 +102,7 @@ w:close()
 local xml = w:finish()
 
 -- or stream a large export into a bucket
-local out = native.bucket.Out.create("orders.xml")
+local out = native.store.Out.create("orders.xml")
 local w2 = native.xml.writer(out)
 ... w2:finish()
 out:close()
@@ -119,7 +119,7 @@ records it after the data), `is_dir`, and two ways to get its content:
 - `entry:read()` returns the whole entry as a string, capped by the object size limit.
 
 ```lua
-for entry in native.zip.entries(native.bucket.In.open("batch.zip")) do
+for entry in native.zip.entries(native.store.In.open("batch.zip")) do
   if not entry.is_dir and entry.name:match("%.xml$") then
     for ev in native.xml.events(entry:open()) do ... end
   end
@@ -135,13 +135,13 @@ end
 - Total uncompressed output is capped by `max_stream_mb`, which also guards against zip bombs.
 
 ## `native.zip.writer(sink?)`
-Writes a zip archive in one forward pass. Pass a sink from `native.bucket.<name>.create(key)` to
-stream straight into a bucket (see [Buckets](buckets.md#streaming-uploads)); with no sink the archive
+Writes a zip archive in one forward pass. Pass a sink from `native.store.<name>.create(key)` to
+stream straight into a store (see [Stores](stores.md#streaming-uploads)); with no sink the archive
 is built in memory, capped at the object size limit, and `finish()` returns it as a string.
 
 | method | |
 | --- | --- |
-| `z:add(name, content)` | writes a whole entry from a string or a stream (e.g. `bucket.open(k)` or `entry:open()`) |
+| `z:add(name, content)` | writes a whole entry from a string or a stream (e.g. `store.open(k)` or `entry:open()`) |
 | `z:add(name)` then `z:write(data)` | an entry built from several writes; the next `add` or `finish` closes it |
 | `z:finish()` | writes the central directory; returns the archive for in-memory writers |
 
@@ -152,15 +152,15 @@ trailing data descriptors (zip64), so any size works and nothing needs to be kno
 | function | |
 | --- | --- |
 | `native.gzip.open(source)` | stream of the decompressed bytes of a gzip string or stream; multi-member files work |
-| `native.gzip.writer(sink?)` | `w:write(data)`, `w:finish()`; compresses into a bucket sink, or into memory when there is none (`finish()` then returns the data) |
+| `native.gzip.writer(sink?)` | `w:write(data)`, `w:finish()`; compresses into a store sink, or into memory when there is none (`finish()` then returns the data) |
 | `native.gzip.compress(s)` / `decompress(s)` | whole strings, capped at the object size limit |
 
 ```lua
--- .xml.gz in a bucket, parsed without ever holding it in memory
-for ev in native.xml.events(native.gzip.open(native.bucket.In.open("feed.xml.gz"))) do ... end
+-- .xml.gz in a store, parsed without ever holding it in memory
+for ev in native.xml.events(native.gzip.open(native.store.In.open("feed.xml.gz"))) do ... end
 
 -- compressed export
-local out = native.bucket.Out.create("export.csv.gz")
+local out = native.store.Out.create("export.csv.gz")
 local gz = native.gzip.writer(out)
 gz:write("a,b\n1,2\n")
 gz:finish()

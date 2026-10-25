@@ -6,7 +6,7 @@ local function handle(_ctx, event)
 	if runs == 1 then
 		error("first try fails")
 	end
-	native.bucket.Out.put("flaky/" .. event.key, tostring(runs))
+	native.store.Out.put("flaky/" .. event.key, tostring(runs))
 	return { runs = runs }
 end
 

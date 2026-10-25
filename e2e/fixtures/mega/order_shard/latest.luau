@@ -13,7 +13,7 @@ local function handle(_ctx, event)
 		return native.json.decode(r.body).tier
 	end)
 	assert(got, "crm lock not acquired")
-	native.bucket.Out.put("orders/" .. flow .. "/" .. event.id, native.json.encode({ id = event.id, qty = event.qty, tier = tier }))
+	native.store.Out.put("orders/" .. flow .. "/" .. event.id, native.json.encode({ id = event.id, qty = event.qty, tier = tier }))
 	if not native.db.put_if_absent("flow-seen", flow .. "#" .. event.id, true) then
 		return { counted = false }
 	end

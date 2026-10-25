@@ -1,10 +1,10 @@
 # Barriers
 
 `native.barrier` waits for a known set of acknowledgements, then continues once. Use it when you
-send work out (typically documents put into a bucket) and the other end answers later, one ack per
+send work out (typically documents put into a store) and the other end answers later, one ack per
 item, over whatever channel it likes.
 
-A barrier is a **work list**: a set of member names, usually bucket keys, and one outcome per
+A barrier is a **work list**: a set of member names, usually object keys, and one outcome per
 member. Nothing waits and nothing polls. Each ack is an ordinary event that reaches a script; the
 script records it, and the call that resolves the last member sends the continuation.
 
@@ -16,7 +16,7 @@ sequenceDiagram
     participant A as ack script
     participant F as continuation
     S->>B: create(members = keys)
-    S->>P: bucket.In.put(key) x N
+    S->>P: store.In.put(key) x N
     P-->>A: ack (S3 object, queue message, callback)
     A->>B: ack(id, key, outcome)
     Note over A,B: the last member resolved
@@ -36,7 +36,7 @@ local id = native.barrier.create({
   deadline_s = 3600,                       -- optional; see Deadlines
   overdue_with = "chase",                  -- optional script for the overdue event; else the router picks
 })
-for _, name in names do native.bucket.In.put(batch .. "/" .. name, docs[name]) end
+for _, name in names do native.store.In.put(batch .. "/" .. name, docs[name]) end
 
 -- ack: runs for every acknowledgement, whatever channel it came by
 local r = native.barrier.ack(batch, name, { ok = true, result = { id = "r-17" } })
@@ -70,7 +70,7 @@ end
 ### Outcomes
 
 An ack carries a small outcome: `{ ok = true | false, error = string?, result = any? }`, at most
-8 KB (put anything larger in a bucket and send its key as the `result`). `ok` defaults to `true`.
+8 KB (put anything larger in a store and send its key as the `result`). `ok` defaults to `true`.
 
 A **failed ack still resolves its member**. Otherwise one rejected document would hold the whole
 batch until its deadline. The barrier completes and the continuation decides what a failure means
@@ -96,7 +96,7 @@ Acks/<batch>/<doc>.json  what the partner writes back
 ```lua
 -- router
 local function on_route(_ctx, event)
-  if event.bucket == "Acks" then return "ack" end
+  if event.store == "Acks" then return "ack" end
   return "default"
 end
 
@@ -104,7 +104,7 @@ end
 function on_queue(ctx, ev)
   local batch, doc = string.match(ev.key, "^([^/]+)/(.+)%.json$")
   if not batch then return end
-  local body = native.json.decode(native.bucket.Acks.get(ev.key) or "{}")
+  local body = native.json.decode(native.store.Acks.get(ev.key) or "{}")
   native.barrier.ack(batch, doc .. ".xml", { ok = body.status == "ok", error = body.error })
 end
 ```
@@ -195,4 +195,4 @@ work with `native.db.put_if_absent`.
   [Deadlines](#deadlines)).
 - **Growing a barrier.** The members are fixed at `create`.
 - **Recovering a lost notification.** If a partner's ack object exists but its event was lost,
-  nothing acks the member. List the bucket and ack the missing keys by hand.
+  nothing acks the member. List the store and ack the missing keys by hand.

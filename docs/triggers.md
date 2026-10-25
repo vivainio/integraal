@@ -66,8 +66,8 @@ server recognises the notification and splits it into **one invocation per objec
 
 - the tenant is the first path segment after the store's `prefix`, so one notification serves all tenants;
 - no script is named, so the tenant's [router](router.md) picks one;
-- the event is `{ type = "s3.object", bucket, key, size, etag, event }`, where `bucket` is the logical name (`In`) and
-  `key` is relative to the tenant's prefix, so both can go straight to `native.bucket`;
+- the event is `{ type = "s3.object", store, key, size, etag, event }`, where `store` is the logical name (`In`) and
+  `key` is relative to the tenant's prefix, so both can go straight to `native.store`;
 - other event types, folder markers and S3's test event are acknowledged and skipped.
 
 If every record succeeds the message is deleted. If only some fail, **just those records are sent
@@ -84,12 +84,12 @@ handled.
 A `queue` handler can ask the engine to delete objects **after it returns successfully**:
 
 ```lua
-return { ok = true, delete = true }  -- the event's own bucket + key
-return { delete = { { bucket = "In", key = "a.xml" }, { bucket = "In", key = "b.xml" } } }
+return { ok = true, delete = true }  -- the event's own store + key
+return { delete = { { store = "In", key = "a.xml" }, { store = "In", key = "b.xml" } } }
 ```
 
 If the handler errors, nothing is deleted and the message is retried with the object still there.
-Deletes go through the tenant's own grants, so the bucket needs the `delete` grant. At most 100
+Deletes go through the tenant's own grants, so the store needs the `delete` grant. At most 100
 entries; `delete` is ignored for other triggers; a failed delete fails the invocation.
 
 ## Choosing where to run

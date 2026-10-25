@@ -121,16 +121,16 @@ Large files are processed as streams, so memory is bounded by one event. [Stream
 
 ```mermaid
 flowchart LR
-    I[(In bucket)] -->|open| Z[zip / gzip] --> X[xml.events] --> N[ndjson / sql] -->|create| O[(Out bucket)]
+    I[(In store)] -->|open| Z[zip / gzip] --> X[xml.events] --> N[ndjson / sql] -->|create| O[(Out store)]
 ```
 
 ### Scratch SQL
-Load rows into a per-run SQLite database, query it, optionally persist it to a bucket. [SQL](sql.md)
+Load rows into a per-run SQLite database, query it, optionally persist it to a store. [SQL](sql.md)
 
 ```mermaid
 flowchart LR
     R[rows] --> D[(sql.open scratch DB)] --> Q[SQL query] --> O[output]
-    D -. save .-> B[(bucket)]
+    D -. save .-> B[(store)]
     B -. load in later run .-> D
 ```
 
@@ -168,14 +168,14 @@ Split work into parts that run in parallel, then do one final step when every pa
 There are two ways, depending on who does the parallel work.
 
 ### Acknowledgements arrive from outside
-You put documents in a bucket, the other end acks them over any channel (S3 marker objects, queue
+You put documents in a store, the other end acks them over any channel (S3 marker objects, queue
 messages, a callback), and something must happen when the last ack is in. That is a
-[barrier](barrier.md): the work list is the set of bucket keys you sent, each ack records an outcome,
+[barrier](barrier.md): the work list is the set of object keys you sent, each ack records an outcome,
 and the ack that resolves the last member sends the continuation.
 
 ```mermaid
 flowchart LR
-    S["sender<br/>barrier.create, bucket.In.put x N"] --> P(("partner"))
+    S["sender<br/>barrier.create, store.In.put x N"] --> P(("partner"))
     P -->|"ack: S3 object, queue message, callback"| R["router → ack script<br/>barrier.ack(id, key, outcome)"]
     R -->|"last member resolved"| F["continuation<br/>barrier.hydrate"]
     R -. not yet .-> X[end]
@@ -185,7 +185,7 @@ flowchart LR
 -- send
 local id = native.barrier.create({ id = batch, members = names, continue_with = "finalize",
                                    state = { ref = ev.ref }, deadline_s = 3600 })
-for _, name in names do native.bucket.In.put(batch .. "/" .. name, docs[name]) end
+for _, name in names do native.store.In.put(batch .. "/" .. name, docs[name]) end
 
 -- ack (routed from an S3 event on "Acks/<batch>/<name>.json")
 native.barrier.ack(batch, name, { ok = true })
@@ -227,7 +227,7 @@ native.queue.send(msgs)
 
 -- shard (on_queue)
 local result = do_work(ev.chunk)
-native.bucket.Out.put(ev.flow .. "/" .. ev.shard .. ".json", native.json.encode(result))
+native.store.Out.put(ev.flow .. "/" .. ev.shard .. ".json", native.json.encode(result))
 if native.db.put_if_absent("flow-seen", ev.flow .. "/" .. ev.shard, true) then   -- once per shard
   local flow = native.db.get("flow", ev.flow)
   if native.db.add("flow-done", ev.flow) == flow.total

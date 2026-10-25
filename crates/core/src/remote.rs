@@ -44,7 +44,7 @@ impl Protocol {
     }
 }
 
-/// How to reach one remote store. Built from a `buckets.stores` entry.
+/// How to reach one remote store. Built from a `stores` entry.
 #[derive(Debug, Clone)]
 pub struct RemoteConfig {
     pub protocol: Protocol,

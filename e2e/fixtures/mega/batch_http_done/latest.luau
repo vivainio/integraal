@@ -6,7 +6,7 @@ local function handle(_ctx, event)
 	if not job then
 		return nil
 	end
-	native.bucket.Out.put("bhttp/" .. job.id, native.json.encode({
+	native.store.Out.put("bhttp/" .. job.id, native.json.encode({
 		ok = job.ok,
 		state = job.state,
 		a = { status = job.results.a.status, body = job:body("a") },

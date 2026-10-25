@@ -54,7 +54,7 @@ pub enum PresignMethod {
 /// Longest a presigned URL may live.
 pub const MAX_PRESIGN_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-/// What a tenant may do in one named bucket, granted by the `data` block of its `config.json`.
+/// What a tenant may do in one named store, granted by the `data` block of its `config.json`.
 ///
 /// Presigning is a capability handed to a third party, so it is granted separately from the
 /// script's own access: `upload` allows `presign_put`, `download` allows `presign_get`.
@@ -119,7 +119,7 @@ impl<'de> serde::Deserialize<'de> for Access {
     }
 }
 
-/// Byte limits on one bucket for a single invocation; `None` is unlimited.
+/// Byte limits on one store for a single invocation; `None` is unlimited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IoLimits {
     pub max_read_bytes: Option<u64>,
@@ -135,7 +135,7 @@ pub enum IoDir {
 /// Called with every chunk of I/O that actually happened, for accounting.
 pub type IoObserver = Arc<dyn Fn(IoDir, u64) + Send + Sync>;
 
-/// Bytes moved through one bucket during one invocation, shared by every clone of its scope
+/// Bytes moved through one store during one invocation, shared by every clone of its scope
 /// and by the streams it handed out.
 struct IoMeter {
     limits: IoLimits,
@@ -217,13 +217,13 @@ impl ObjectWriter for MeteredWriter {
     }
 }
 
-/// The buckets one invocation may use, by name.
-pub type BucketScopes = HashMap<String, BucketScope>;
+/// The stores one invocation may use, by name.
+pub type StoreScopes = HashMap<String, StoreScope>;
 
 /// A backend confined to one key prefix (`<base>/<tenant>/`). Scripts only ever
 /// see keys relative to it and cannot name anything outside.
 #[derive(Clone)]
-pub struct BucketScope {
+pub struct StoreScope {
     backend: Arc<dyn ObjectBackend>,
     prefix: String,
     max_object_bytes: usize,
@@ -231,7 +231,7 @@ pub struct BucketScope {
     meter: Option<Arc<IoMeter>>,
 }
 
-impl BucketScope {
+impl StoreScope {
     /// `prefix` must be empty or end with `/`. Starts with read and write access; narrow it with `with_access`.
     pub fn new(backend: Arc<dyn ObjectBackend>, prefix: impl Into<String>) -> Self {
         let prefix = prefix.into();
@@ -276,7 +276,7 @@ impl BucketScope {
         if self.access.read {
             Ok(())
         } else {
-            Err("this bucket is not readable for this tenant".into())
+            Err("this store is not readable for this tenant".into())
         }
     }
 
@@ -284,7 +284,7 @@ impl BucketScope {
         if self.access.write {
             Ok(())
         } else {
-            Err("this bucket is not writable for this tenant".into())
+            Err("this store is not writable for this tenant".into())
         }
     }
 
@@ -369,10 +369,10 @@ impl BucketScope {
     ) -> Result<String, String> {
         match method {
             PresignMethod::Get if !self.access.download => {
-                return Err("presigned downloads are not granted for this bucket".into())
+                return Err("presigned downloads are not granted for this store".into())
             }
             PresignMethod::Put if !self.access.upload => {
-                return Err("presigned uploads are not granted for this bucket".into())
+                return Err("presigned uploads are not granted for this store".into())
             }
             _ => {}
         }
@@ -384,7 +384,7 @@ impl BucketScope {
 
     pub fn delete(&self, key: &str) -> Result<(), String> {
         if !self.access.delete {
-            return Err("deleting is not granted for this bucket".into());
+            return Err("deleting is not granted for this store".into());
         }
         self.backend.delete(&self.full(key)?)
     }

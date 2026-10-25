@@ -60,7 +60,7 @@ def test_order_flow_end_to_end(stack, megalith):
     report = json.loads(eventually(lambda: stack.get("data-out", f"tenants/mega/reports/{flow}"), what="final report"))
     assert report == {"flow": flow, "orders": 4, "total": 150, "approved": True, "gather_runs": True}
 
-    # What happened on the way, as megalith and the buckets saw it.
+    # What happened on the way, as megalith and the stores saw it.
     crm = [q for q in megalith.requests if q["path"].startswith("/crm/")]
     assert sorted(q["path"] for q in crm) == [f"/crm/{o}" for o in sorted(orders)]
     assert all(q["headers"]["authorization"] == f"Bearer {SECRET}" for q in crm)

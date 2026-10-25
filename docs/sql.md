@@ -2,20 +2,20 @@
 
 `native.sql` gives a script a private **SQLite database in memory** for working data: staging a feed,
 deduplicating, joining, aggregating, keeping a run's bookkeeping. It lives only for the invocation, so
-there is nothing to share or clean up. To hand work to a later invocation, save it to a bucket and load
+there is nothing to share or clean up. To hand work to a later invocation, save it to a store and load
 it there.
 
 ```lua
 local db = native.sql.open()
 db:exec("create table seen (id text primary key, amount real)")
-for ev in native.xml.events(native.gzip.open(native.bucket.In.open("feed.xml.gz"))) do
+for ev in native.xml.events(native.gzip.open(native.store.In.open("feed.xml.gz"))) do
   if ev.type == "start" and ev.tag == "item" then
     db:exec("insert or ignore into seen values (?, ?)", { ev.attrs.id, tonumber(ev.attrs.amount) })
   end
 end
 
 -- keep it for later processing
-local out = native.bucket.Temp.create("job-42.db")
+local out = native.store.Temp.create("job-42.db")
 db:save(out)
 out:close()
 ```
@@ -23,7 +23,7 @@ out:close()
 A later invocation (a queue message, a callback) continues from the file:
 
 ```lua
-local db = native.sql.load(native.bucket.Temp.open("job-42.db"))
+local db = native.sql.load(native.store.Temp.open("job-42.db"))
 for _, row in db:query("select id, amount from seen order by amount desc limit 10") do ... end
 ```
 
@@ -37,7 +37,7 @@ for _, row in db:query("select id, amount from seen order by amount desc limit 1
 | `db:query(sql, params?)` | all result rows as an array of `{column = value}` tables. `NULL` columns are absent. Fails past 100 000 rows: add `LIMIT` or page through (`where id > ? order by id limit 1000`). |
 | `db:get(sql, params?)` | the first row, or `nil` |
 | `db:last_insert_id()` | rowid of the last insert |
-| `db:save(sink)` | streams the database file into a sink from `bucket.create`; `sink:close()` commits it. Returns the bytes written. |
+| `db:save(sink)` | streams the database file into a sink from `store.create`; `sink:close()` commits it. Returns the bytes written. |
 | `db:dump()` | the database file as a string, capped at `max_object_mb` |
 | `db:close()` | frees the database early |
 

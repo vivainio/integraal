@@ -1,1 +1,1 @@
-{"router":"router","buckets":{"In":"read","Out":"readwrite"},"http":{"allow":["https://api.example.com/v1/"]}}
+{"router":"router","stores":{"In":"read","Out":"readwrite"},"http":{"allow":["https://api.example.com/v1/"]}}

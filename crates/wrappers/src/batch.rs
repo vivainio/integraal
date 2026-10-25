@@ -1,7 +1,7 @@
 //! `native.batch`: hand a unit of work to a partner through a bucket and pick the answer up later.
 //!
 //! A job is a folder in the deployment's dedicated batch bucket (never one of the tenant's data
-//! buckets), under the tenant's own prefix:
+//! stores), under the tenant's own prefix:
 //!
 //! ```text
 //! <tenant>/jobs/<job>/request.json   written by the script; the partner reads it
@@ -30,12 +30,12 @@ use crate::{
     http_job::{self, Prepared},
     ndjson::Rows,
     xml::{ByteStream, Limited},
-    BucketScope, Budget, Deadline, HostContext,
+    Budget, Deadline, HostContext, StoreScope,
 };
 
-/// The `bucket` name carried by events and `delete` entries for the batch bucket. It is not a valid
-/// `buckets.stores` name, so it can never collide with one of the tenant's data buckets.
-pub const BATCH_BUCKET: &str = "$batch";
+/// The `store` name carried by events and `delete` entries for the batch bucket. It is not a valid
+/// `stores` name, so it can never collide with one of the tenant's data stores.
+pub const BATCH_STORE: &str = "$batch";
 const JOBS: &str = "jobs/";
 const STATES: &str = "state/";
 const MAX_QUERIES: usize = 64;
@@ -77,7 +77,7 @@ fn part_key_ok(k: &str) -> bool {
 }
 
 struct Ctx {
-    batch: Option<BucketScope>,
+    batch: Option<StoreScope>,
     /// For the trace index only; jobs work without it.
     db: Option<crate::DbScope>,
     budget: Arc<Budget>,
@@ -89,7 +89,7 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn scope(&self) -> mlua::Result<BucketScope> {
+    fn scope(&self) -> mlua::Result<StoreScope> {
         self.batch.clone().ok_or_else(|| {
             err("native.batch is not available: the tenant config needs \"batch\": true and the deployment a `batch` bucket")
         })
@@ -194,7 +194,7 @@ impl Draft {
 /// at shutdown, so exactly one of them writes it.
 #[derive(Default)]
 struct Inflight {
-    jobs: std::collections::HashMap<u64, (String, BucketScope)>,
+    jobs: std::collections::HashMap<u64, (String, StoreScope)>,
     next: u64,
     stopping: bool,
 }
@@ -205,7 +205,7 @@ fn inflight() -> std::sync::MutexGuard<'static, Inflight> {
     INFLIGHT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn put_done(scope: &BucketScope, id: &str, done: &Json) {
+fn put_done(scope: &StoreScope, id: &str, done: &Json) {
     let key = format!("{}done.json", job_dir(id));
     let body = serde_json::to_vec(done).expect("done.json serializes");
     if let Err(e) = scope.put(&key, body) {
@@ -249,7 +249,7 @@ fn fail_inflight(which: impl Fn(&str) -> bool) -> usize {
 
 /// Runs the job's requests on their own threads and, when all have finished, commits the results:
 /// bodies first, then `done.json`. A request that fails fails the job with `ok: false`.
-fn spawn_http(env: http_job::Env, scope: BucketScope, id: String, reqs: Vec<(String, Prepared)>) {
+fn spawn_http(env: http_job::Env, scope: StoreScope, id: String, reqs: Vec<(String, Prepared)>) {
     let token = {
         let mut g = inflight();
         if g.stopping {
@@ -290,7 +290,7 @@ fn spawn_http(env: http_job::Env, scope: BucketScope, id: String, reqs: Vec<(Str
 
 fn run_http(
     env: &http_job::Env,
-    scope: &BucketScope,
+    scope: &StoreScope,
     id: &str,
     reqs: Vec<(String, Prepared)>,
 ) -> Result<Json, String> {
@@ -335,7 +335,7 @@ fn run_http(
 
 struct Job {
     ctx: Arc<Ctx>,
-    scope: BucketScope,
+    scope: StoreScope,
     id: String,
     draft: Mutex<Draft>,
 }
@@ -706,7 +706,7 @@ struct Envelope {
     state: Json,
 }
 
-fn load_envelope(ctx: &Ctx, scope: &BucketScope, id: &str) -> mlua::Result<Option<Envelope>> {
+fn load_envelope(ctx: &Ctx, scope: &StoreScope, id: &str) -> mlua::Result<Option<Envelope>> {
     ctx.op()?;
     let Some(bytes) = scope.get(&state_key(id)).map_err(err)? else {
         return Ok(None);
@@ -750,13 +750,13 @@ fn load_envelope(ctx: &Ctx, scope: &BucketScope, id: &str) -> mlua::Result<Optio
 }
 
 /// The job an event is about: an explicit `{ job }`, or a `done.json` event from the batch bucket
-/// (`{ bucket = "$batch", key = "jobs/<job>/done.json" }`). Objects in a data bucket never qualify,
+/// (`{ store = "$batch", key = "jobs/<job>/done.json" }`). Objects in a data store never qualify,
 /// whatever their key.
 fn event_job(event: &Table) -> mlua::Result<Option<String>> {
     if let Some(job) = event.get::<Option<String>>("job")? {
         return Ok(token_ok(&job, 64).then_some(job));
     }
-    if event.get::<Option<String>>("bucket")?.as_deref() != Some(BATCH_BUCKET) {
+    if event.get::<Option<String>>("store")?.as_deref() != Some(BATCH_STORE) {
         return Ok(None);
     }
     Ok(event
@@ -807,7 +807,7 @@ struct Output {
 
 struct Hydrated {
     ctx: Arc<Ctx>,
-    scope: BucketScope,
+    scope: StoreScope,
     id: String,
     ok: bool,
     error: Option<String>,
@@ -952,7 +952,7 @@ impl<R: Read> Read for Verifying<R> {
 /// against the manifest at its end.
 fn open_part(
     ctx: &Ctx,
-    scope: &BucketScope,
+    scope: &StoreScope,
     id: &str,
     part: &Part,
 ) -> mlua::Result<Box<dyn Read + Send>> {
@@ -1132,13 +1132,13 @@ impl UserData for Hydrated {
             })
         });
 
-        // Every object of the job as `{ bucket, key }`, for a queue handler's `delete =` result
+        // Every object of the job as `{ store, key }`, for a queue handler's `delete =` result
         // (which takes at most 100; expire older jobs with a bucket lifecycle rule for bigger ones).
         methods.add_method("keys", |lua, this, ()| {
             let out = lua.create_table()?;
             let add = |key: String| -> mlua::Result<()> {
                 let t = lua.create_table()?;
-                t.set("bucket", BATCH_BUCKET)?;
+                t.set("store", BATCH_STORE)?;
                 t.set("key", key)?;
                 out.push(t)
             };
@@ -1192,7 +1192,7 @@ mod tests {
     #[test]
     fn shutdown_fails_a_running_job_once() {
         let mem = Arc::new(Mem::default());
-        let scope = BucketScope::new(mem.clone(), "t/");
+        let scope = StoreScope::new(mem.clone(), "t/");
         let token = {
             let mut g = inflight();
             g.next += 1;

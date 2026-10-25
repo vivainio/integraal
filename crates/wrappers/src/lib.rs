@@ -4,16 +4,15 @@
 //! Each version lives in its own module and is only ever extended, so
 //! existing tenant scripts keep working while newer versions ship.
 //!
-//! v1: `native.log`, `native.json`, `native.time`, and `native.bucket.<bucket>`
-//! (`get`/`put`/`delete`/`list`/`open` on the tenant's own prefix of each bucket its config grants), and
+//! v1: `native.log`, `native.json`, `native.time`, and `native.store.<name>`
+//! (`get`/`put`/`delete`/`list`/`open` on the tenant's own prefix of each store its config grants), and
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
 //! under the tenant's own partition keys, each expiring after a week), and `native.crypto`
-//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from buckets), and `native.queue` (send new work to the job queue), and `native.barrier` (wait for a known set of acknowledgements, then continue once).
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from stores), and `native.queue` (send new work to the job queue), and `native.barrier` (wait for a known set of acknowledgements, then continue once).
 
 mod barrier;
 mod batch;
-mod bucket;
 mod crypto;
 mod db;
 mod deadline;
@@ -26,6 +25,7 @@ mod ndjson;
 mod queue;
 mod sink;
 mod sql;
+mod store;
 mod telemetry;
 mod throttle;
 mod timer;
@@ -40,11 +40,7 @@ mod zip;
 mod zip_writer;
 
 pub use barrier::{AckOutcome, Barriers, CreateSpec, MAX_BARRIER_MEMBERS};
-pub use batch::{fail_inflight_http, BATCH_BUCKET};
-pub use bucket::{
-    Access, BucketScope, BucketScopes, IoDir, IoLimits, IoObserver, ObjectBackend, ObjectWriter,
-    PresignMethod, MAX_LIST_KEYS, MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
-};
+pub use batch::{fail_inflight_http, BATCH_STORE};
 pub use crypto::{MasterKey, MasterKeys};
 pub use db::{
     Callback, CallbackSigner, DbScope, Item, ItemBackend, Take, Taken, DB_TTL, MAX_ITEM_BYTES,
@@ -56,6 +52,10 @@ pub use http::{AllowRule, HttpPolicy};
 pub use queue::{
     OutMessage, QueueBackend, MAX_DELAY_SECS, MAX_MESSAGE_BYTES, MAX_SENT_PER_INVOCATION,
     SEND_CHUNK,
+};
+pub use store::{
+    Access, IoDir, IoLimits, IoObserver, ObjectBackend, ObjectWriter, PresignMethod, StoreScope,
+    StoreScopes, MAX_LIST_KEYS, MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
 };
 pub use throttle::{Slot, Throttle, ThrottleRule};
 pub use timer::{
@@ -143,10 +143,10 @@ pub type ScriptName = std::sync::Arc<std::sync::Mutex<String>>;
 pub struct HostContext {
     pub tenant: String,
     pub script: ScriptName,
-    /// Tenant-scoped object storage by bucket name, as granted by the tenant config; exposed as `native.bucket.<name>`.
-    pub buckets: BucketScopes,
+    /// Tenant-scoped object storage by store name, as granted by the tenant config; exposed as `native.store.<name>`.
+    pub stores: StoreScopes,
     /// The tenant's folder in the deployment's dedicated batch bucket; `native.batch` errors when absent.
-    pub batch: Option<BucketScope>,
+    pub batch: Option<StoreScope>,
     /// Tenant-scoped small item store with one-week expiry; `native.db` errors when absent.
     pub db: Option<DbScope>,
     /// The job queue behind `native.queue.send`; `native.queue` errors when absent.

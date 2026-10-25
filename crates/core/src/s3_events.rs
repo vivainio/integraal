@@ -94,16 +94,16 @@ pub fn disposition(failed: Vec<Value>, attempt: u32) -> Disposition {
 #[derive(Debug, Clone, Default)]
 pub struct S3Events {
     /// physical bucket name -> (logical name (`In`, ...), the store's prefix)
-    buckets: HashMap<String, (String, String)>,
+    stores: HashMap<String, (String, String)>,
     /// The dedicated batch bucket and its prefix, if configured.
     batch: Option<(String, String)>,
 }
 
 impl S3Events {
-    /// `buckets` are `(logical, physical, prefix)`.
-    pub fn new(buckets: impl IntoIterator<Item = (String, String, String)>) -> Self {
+    /// `stores` are `(logical, physical, prefix)`.
+    pub fn new(stores: impl IntoIterator<Item = (String, String, String)>) -> Self {
         Self {
-            buckets: buckets
+            stores: stores
                 .into_iter()
                 .map(|(logical, physical, prefix)| (physical, (logical, prefix)))
                 .collect(),
@@ -112,15 +112,15 @@ impl S3Events {
     }
 
     /// Also recognises notifications from the batch bucket (`physical`, tenant directories under
-    /// `prefix`). Their events carry `bucket = "$batch"`.
+    /// `prefix`). Their events carry `store = "$batch"`.
     pub fn with_batch(mut self, physical: impl Into<String>, prefix: impl Into<String>) -> Self {
         self.batch = Some((physical.into(), prefix.into()));
         self
     }
 
-    /// From the global config's `buckets` section.
+    /// From the global config's `stores` section.
     pub fn from_config(cfg: &crate::GlobalConfig) -> Self {
-        let events = Self::new(cfg.buckets.stores.iter().filter_map(|(name, store)| {
+        let events = Self::new(cfg.stores.iter().filter_map(|(name, store)| {
             let bucket = store.s3_bucket()?;
             Some((name.clone(), bucket.to_string(), store.prefix().to_string()))
         }));
@@ -131,8 +131,8 @@ impl S3Events {
     }
 
     /// One record -> one invocation (no script, so the tenant's router picks one) with
-    /// `event = { bucket, key, size, etag, event }`: `bucket` is the logical name and `key` is relative
-    /// to the tenant's prefix, so both can be passed straight to `native.bucket` or `delete`.
+    /// `event = { store, key, size, etag, event }`: `store` is the logical name and `key` is relative
+    /// to the tenant's prefix, so both can be passed straight to `native.store` or `delete`.
     /// `Ok(None)` means the record needs no processing (not a creation event, or a folder marker).
     pub fn invocation(&self, record: &Value) -> Result<Option<Invocation>, String> {
         let name = record
@@ -151,11 +151,11 @@ impl S3Events {
             .pointer("/object/key")
             .and_then(Value::as_str)
             .ok_or("record has no object key")?;
-        let (bucket, prefix) = match &self.batch {
-            Some((name, prefix)) if name == physical => (integraal_wrappers::BATCH_BUCKET, prefix),
+        let (store, prefix) = match &self.batch {
+            Some((name, prefix)) if name == physical => (integraal_wrappers::BATCH_STORE, prefix),
             _ => {
                 let (logical, prefix) = self
-                    .buckets
+                    .stores
                     .get(physical)
                     .ok_or_else(|| format!("bucket {physical:?} is not an s3 store"))?;
                 (logical.as_str(), prefix)
@@ -180,7 +180,7 @@ impl S3Events {
             trigger: Trigger::Queue,
             event: json!({
                 "type": "s3.object",
-                "bucket": bucket,
+                "store": store,
                 "key": relative,
                 "size": s3.pointer("/object/size").cloned().unwrap_or(Value::Null),
                 "etag": s3.pointer("/object/eTag").cloned().unwrap_or(Value::Null),
@@ -260,9 +260,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(inv.tenant, "acme");
-        assert_eq!(inv.event["bucket"], "$batch");
+        assert_eq!(inv.event["store"], "$batch");
         assert_eq!(inv.event["key"], "jobs/j1/done.json");
-        // The data prefix does not apply to it, nor the batch prefix to data buckets.
+        // The data prefix does not apply to it, nor the batch prefix to data stores.
         assert!(ev
             .invocation(&record("acme-batch", "tenants/acme/x"))
             .is_err());
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(inv.trigger, Trigger::Queue);
         assert_eq!(
             inv.event,
-            json!({"type":"s3.object","bucket":"In","key":"incoming/my file+1.xml","size":12,"etag":"abc","event":"ObjectCreated:Put"})
+            json!({"type":"s3.object","store":"In","key":"incoming/my file+1.xml","size":12,"etag":"abc","event":"ObjectCreated:Put"})
         );
     }
 

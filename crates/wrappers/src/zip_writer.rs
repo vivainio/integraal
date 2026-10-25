@@ -1,5 +1,5 @@
 //! `native.zip.writer(sink?)`: writes a zip archive in a single forward pass, so the archive can
-//! be larger than memory and go straight into a bucket sink.
+//! be larger than memory and go straight into a store sink.
 //!
 //! Entries are deflated and carry their sizes in trailing data descriptors (zip64 sized), so
 //! nothing has to be known up front and no seeking is needed. Without a sink the archive is
@@ -70,7 +70,7 @@ impl Writer {
             Target::Mem { buf, cap } => {
                 if buf.len() + data.len() > *cap {
                     return Err(
-                        "zip exceeds the object size limit; write into a bucket sink to stream it"
+                        "zip exceeds the object size limit; write into a store sink to stream it"
                             .into(),
                     );
                 }

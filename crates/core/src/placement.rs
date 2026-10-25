@@ -2,7 +2,7 @@
 //!
 //! A tenant's `config.json` can name a static `placement.class`, and optionally a placement script
 //! whose `on_place`/`place` handler picks a class per message. Scripts run here under a stripped
-//! sandbox (no buckets, table, vault or HTTP) with a tiny time and heap budget, and whatever they
+//! sandbox (no stores, table, vault or HTTP) with a tiny time and heap budget, and whatever they
 //! return is checked against the tenant's allowed classes. Placement never fails a message: on any
 //! problem the tenant's static class (or none, meaning the deployment default) is used instead.
 //!
@@ -222,7 +222,7 @@ fn build_placer(
         max_data_ops: 0,
         ..Limits::default()
     };
-    // Only `vars` carries over: no http policy and no buckets, so the native API has nothing to reach.
+    // Only `vars` carries over: no http policy and no stores, so the native API has nothing to reach.
     let stripped = TenantConfig {
         vars: config.vars.clone(),
         ..TenantConfig::default()

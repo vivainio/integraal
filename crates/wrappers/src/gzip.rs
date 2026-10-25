@@ -1,6 +1,6 @@
 //! `native.gzip`: streaming gzip over the same byte streams and sinks as the rest of the API.
 //!
-//! `open` decompresses a stream on the fly, `writer` compresses into a bucket sink (or memory),
+//! `open` decompresses a stream on the fly, `writer` compresses into a store sink (or memory),
 //! and `compress`/`decompress` handle small strings.
 
 use std::{
@@ -58,7 +58,7 @@ impl Write for Target {
             Target::Mem { buf, cap } => {
                 if buf.len() + data.len() > *cap {
                     return Err(io::Error::other(
-                        "gzip output exceeds the object size limit; write into a bucket sink to stream it",
+                        "gzip output exceeds the object size limit; write into a store sink to stream it",
                     ));
                 }
                 buf.extend_from_slice(data);

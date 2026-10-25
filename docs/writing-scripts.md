@@ -88,7 +88,7 @@ local csv   = require("@shared/csv@2.1.0")   -- global shared library, pinned ve
 - `os` and `io` are not available; everything external goes through `native`. `require` only loads modules (see [Modules](#modules)).
 - Globals are read-only; keep state in locals.
 - Each invocation starts with an empty VM, so there is no state between calls. Persist with
-  `native.bucket.Out` (or another bucket your tenant is granted).
+  `native.store.Out` (or another store your tenant is granted).
 
 ## Example: parse a large XML feed
 
@@ -96,7 +96,7 @@ local csv   = require("@shared/csv@2.1.0")   -- global shared library, pinned ve
 --!strict
 --!runtime 1
 local function handle(ctx: Context, event: { key: string })
-  local stream = native.bucket.In.open(event.key)
+  local stream = native.store.In.open(event.key)
   if not stream then
     return { entries = 0, found = false }
   end

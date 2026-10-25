@@ -15,7 +15,7 @@ deletes are implemented; the rest of the pipeline is not.
 ## Barriers
 - Growing a barrier after `create` (`add` and a `seal`), for work lists larger than one invocation's
   `max_data_ops`.
-- `reconcile`: ack members whose bucket object already exists, to recover a lost notification.
+- `reconcile`: ack members whose object already exists, to recover a lost notification.
 
 ## Schedules and timers
 - `native.timer` for scripts: `at`/`after` and `cancel`, on the [timers](schedules.md#timers) the
@@ -34,5 +34,5 @@ deletes are implemented; the rest of the pipeline is not.
 ## Native API
 - XPath variable binding for `native.xml.parse` (`$name` references, so script data never has to be
   concatenated into an expression); waits on [uppsala#65](https://github.com/kushaldas/uppsala/pull/65).
-- Streaming writers (`native.bucket.writer`) for large outputs.
+- Streaming writers (`native.store.writer`) for large outputs.
 - `native.secrets` backed by Secrets Manager / SSM.

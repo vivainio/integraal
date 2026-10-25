@@ -1,6 +1,6 @@
 //! `native.xml.writer(sink?, opts?)`: a streaming XML generator. Text and attribute values are
 //! escaped, names are validated and well-formedness (balanced tags, a single root) is enforced,
-//! so a script cannot emit a broken document by accident. Output goes straight into a bucket
+//! so a script cannot emit a broken document by accident. Output goes straight into a store
 //! sink, or is built in memory (capped at the object size limit) and returned by `finish()`.
 
 use std::sync::Mutex;
@@ -253,7 +253,7 @@ impl Writer {
             Target::Mem { cap } => {
                 if self.buf.len() > *cap {
                     return Err(
-                        "document exceeds the object size limit; write into a bucket sink to stream it"
+                        "document exceeds the object size limit; write into a store sink to stream it"
                             .into(),
                     );
                 }
