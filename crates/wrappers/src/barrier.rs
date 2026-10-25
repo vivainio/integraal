@@ -224,6 +224,7 @@ impl Barriers {
                 .put_if_free(&pk, item(&format!("{PENDING}{m}"), "1".into(), ttl), now)?;
         }
         let stored = self.header(&pk)?;
+        self.db.index_trace("barrier", &id, &stored.trace, ttl);
         // Registered from the stored header, so a create that is repeated after a crash arms the same timer.
         if let (Some(due), Some(_)) = (stored.due_s, &self.queue) {
             let payload = Payload {
@@ -717,7 +718,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(tracer.tracer("test")));
         tracing::subscriber::with_default(subscriber, || {
-            let (b, _, sent) = setup();
+            let (b, mem, sent) = setup();
             let created = tracing::info_span!("create").in_scope(|| {
                 b.create(spec("t1", &["a"])).unwrap();
                 inject_current()
@@ -732,6 +733,10 @@ mod tests {
             assert!(trace["traceparent"].starts_with("00-"));
             let id = |t: &TraceContext| t["traceparent"].split('-').nth(1).unwrap().to_string();
             assert_eq!(id(trace), id(&created));
+            // Creating it also left a row that finds the barrier by its trace.
+            let found = crate::trace_index::list(&*mem, "acme", &id(&created), 10).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!((found[0].0.as_str(), found[0].1.as_str()), ("barrier", "t1"));
         });
     }
 

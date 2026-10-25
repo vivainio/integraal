@@ -255,7 +255,7 @@ pub fn sweep(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{collections::BTreeMap, sync::Mutex};
 

@@ -360,6 +360,45 @@ impl Engine {
             .collect())
     }
 
+    /// What `tenant`'s flow `trace_id` is waiting on, as far as it is indexed (see
+    /// `integraal_wrappers::list_trace_index`): its timers, and the barriers, callbacks and batch jobs
+    /// created in it that still exist. A batch job reports `done` once the partner's `done.json` is
+    /// there. `covers` names what the answer includes: batch jobs are indexed only where the tenant
+    /// also has a db, and an index row that could not be written is missing.
+    pub fn pending(&self, tenant: &str, trace_id: &str) -> Result<serde_json::Value, String> {
+        use serde_json::json;
+        let timers = self.pending_timers(tenant, trace_id)?;
+        let db = self.item_backend().ok_or("the config has no db")?;
+        let now = now_ms() / 1000;
+        let (mut barriers, mut callbacks, mut batches) = (vec![], vec![], vec![]);
+        for (kind, id, created_s) in
+            integraal_wrappers::list_trace_index(&*db, tenant, trace_id, 10_000)?
+        {
+            match kind.as_str() {
+                "barrier" => {
+                    barriers.extend(integraal_wrappers::describe_barrier(&*db, tenant, &id, now)?)
+                }
+                "callback" => {
+                    callbacks.extend(integraal_wrappers::describe_callback(&*db, tenant, &id, now)?)
+                }
+                "batch" => {
+                    let done = match &self.batch {
+                        Some((backend, base)) => backend
+                            .get(&format!("{base}{tenant}/jobs/{id}/done.json"))?
+                            .is_some(),
+                        None => false,
+                    };
+                    batches.push(json!({ "kind": "batch", "id": id, "created_s": created_s, "done": done }));
+                }
+                _ => {}
+            }
+        }
+        Ok(json!({
+            "covers": ["timers", "barriers", "callbacks", "batch"],
+            "timers": timers, "barriers": barriers, "callbacks": callbacks, "batch": batches,
+        }))
+    }
+
     /// The flow log store, for reading flows back.
     pub fn flow_logs(&self) -> Option<&crate::flow_log::FlowLogSink> {
         self.flow_logs.as_ref()
@@ -1783,6 +1822,37 @@ pub(crate) mod tests {
 
         e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
         assert!(e.running().is_empty());
+    }
+
+    #[test]
+    fn pending_lists_what_the_index_points_to_and_drops_what_is_gone() {
+        let backend = Arc::new(MemItems::default());
+        let e = engine("return {}", Limits::default()).with_db(backend.clone());
+        let a = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let trace = std::collections::BTreeMap::from([(
+            "traceparent".to_string(),
+            format!("00-{a}-00f067aa0ba902b7-01"),
+        )]);
+        let far = now_ms() / 1000 + 1000;
+        let put = |pk: &str, sk: &str, value: &str| {
+            backend
+                .put(pk, integraal_wrappers::Item { sk: sk.into(), value: value.into(), ttl: far })
+                .unwrap();
+        };
+        // a barrier with one of two members still pending, and a callback
+        put("TEN#acme#\u{1}barrier#b1", "", r#"{"total":2,"ready":true,"due_s":5,"then":"next"}"#);
+        put("TEN#acme#\u{1}barrier#b1", "p#m2", "1");
+        put("TEN#acme#cb#c1", "", "{}");
+        for (kind, id) in [("barrier", "b1"), ("callback", "c1"), ("callback", "taken"), ("batch", "j1")] {
+            integraal_wrappers::trace_index::record(&*backend, "acme", &trace, kind, id, far, 10);
+        }
+        let got = e.pending("acme", a).unwrap();
+        assert_eq!(got["barriers"][0]["pending"], 1);
+        assert_eq!(got["barriers"][0]["then"], "next");
+        assert_eq!(got["callbacks"].as_array().unwrap().len(), 1, "a taken callback is gone");
+        assert_eq!(got["callbacks"][0]["id"], "c1");
+        assert_eq!(got["batch"][0]["done"], false);
+        assert!(e.pending("other", a).unwrap()["barriers"].as_array().unwrap().is_empty());
     }
 
     #[derive(Default)]

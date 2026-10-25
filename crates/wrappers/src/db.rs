@@ -178,7 +178,12 @@ impl DbScope {
     /// read or forge barrier rows through `native.db`.
     pub(crate) fn barrier_pk(&self, id: &str) -> Result<String, String> {
         check("barrier id", id, false)?;
-        Ok(format!("TEN#{}#\u{1}barrier#{id}", self.tenant))
+        Ok(barrier_partition(&self.tenant, id))
+    }
+
+    /// Writes the trace index row for work just created here (see `trace_index`); best effort.
+    pub(crate) fn index_trace(&self, kind: &str, id: &str, trace: &crate::trace::TraceContext, ttl: u64) {
+        crate::trace_index::record(&*self.backend, &self.tenant, trace, kind, id, ttl, now_secs());
     }
 
     pub(crate) fn raw(&self) -> &Arc<dyn ItemBackend> {
@@ -360,6 +365,16 @@ fn callback_pk(id: &str) -> String {
     format!("cb#{id}")
 }
 
+/// Full partition key of a tenant's callback row.
+pub(crate) fn callback_partition(tenant: &str, id: &str) -> String {
+    format!("TEN#{tenant}#{}", callback_pk(id))
+}
+
+/// Full partition key of a tenant's barrier.
+pub(crate) fn barrier_partition(tenant: &str, id: &str) -> String {
+    format!("TEN#{tenant}#\u{1}barrier#{id}")
+}
+
 impl DbScope {
     /// Replaces the signer (the engine shares one across tenants so the key is read once per process).
     pub fn with_signer(mut self, signer: Arc<CallbackSigner>) -> Self {
@@ -382,6 +397,7 @@ impl DbScope {
         .to_string();
         self.put_for(&callback_pk(&id), "", value, ttl)?;
         let exp = now_secs() + ttl.min(DB_TTL).as_secs();
+        self.index_trace("callback", &id, &crate::trace::inject_current(), exp);
         self.signer.sign(&self.tenant, &id, exp)
     }
 

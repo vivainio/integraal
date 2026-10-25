@@ -29,6 +29,7 @@ mod sql;
 mod telemetry;
 mod throttle;
 mod timer;
+pub mod trace_index;
 pub mod trace;
 mod v1;
 mod vault;
@@ -60,6 +61,9 @@ pub use throttle::{Slot, Throttle, ThrottleRule};
 pub use timer::{
     cancel as cancel_timer, list as list_timers, register as register_timer, sweep as sweep_timers,
     Payload as TimerPayload, Pending as PendingTimer, SweepReport, MAX_TIMER_AHEAD_SECS,
+};
+pub use trace_index::{
+    default_ttl as trace_index_ttl, describe_barrier, describe_callback, list as list_trace_index,
 };
 pub use vault::{Vault, VaultEntry, MAX_SECRET_BYTES, MIN_SECRET_BYTES};
 pub use xml::{ByteStream, MAX_STREAM_BYTES};

@@ -78,6 +78,8 @@ fn part_key_ok(k: &str) -> bool {
 
 struct Ctx {
     batch: Option<BucketScope>,
+    /// For the trace index only; jobs work without it.
+    db: Option<crate::DbScope>,
     budget: Arc<Budget>,
     max_stream: u64,
     max_line: usize,
@@ -102,6 +104,7 @@ pub fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<T
     let limits = &host.limits;
     let ctx = Arc::new(Ctx {
         batch: host.batch.clone(),
+        db: host.db.clone(),
         budget,
         max_stream: limits.max_stream_bytes,
         max_line: limits.max_object_bytes,
@@ -592,6 +595,9 @@ impl UserData for Job {
                     .map_err(err)?;
             }
             d.submitted = true;
+            if let Some(db) = &this.ctx.db {
+                db.index_trace("batch", &this.id, &crate::trace::inject_current(), crate::trace_index::default_ttl(now / 1000));
+            }
             if !d.http.is_empty() {
                 let env = this.ctx.http.clone().expect("job:http needs the executor");
                 spawn_http(

@@ -99,7 +99,7 @@ so only processes on the same host (or its container) can connect. From elsewher
 | `GET /flows/{tenant}?day=yyyy-mm-dd` | the flows that started that UTC day (default today) |
 | `GET /flows/{tenant}/{trace}?since=<ms>` | the merged log; `since` keeps only later lines, for tailing |
 | `GET /flows/{tenant}/{trace}/summary` | one row per invocation: script, outcome, duration, error, log line count, failed http calls; `outcome` is `null` when the invocation wrote no footer |
-| `GET /flows/{tenant}/{trace}/state` | `{"covers": ["timers"], "timers": [...]}`: the flow's pending timers, soonest first, including barrier deadlines |
+| `GET /flows/{tenant}/{trace}/state` | what the flow is waiting on: `timers` (including barrier deadlines), `barriers` (members `total` and `pending`, `due_s`, `then`), `callbacks` (`expires_s`) and `batch` jobs (`done` once the partner's `done.json` exists) |
 | `GET /running` | the invocations in flight in this process (tenant, script, trigger, attempt, trace id, span id, `start_ms`, `running_ms`), longest-running first |
 
 Two limits to know when reading these:
@@ -107,10 +107,12 @@ Two limits to know when reading these:
 - `running` lists only this process's invocations. A flow log segment is written when an invocation
   ends, so a running invocation shows up here and not in `flow`; match them by trace id. Other
   servers and Lambdas have their own lists, and the Lambda has no local API.
-- `state` lists only timers. They sit in one sorted partition, so they can be filtered by the trace
-  stored with them. Barriers, callbacks and batch jobs are keyed by their own ids, so there is no
-  way to ask "which of those belong to this trace" without scanning the table. `covers` says what the
-  answer includes; an empty list does not mean nothing is pending.
+- `state` finds barriers, callbacks and batch jobs through an index row (`SYS#trace#<trace id>`) that
+  creating them writes next to the work itself. The row is best effort and expires with the work, so
+  a barrier or callback whose row could not be written is missing from the answer, and `state` lists
+  only work that still exists (a taken callback or an expired barrier is gone). Batch jobs are
+  indexed only for tenants that also have `db`, and only when the job is submitted. `covers` names
+  what the answer includes.
 
 `integraal-client` is a thin wrapper that prints each response as it came (`INTEGRAAL_URL`
 overrides `http://127.0.0.1:9091`):

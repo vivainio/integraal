@@ -134,7 +134,7 @@ async fn flow_command(cfg: &GlobalConfig, args: &[String]) -> anyhow::Result<()>
 /// - `GET /flows/{tenant}?day=yyyy-mm-dd`          flows that started that UTC day (default: today)
 /// - `GET /flows/{tenant}/{trace}?since=<ms>`      the merged log; `since` keeps only later lines
 /// - `GET /flows/{tenant}/{trace}/summary`         one row per invocation
-/// - `GET /flows/{tenant}/{trace}/state`           pending timers (incl. barrier deadlines) of the flow
+/// - `GET /flows/{tenant}/{trace}/state`           what the flow is waiting on: timers, barriers, callbacks, batch jobs
 /// - `GET /running`                                invocations in flight in this process
 fn local_router(engine: Engine) -> Router {
     let sink = engine
@@ -162,9 +162,7 @@ async fn local_state(
     Path((tenant, trace)): Path<(String, String)>,
 ) -> AdminResult {
     blocking_read(move || {
-        let timers = engine.pending_timers(&tenant, &trace)?;
-        // Only timers are indexed by trace; say so, so an empty answer is not read as "nothing pending".
-        Ok(json!({ "covers": ["timers"], "timers": timers }))
+        engine.pending(&tenant, &trace)
     })
     .await
 }
