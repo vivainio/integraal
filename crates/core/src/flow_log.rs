@@ -198,6 +198,11 @@ pub fn summarize(lines: &[Value]) -> Value {
                 for k in ["outcome", "duration_ms", "error"] {
                     r[k] = l[k].clone();
                 }
+                if let Some(f) = l.get("failure") {
+                    r["failure"] = serde_json::json!({
+                        "kind": f["kind"], "frame": f["frames"][0],
+                    });
+                }
             }
             Some("log") => r["log_lines"] = (r["log_lines"].as_u64().unwrap_or(0) + 1).into(),
             Some("http") if !(200..400).contains(&l["status"].as_u64().unwrap_or(0)) => {

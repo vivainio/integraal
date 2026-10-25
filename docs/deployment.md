@@ -13,6 +13,7 @@ process at startup.
   "buckets":   { "prefix": "tenants/", "map": { "In": "acme-in", "Out": "acme-out", "Backup": "acme-bak", "Temp": "acme-tmp" } },
   "batch":     { "bucket": "partner-batch", "prefix": "tenants/" },
   "flow_logs": { "bucket": "acme-flow-logs", "prefix": "" },
+  "debug": { "dir": "/var/lib/integraal/debug", "bucket": "acme-debug", "prefix": "", "retention_hours": 48 },
   "db":        { "table": "integraal" },
   "callbacks": { "base_url": "https://hooks.example.com" },
   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
@@ -35,6 +36,7 @@ process at startup.
 | `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |
 | `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
 | `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
+| `debug.dir`, `debug.bucket`, `debug.prefix`, `debug.retention_hours` | server (`dir`, `bucket`), Lambda (`bucket`) | where [debug captures](observability.md#debug-captures) of watched scripts go: a directory, a bucket, or both. The bucket must not be any other bucket; scripts cannot reach it. `dir` is refused on Lambda. The process needs `s3:PutObject`, and `s3:ListBucket` and `s3:GetObject` to read captures back |
 | `local_api.port` | server | read-only [flow log queries](observability.md#local-query-api) on `127.0.0.1` only, no token. Requires `flow_logs` |
 | `admin.port`, `admin.token_env` | server | operator API for the [credential vault](#vault) on its own port. Requires `db` and `crypto` |
 | `flow_logs.bucket`, `flow_logs.prefix` | server, Lambda | the dedicated bucket for [flow logs](observability.md#flow-logs) of tenants that enable them; not a data bucket, and scripts cannot reach it. The process needs `s3:PutObject` (and `s3:ListBucket`, `s3:GetObject` to read flows back) |

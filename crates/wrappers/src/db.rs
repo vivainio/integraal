@@ -182,8 +182,22 @@ impl DbScope {
     }
 
     /// Writes the trace index row for work just created here (see `trace_index`); best effort.
-    pub(crate) fn index_trace(&self, kind: &str, id: &str, trace: &crate::trace::TraceContext, ttl: u64) {
-        crate::trace_index::record(&*self.backend, &self.tenant, trace, kind, id, ttl, now_secs());
+    pub(crate) fn index_trace(
+        &self,
+        kind: &str,
+        id: &str,
+        trace: &crate::trace::TraceContext,
+        ttl: u64,
+    ) {
+        crate::trace_index::record(
+            &*self.backend,
+            &self.tenant,
+            trace,
+            kind,
+            id,
+            ttl,
+            now_secs(),
+        );
     }
 
     pub(crate) fn raw(&self) -> &Arc<dyn ItemBackend> {

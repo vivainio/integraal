@@ -10,6 +10,7 @@
 //!   "buckets":   { "prefix": "tenants/", "map": { "In": "data-in", "Out": "data-out" } },
 //!   "batch":     { "bucket": "partner-batch", "prefix": "tenants/" },
 //!   "flow_logs": { "bucket": "integraal-flow-logs", "prefix": "" },
+//!   "debug":     { "dir": "/var/lib/integraal/debug", "bucket": "integraal-debug", "prefix": "", "retention_hours": 48 },
 //!   "db":        { "table": "integraal" },
 //!   "callbacks": { "base_url": "https://hooks.example.com" },
 //!   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
@@ -48,6 +49,10 @@ pub struct GlobalConfig {
     /// tenant data buckets (scripts cannot reach it).
     #[serde(default)]
     pub flow_logs: Option<FlowLogsConfig>,
+    /// Where the captures of tenants with a `debug` section go: a directory, a bucket, or both.
+    /// Kept apart from every other bucket, because captures may hold tenant data.
+    #[serde(default)]
+    pub debug: Option<DebugSinkConfig>,
     /// DynamoDB table behind `native.db` and `native.callback`.
     #[serde(default)]
     pub db: Option<DbConfig>,
@@ -123,6 +128,27 @@ pub struct FlowLogsConfig {
     /// Base prefix; empty or ending with `/`. A tenant's logs are `<prefix><tenant>/flows/...`.
     #[serde(default)]
     pub prefix: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DebugSinkConfig {
+    /// Directory on the host (server only; Lambda's disk is gone after the invocation).
+    #[serde(default)]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+    /// Base prefix in the bucket and in the directory; empty or ending with `/`.
+    #[serde(default)]
+    pub prefix: String,
+    /// Captures in `dir` older than this are deleted (hourly sweep). Bucket captures expire with a
+    /// lifecycle rule on `<prefix><tenant>/captures/`. Default 48.
+    #[serde(default = "default_retention_hours")]
+    pub retention_hours: u64,
+}
+
+fn default_retention_hours() -> u64 {
+    48
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -296,6 +322,29 @@ impl GlobalConfig {
                 );
             }
         }
+        if let Some(d) = &self.debug {
+            if d.dir.is_none() && d.bucket.is_none() {
+                return Err("debug needs a dir, a bucket or both".into());
+            }
+            if d.dir.as_deref() == Some("") || d.bucket.as_deref() == Some("") {
+                return Err("debug.dir and debug.bucket must not be empty".into());
+            }
+            if !(d.prefix.is_empty() || d.prefix.ends_with('/')) {
+                return Err("debug.prefix must be empty or end with '/'".into());
+            }
+            if let Some(b) = &d.bucket {
+                if self.buckets.map.values().any(|x| x == b)
+                    || self.batch.as_ref().is_some_and(|x| &x.bucket == b)
+                    || self.flow_logs.as_ref().is_some_and(|x| &x.bucket == b)
+                    || &self.scripts.bucket == b
+                {
+                    return Err(
+                        "debug.bucket must not also be a data, batch, flow log or script bucket"
+                            .into(),
+                    );
+                }
+            }
+        }
         if self
             .callbacks
             .as_ref()
@@ -397,6 +446,20 @@ impl GlobalConfig {
         if let Some(f) = &self.flow_logs {
             let backend = crate::S3Backend::from_env(&f.bucket).await;
             engine = engine.with_flow_logs(Arc::new(backend), f.prefix.clone());
+        }
+        if let Some(d) = &self.debug {
+            let mut backends: Vec<Arc<dyn integraal_wrappers::ObjectBackend>> = Vec::new();
+            if let Some(dir) = &d.dir {
+                if std::env::var_os("AWS_LAMBDA_FUNCTION_NAME").is_some() {
+                    return Err("debug.dir cannot be used on Lambda (its disk does not outlive the invocation); use debug.bucket".into());
+                }
+                backends.push(Arc::new(crate::debug::FsBackend::new(dir)));
+            }
+            if let Some(b) = &d.bucket {
+                backends.push(Arc::new(crate::S3Backend::from_env(b).await));
+            }
+            engine =
+                engine.with_debug_sink(crate::debug::DebugSink::new(backends, d.prefix.clone()));
         }
         if let Some(db) = &self.db {
             engine = engine.with_db(Arc::new(crate::DynamoBackend::from_env(&db.table).await));
@@ -513,6 +576,15 @@ mod tests {
         assert!(
             bad(r#""buckets": {"map": {"In": "same"}}, "flow_logs": {"bucket": "same"}"#),
             "flow log bucket shared with a data bucket"
+        );
+        assert!(bad(r#""debug": {}"#), "debug without a place to write");
+        assert!(
+            bad(r#""debug": {"bucket": "same"}, "flow_logs": {"bucket": "same"}"#),
+            "debug bucket shared with the flow log bucket"
+        );
+        assert!(
+            !bad(r#""debug": {"dir": "/tmp/d", "bucket": "dbg", "prefix": "c/"}"#),
+            "a valid debug section"
         );
         assert!(
             bad(r#""crypto": {"keys": {"1": "K"}, "active": 2}"#),

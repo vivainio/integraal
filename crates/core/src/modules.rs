@@ -21,6 +21,7 @@ const MAX_MODULES: usize = 64;
 pub(crate) struct ModuleHost {
     pub(crate) loader: Arc<CachedLoader>,
     pub(crate) handle: tokio::runtime::Handle,
+    pub(crate) debug: Option<crate::debug::DebugRun>,
 }
 
 /// Maps a `require` argument to the object it names.
@@ -72,7 +73,13 @@ pub(crate) fn install(lua: &Lua, host: ModuleHost, tenant: &str) -> mlua::Result
         let result = lua
             .load(&module.source)
             .set_name(format!("={id}"))
-            .eval::<Value>();
+            .into_function()
+            .and_then(|f| {
+                if let Some(d) = &host.debug {
+                    d.register(&id, &f);
+                }
+                f.call::<Value>(())
+            });
         loading.set(id.as_str(), Value::Nil)?;
         let value = match result? {
             Value::Nil => Value::Boolean(true), // a module that returns nothing still counts as loaded

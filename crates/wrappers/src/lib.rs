@@ -29,8 +29,8 @@ mod sql;
 mod telemetry;
 mod throttle;
 mod timer;
-pub mod trace_index;
 pub mod trace;
+pub mod trace_index;
 mod v1;
 mod vault;
 mod xml;
@@ -50,7 +50,7 @@ pub use db::{
     Callback, CallbackSigner, DbScope, Item, ItemBackend, Take, Taken, DB_TTL, MAX_ITEM_BYTES,
     MAX_LOCK_LEASE, MAX_QUERY_ITEMS,
 };
-pub use deadline::Deadline;
+pub use deadline::{Deadline, TIMEOUT as TIMEOUT_MARKER};
 pub use flow_log::{now_ms, FlowLog};
 pub use http::{AllowRule, HttpPolicy};
 pub use queue::{

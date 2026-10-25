@@ -12,7 +12,11 @@ use integraal_wrappers::{
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, VmState};
 
-use crate::{Error, Invocation, Trigger};
+use crate::{
+    debug::{Capture, DebugRun},
+    failure::{CaptureSlot, Failure, Kind},
+    Error, Invocation, Trigger,
+};
 use integraal_wrappers::{now_ms, FlowLog};
 
 #[derive(Debug, Clone)]
@@ -148,6 +152,10 @@ pub struct TenantConfig {
     /// `integraal.json`), grouped by trace id.
     #[serde(default)]
     pub flow_logs: bool,
+    /// Deep diagnostics for watched scripts (or the whole tenant): coverage, a sampling profile,
+    /// the input event and the structured failure, written to the deployment's debug sink.
+    #[serde(default)]
+    pub debug: Option<crate::debug::DebugConfig>,
     /// Script whose `on_route`/`route` handler picks the script for messages that don't name one.
     #[serde(default)]
     pub router: Option<String>,
@@ -204,6 +212,7 @@ pub struct Engine {
     background_http: bool,
     master_keys: Option<MasterKeys>,
     flow_logs: Option<crate::flow_log::FlowLogSink>,
+    debug_sink: Option<crate::debug::DebugSink>,
     /// Invocations in flight in this process, by span id; see `Engine::running`.
     running: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
 }
@@ -234,6 +243,7 @@ pub(crate) struct Services {
     background_http: bool,
     master_keys: Option<MasterKeys>,
     flow_log: Option<FlowLog>,
+    debug: Option<DebugRun>,
     vault: Option<Arc<Vault>>,
     /// Source for `require`; absent in VMs that run no tenant code of their own.
     modules: Option<crate::modules::ModuleHost>,
@@ -254,6 +264,7 @@ impl Engine {
             background_http: false,
             master_keys: None,
             flow_logs: None,
+            debug_sink: None,
             running: Arc::default(),
         }
     }
@@ -318,6 +329,17 @@ impl Engine {
         self
     }
 
+    /// Where the captures of watched scripts go (tenants with a `debug` section). Not the flow log
+    /// bucket: captures may hold tenant data.
+    pub fn with_debug_sink(mut self, sink: crate::debug::DebugSink) -> Self {
+        self.debug_sink = Some(sink);
+        self
+    }
+
+    pub fn debug_sink(&self) -> Option<&crate::debug::DebugSink> {
+        self.debug_sink.as_ref()
+    }
+
     /// The invocations in flight in this process, longest-running first: tenant, script, trigger,
     /// attempt, trace and span id, start time and how long they have run. Another server or Lambda
     /// has its own list.
@@ -329,7 +351,9 @@ impl Engine {
             .map(|m| m.values().cloned().collect())
             .unwrap_or_default();
         for r in &mut rows {
-            r["running_ms"] = now.saturating_sub(r["start_ms"].as_u64().unwrap_or(now)).into();
+            r["running_ms"] = now
+                .saturating_sub(r["start_ms"].as_u64().unwrap_or(now))
+                .into();
         }
         rows.sort_by_key(|r| r["start_ms"].as_u64().unwrap_or(0));
         rows
@@ -375,12 +399,12 @@ impl Engine {
             integraal_wrappers::list_trace_index(&*db, tenant, trace_id, 10_000)?
         {
             match kind.as_str() {
-                "barrier" => {
-                    barriers.extend(integraal_wrappers::describe_barrier(&*db, tenant, &id, now)?)
-                }
-                "callback" => {
-                    callbacks.extend(integraal_wrappers::describe_callback(&*db, tenant, &id, now)?)
-                }
+                "barrier" => barriers.extend(integraal_wrappers::describe_barrier(
+                    &*db, tenant, &id, now,
+                )?),
+                "callback" => callbacks.extend(integraal_wrappers::describe_callback(
+                    &*db, tenant, &id, now,
+                )?),
                 "batch" => {
                     let done = match &self.batch {
                         Some((backend, base)) => backend
@@ -388,7 +412,9 @@ impl Engine {
                             .is_some(),
                         None => false,
                     };
-                    batches.push(json!({ "kind": "batch", "id": id, "created_s": created_s, "done": done }));
+                    batches.push(
+                        json!({ "kind": "batch", "id": id, "created_s": created_s, "done": done }),
+                    );
                 }
                 _ => {}
             }
@@ -437,7 +463,14 @@ impl Engine {
     /// `<tenant>/config.json`, or the defaults when the tenant has none.
     pub(crate) async fn tenant_config(&self, tenant: &str) -> Result<TenantConfig, Error> {
         match self.loader.load(&ScriptKey::config(tenant)?).await {
-            Ok(c) => serde_json::from_str(&c.source).map_err(|e| Error::Config(e.to_string())),
+            Ok(c) => {
+                let config: TenantConfig =
+                    serde_json::from_str(&c.source).map_err(|e| Error::Config(e.to_string()))?;
+                if let Some(d) = &config.debug {
+                    d.validate().map_err(Error::Config)?;
+                }
+                Ok(config)
+            }
             Err(LoadError::NotFound(_)) => Ok(TenantConfig::default()),
             Err(e) => Err(e.into()),
         }
@@ -487,12 +520,16 @@ impl Engine {
                     }),
                 );
             }
-            RunningGuard { map: self.running.clone(), span_id }
+            RunningGuard {
+                map: self.running.clone(),
+                span_id,
+            }
         };
         let start = Instant::now();
         let flow_log = std::sync::OnceLock::new();
+        let debug = std::sync::OnceLock::new();
         let result = self
-            .invoke_inner(inv, max_time, &flow_log)
+            .invoke_inner(inv, max_time, &flow_log, &debug)
             .instrument(span.clone())
             .await;
         let outcome = match &result {
@@ -506,6 +543,12 @@ impl Engine {
             span.record("otel.status_code", "ERROR");
         }
         crate::telemetry::invocation(&tenant, trigger, outcome, start.elapsed());
+        if let (Some(run), Some(sink)) = (debug.into_inner(), &self.debug_sink) {
+            let error = result.as_ref().err().map(|e| e.to_string());
+            about
+                .write_debug(sink, run, &span, outcome, start.elapsed(), error.as_deref())
+                .await;
+        }
         if let (Some(log), Some(sink)) = (flow_log.into_inner(), &self.flow_logs) {
             let error = result.as_ref().err().map(|e| e.to_string());
             about
@@ -520,8 +563,28 @@ impl Engine {
         inv: Invocation,
         max_time: Option<Duration>,
         flow_slot: &std::sync::OnceLock<FlowLog>,
+        debug_slot: &std::sync::OnceLock<DebugRun>,
     ) -> Result<serde_json::Value, Error> {
         let config = Arc::new(self.tenant_config(&inv.tenant).await?);
+        // A routed invocation is matched by its router's name: the script it picks is not known yet.
+        let debug = match (&self.debug_sink, &config.debug) {
+            (Some(_), Some(d)) => {
+                let name = inv
+                    .script
+                    .as_deref()
+                    .or(config.router.as_deref())
+                    .unwrap_or("");
+                d.watching(name, now_ms()).map(|captures| {
+                    let run = DebugRun::new(captures);
+                    if captures.contains(&Capture::Event) {
+                        run.collector.put("event", inv.event.clone());
+                    }
+                    let _ = debug_slot.set(run.clone());
+                    run
+                })
+            }
+            _ => None,
+        };
         let flow_log = (config.flow_logs && self.flow_logs.is_some()).then(FlowLog::new);
         if let Some(f) = &flow_log {
             let _ = flow_slot.set(f.clone());
@@ -574,10 +637,12 @@ impl Engine {
             background_http: self.background_http,
             master_keys: self.master_keys.clone(),
             flow_log,
+            debug: debug.clone(),
             vault: self.vault().map(Arc::new),
             modules: Some(crate::modules::ModuleHost {
                 loader: self.loader.clone(),
                 handle: tokio::runtime::Handle::current(),
+                debug,
             }),
         };
 
@@ -650,6 +715,40 @@ impl FlowSegment {
             attempt: inv.attempt,
             continues_trace: inv.continues_trace,
             start_ms,
+        }
+    }
+
+    /// Writes the capture of a watched invocation. A failure is logged and nothing more.
+    async fn write_debug(
+        &self,
+        sink: &crate::debug::DebugSink,
+        run: DebugRun,
+        span: &tracing::Span,
+        outcome: &str,
+        took: Duration,
+        error: Option<&str>,
+    ) {
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        let sc = span.context().span().span_context().clone();
+        if !sc.is_valid() {
+            tracing::warn!("debug capture skipped: the invocation has no trace id");
+            return;
+        }
+        let (trace_id, span_id) = (sc.trace_id().to_string(), sc.span_id().to_string());
+        let header = serde_json::json!({
+            "tenant": self.tenant, "trace_id": trace_id, "span_id": span_id,
+            "script": self.script, "version": self.version, "trigger": self.trigger,
+            "attempt": self.attempt, "start_ms": self.start_ms,
+            "duration_ms": took.as_millis() as u64,
+        });
+        let capture = crate::debug::capture_object(header, run.collector.take(), outcome, error);
+        let key = sink.key(&self.tenant, &trace_id, self.start_ms, &span_id);
+        let sink = sink.clone();
+        match tokio::task::spawn_blocking(move || sink.put(&key, &capture)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "could not write the debug capture"),
+            Err(e) => tracing::warn!(error = %e, "debug capture task failed"),
         }
     }
 
@@ -728,6 +827,7 @@ impl Services {
             background_http: false,
             master_keys: None,
             flow_log: None,
+            debug: None,
             vault: None,
             modules: None,
         }
@@ -742,6 +842,9 @@ pub(crate) struct Vm {
     script: ScriptName,
     buckets: BucketScopes,
     batch: Option<BucketScope>,
+    capture: CaptureSlot,
+    flow_log: Option<FlowLog>,
+    debug: Option<DebugRun>,
 }
 
 pub(crate) fn new_vm(
@@ -795,9 +898,26 @@ pub(crate) fn new_vm(
     }
     lua.sandbox(true).map_err(internal)?;
     let watch = deadline;
-    lua.set_interrupt(move |_| match watch.check() {
-        Ok(()) => Ok(VmState::Continue),
-        Err(marker) => Err(mlua::Error::runtime(marker)),
+    let capture = CaptureSlot::default();
+    let on_timeout = capture.clone();
+    let debug = svc.debug.clone();
+    if debug.as_ref().is_some_and(|d| d.wants(Capture::Coverage)) {
+        lua.set_compiler(mlua::chunk::Compiler::new().set_coverage_level(1));
+    }
+    let sampler = debug.clone();
+    lua.set_interrupt(move |lua| match watch.check() {
+        Ok(()) => {
+            if let Some(d) = &sampler {
+                d.tick(lua);
+            }
+            Ok(VmState::Continue)
+        }
+        Err(marker) => {
+            if marker == integraal_wrappers::TIMEOUT_MARKER {
+                on_timeout.timed_out(lua);
+            }
+            Err(mlua::Error::runtime(marker))
+        }
     });
     Ok(Vm {
         lua,
@@ -806,20 +926,80 @@ pub(crate) fn new_vm(
         script,
         buckets: vm_buckets,
         batch: svc.batch.clone(),
+        capture,
+        flow_log: svc.flow_log.clone(),
+        debug,
     })
+}
+
+impl Vm {
+    /// Turns a Luau error into the engine's `Error`, keeping the structured failure (kind, frames)
+    /// for the flow log.
+    fn fail(&self, e: mlua::Error) -> Error {
+        let err = script_err(e.clone(), self.deadline);
+        let (kind, text) = match (&err, &e) {
+            (Error::Timeout, _) => (Kind::Timeout, "script timed out".to_string()),
+            (Error::Script(m), _) if m == "memory limit exceeded" => (Kind::Memory, m.clone()),
+            (_, mlua::Error::SyntaxError { .. }) => (Kind::Syntax, e.to_string()),
+            _ => (Kind::Runtime, e.to_string()),
+        };
+        let failure = self.capture.finish(kind, &text);
+        self.keep(&failure);
+        match err {
+            // The handler saw the stack: its message plus our traceback replaces mlua's text.
+            Error::Script(_) if !failure.frames.is_empty() && kind != Kind::Memory => {
+                Error::Script(format!("{}\n{}", failure.message, failure.traceback()))
+            }
+            other => other,
+        }
+    }
+
+    /// Records a failure that is not a Luau error (an unusable handler result).
+    fn bad_result(&self, message: String) -> Error {
+        let failure = Failure {
+            kind: Kind::BadResult,
+            message: message.clone(),
+            error_keys: Vec::new(),
+            frames: Vec::new(),
+        };
+        self.keep(&failure);
+        Error::Script(message)
+    }
+
+    fn keep(&self, failure: &Failure) {
+        let value = serde_json::to_value(failure).unwrap_or_default();
+        if let Some(d) = &self.debug {
+            d.collector.put_first("failure", value.clone());
+        }
+        if let Some(log) = &self.flow_log {
+            log.failure(value);
+        }
+    }
 }
 
 /// Loads `source` in the VM and calls the handler matching `call.trigger`.
 fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, Error> {
-    let (lua, deadline) = (&vm.lua, vm.deadline);
+    let result = call_in_vm_inner(vm, source, call);
+    if let Some(d) = &vm.debug {
+        d.finish(&vm.lua);
+    }
+    result
+}
+
+fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, Error> {
+    let lua = &vm.lua;
     *vm.script.lock().unwrap() = call.script.clone();
 
     let chunk_name = format!("={}/{}", call.tenant, call.script);
-    let module: Table = lua
+    let chunk = lua
         .load(source)
         .set_name(chunk_name)
-        .eval()
-        .map_err(|e| script_err(e, deadline))?;
+        .into_function()
+        .map_err(|e| vm.fail(e))?;
+    if let Some(d) = &vm.debug {
+        d.register(&format!("{}/{}", call.tenant, call.script), &chunk);
+    }
+    let module: Table = chunk.call(()).map_err(|e| vm.fail(e))?;
 
     let handler: Function = call
         .trigger
@@ -837,12 +1017,25 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
     ctx.set("attempt", call.attempt.max(1)).map_err(internal)?;
 
     let event = lua.to_value(&call.event).map_err(internal)?;
-    let out: mlua::Value = handler
-        .call((ctx, event))
-        .map_err(|e| script_err(e, deadline))?;
+    // `xpcall` runs our handler at the point of the error, while the Luau stack still exists.
+    let capture = vm.capture.clone();
+    let on_err = lua
+        .create_function(move |lua, e: mlua::Value| capture.handler(lua, e))
+        .map_err(internal)?;
+    let xpcall: Function = lua.globals().get("xpcall").map_err(internal)?;
+    let (ok, out): (bool, mlua::Value) = xpcall
+        .call((handler, on_err, ctx, event))
+        .map_err(|e| vm.fail(e))?;
+    if !ok {
+        let message = match &out {
+            mlua::Value::String(s) => s.to_string_lossy().to_string(),
+            other => other.to_string().unwrap_or_default(),
+        };
+        return Err(vm.fail(mlua::Error::runtime(message)));
+    }
     let result: serde_json::Value = lua
         .from_value(out)
-        .map_err(|e| Error::Script(format!("handler result is not JSON-serializable: {e}")))?;
+        .map_err(|e| vm.bad_result(format!("handler result is not JSON-serializable: {e}")))?;
     if call.trigger == Trigger::Queue {
         apply_deletes(&result, &call.event, &vm.buckets, vm.batch.as_ref())?;
     }
@@ -1197,6 +1390,187 @@ pub(crate) mod tests {
             e.invoke(inv(Trigger::Invoke, json!(null))).await,
             Err(Error::Timeout)
         ));
+    }
+
+    /// Runs `src` on a bare VM with a flow log attached; returns the error and the failure the
+    /// engine recorded for it.
+    fn failure_of(src: &str, limits: Limits) -> (Error, serde_json::Value) {
+        let log = FlowLog::new();
+        let svc = Services {
+            flow_log: Some(log.clone()),
+            ..Services::bare()
+        };
+        let call = Call {
+            tenant: "acme".into(),
+            script: "s".into(),
+            trigger: Trigger::Invoke,
+            event: json!(null),
+            attempt: 1,
+        };
+        let err = run(src, &call, &limits, &svc, &TenantConfig::default()).unwrap_err();
+        (err, log.recorded_failure().expect("a failure was recorded"))
+    }
+
+    #[test]
+    fn runtime_errors_carry_kind_and_frames() {
+        let (err, f) = failure_of(
+            "local function inner(t) return t.x.y end\n\
+             return { handle = function() return inner({}) end }",
+            Limits::default(),
+        );
+        eprintln!("{err}\n{f:#}");
+        assert_eq!(f["kind"], "runtime");
+        assert_eq!(f["frames"][0]["chunk"], "acme/s");
+        assert_eq!(f["frames"][0]["line"], 1);
+        assert_eq!(f["frames"][0]["function"], "inner");
+        assert!(
+            matches!(&err, Error::Script(m) if m.contains("acme/s:1") && m.contains("stack traceback"))
+        );
+    }
+
+    #[test]
+    fn thrown_tables_are_described_by_keys_only() {
+        let (err, f) = failure_of(
+            r#"return { handle = function() error({ code = "E1", secret = "hunter2" }) end }"#,
+            Limits::default(),
+        );
+        assert_eq!(f["error_keys"], json!(["code", "secret"]));
+        assert!(!f.to_string().contains("hunter2"));
+        assert!(!err.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn syntax_errors_are_their_own_kind() {
+        let (_, f) = failure_of("return {", Limits::default());
+        assert_eq!(f["kind"], "syntax");
+    }
+
+    #[test]
+    fn timeouts_name_where_the_script_was() {
+        let (err, f) = failure_of(
+            "local function spin() while true do end end\n\
+             return { handle = function() spin() end }",
+            Limits {
+                timeout: Duration::from_millis(100),
+                ..Limits::default()
+            },
+        );
+        eprintln!("{f:#}");
+        assert!(matches!(err, Error::Timeout));
+        assert_eq!(f["kind"], "timeout");
+        assert_eq!(f["frames"][0]["function"], "spin");
+        assert_eq!(f["frames"][0]["line"], 1);
+    }
+
+    #[test]
+    fn memory_exhaustion_is_classified() {
+        let (err, f) = failure_of(
+            "return { handle = function() local t = {} for i = 1, 1e9 do t[i] = string.rep('x', 1000) end end }",
+            Limits {
+                memory_bytes: 4 * 1024 * 1024,
+                ..Limits::default()
+            },
+        );
+        assert!(matches!(&err, Error::Script(m) if m == "memory limit exceeded"));
+        assert_eq!(f["kind"], "memory");
+    }
+
+    #[test]
+    fn unusable_results_are_bad_result() {
+        let (_, f) = failure_of(
+            "return { handle = function() return function() end end }",
+            Limits::default(),
+        );
+        assert_eq!(f["kind"], "bad_result");
+    }
+
+    /// A tenant with `debug` gets a capture per watched invocation: coverage of the script and its
+    /// libs, a sampling profile, the input event and the failure; other tenants get nothing.
+    #[tokio::test]
+    async fn watched_invocations_write_a_capture() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt;
+        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer.tracer("test"))),
+        );
+        let store = Arc::new(MemoryStore::default());
+        store.put(
+            &ScriptKey::new("acme", "s", None).unwrap(),
+            "local util = require(\"@lib/util\")\n\
+             return { handle = function(ctx, ev)\n\
+               local n = 0\n\
+               for i = 1, 3000000 do n = n + i end\n\
+               if ev.fail then\n\
+                 error(\"boom\")\n\
+               end\n\
+               return util.twice(n)\n\
+             end }",
+        );
+        store.put(
+            &ScriptKey::lib("acme", "util").unwrap(),
+            "return { twice = function(x)\n  return x * 2\nend, unused = function()\n  return 0\nend }",
+        );
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"debug": {"until": "2999-01-01T00:00:00Z"}}"#,
+        );
+        let sink = crate::debug::DebugSink::new(vec![Arc::new(MemBackend::default())], "dbg/");
+        let e = Engine::new(
+            Arc::new(CachedLoader::new(Shared(store), Duration::from_secs(60))),
+            Limits::default(),
+        )
+        .with_debug_sink(sink.clone());
+
+        e.invoke(inv(Trigger::Invoke, json!({"fail": false})))
+            .await
+            .unwrap();
+        e.invoke(inv(Trigger::Invoke, json!({"fail": true})))
+            .await
+            .unwrap_err();
+
+        let keys = sink.keys_for_test();
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        let all: Vec<_> = keys
+            .iter()
+            .map(|k| {
+                sink.read("acme", k.split('/').nth(3).unwrap())
+                    .unwrap()
+                    .remove(0)
+            })
+            .collect();
+        let ok = all.iter().find(|c| c["outcome"] == "ok").unwrap();
+        let failed = all.iter().find(|c| c["outcome"] == "script_error").unwrap();
+        eprintln!("{ok:#}\n{failed:#}");
+        assert_eq!(ok["event"], json!({"fail": false}));
+        let cov = ok["coverage"].as_array().unwrap();
+        let script = cov.iter().find(|c| c["chunk"] == "acme/s").unwrap();
+        let util = cov
+            .iter()
+            .find(|c| c["chunk"] == "acme/lib/util.luau")
+            .unwrap();
+        assert!(
+            script["missed"].as_array().unwrap().contains(&json!(6)),
+            "the error line did not run"
+        );
+        assert!(!script["missed"].as_array().unwrap().contains(&json!(8)));
+        assert!(
+            util["missed"].as_array().unwrap().contains(&json!(4)),
+            "unused() body missed"
+        );
+        assert!(ok["profile"]["samples"].as_u64().unwrap() > 0);
+        assert!(ok["profile"]["folded"][0]
+            .as_str()
+            .unwrap()
+            .contains("acme/s"));
+        assert_eq!(failed["failure"]["kind"], "runtime");
+        let cov = failed["coverage"].as_array().unwrap();
+        let script = cov.iter().find(|c| c["chunk"] == "acme/s").unwrap();
+        assert!(
+            !script["missed"].as_array().unwrap().contains(&json!(6)),
+            "the error line ran"
+        );
     }
 
     #[tokio::test]
@@ -1803,8 +2177,16 @@ pub(crate) mod tests {
                 format!("00-{id}-00f067aa0ba902b7-01"),
             )]))
         };
-        let (a, b) = ("4bf92f3577b34da6a3ce929d0e0e4736", "5bf92f3577b34da6a3ce929d0e0e4736");
-        for (id, due, t) in [("t1", 200, trace(a)), ("t2", 100, trace(a)), ("t3", 150, trace(b)), ("t4", 120, None)] {
+        let (a, b) = (
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "5bf92f3577b34da6a3ce929d0e0e4736",
+        );
+        for (id, due, t) in [
+            ("t1", 200, trace(a)),
+            ("t2", 100, trace(a)),
+            ("t3", 150, trace(b)),
+            ("t4", 120, None),
+        ] {
             let payload = integraal_wrappers::TimerPayload {
                 script: None,
                 version: None,
@@ -1814,7 +2196,11 @@ pub(crate) mod tests {
             integraal_wrappers::register_timer(&*backend, "acme", id, due, &payload, 50).unwrap();
         }
         let ids = |t: &str| -> Vec<String> {
-            e.pending_timers("acme", t).unwrap().into_iter().map(|p| p.id).collect()
+            e.pending_timers("acme", t)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.id)
+                .collect()
         };
         assert_eq!(ids(a), ["t2", "t1"]);
         assert_eq!(ids(&b.to_uppercase()), ["t3"]);
@@ -1836,23 +2222,46 @@ pub(crate) mod tests {
         let far = now_ms() / 1000 + 1000;
         let put = |pk: &str, sk: &str, value: &str| {
             backend
-                .put(pk, integraal_wrappers::Item { sk: sk.into(), value: value.into(), ttl: far })
+                .put(
+                    pk,
+                    integraal_wrappers::Item {
+                        sk: sk.into(),
+                        value: value.into(),
+                        ttl: far,
+                    },
+                )
                 .unwrap();
         };
         // a barrier with one of two members still pending, and a callback
-        put("TEN#acme#\u{1}barrier#b1", "", r#"{"total":2,"ready":true,"due_s":5,"then":"next"}"#);
+        put(
+            "TEN#acme#\u{1}barrier#b1",
+            "",
+            r#"{"total":2,"ready":true,"due_s":5,"then":"next"}"#,
+        );
         put("TEN#acme#\u{1}barrier#b1", "p#m2", "1");
         put("TEN#acme#cb#c1", "", "{}");
-        for (kind, id) in [("barrier", "b1"), ("callback", "c1"), ("callback", "taken"), ("batch", "j1")] {
+        for (kind, id) in [
+            ("barrier", "b1"),
+            ("callback", "c1"),
+            ("callback", "taken"),
+            ("batch", "j1"),
+        ] {
             integraal_wrappers::trace_index::record(&*backend, "acme", &trace, kind, id, far, 10);
         }
         let got = e.pending("acme", a).unwrap();
         assert_eq!(got["barriers"][0]["pending"], 1);
         assert_eq!(got["barriers"][0]["then"], "next");
-        assert_eq!(got["callbacks"].as_array().unwrap().len(), 1, "a taken callback is gone");
+        assert_eq!(
+            got["callbacks"].as_array().unwrap().len(),
+            1,
+            "a taken callback is gone"
+        );
         assert_eq!(got["callbacks"][0]["id"], "c1");
         assert_eq!(got["batch"][0]["done"], false);
-        assert!(e.pending("other", a).unwrap()["barriers"].as_array().unwrap().is_empty());
+        assert!(e.pending("other", a).unwrap()["barriers"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[derive(Default)]

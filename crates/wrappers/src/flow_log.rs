@@ -28,6 +28,7 @@ struct Buf {
     tail: VecDeque<String>,
     tail_bytes: usize,
     dropped: usize,
+    failure: Option<Value>,
 }
 
 /// A shared handle to the buffer of one invocation.
@@ -91,11 +92,28 @@ impl FlowLog {
         self.push(json!({ "t": now_ms(), "type": "engine", "level": level, "msg": cut(msg) }));
     }
 
+    /// The structured failure of the invocation (kind, message, frames); it goes in the footer.
+    /// The first one recorded wins: later ones are consequences.
+    pub fn failure(&self, failure: Value) {
+        let mut b = self.0.lock().unwrap();
+        if b.failure.is_none() {
+            b.failure = Some(failure);
+        }
+    }
+
+    /// The failure recorded so far, if any.
+    pub fn recorded_failure(&self) -> Option<Value> {
+        self.0.lock().unwrap().failure.clone()
+    }
+
     /// Gzipped NDJSON: `header`, the kept lines, then `footer`.
     pub fn render(&self, header: Value, mut footer: Value) -> Vec<u8> {
         let b = self.0.lock().unwrap();
         if b.dropped > 0 {
             footer["dropped_lines"] = b.dropped.into();
+        }
+        if let Some(f) = &b.failure {
+            footer["failure"] = f.clone();
         }
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let mut line = |s: &str| {

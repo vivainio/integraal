@@ -736,7 +736,10 @@ mod tests {
             // Creating it also left a row that finds the barrier by its trace.
             let found = crate::trace_index::list(&*mem, "acme", &id(&created), 10).unwrap();
             assert_eq!(found.len(), 1);
-            assert_eq!((found[0].0.as_str(), found[0].1.as_str()), ("barrier", "t1"));
+            assert_eq!(
+                (found[0].0.as_str(), found[0].1.as_str()),
+                ("barrier", "t1")
+            );
         });
     }
 

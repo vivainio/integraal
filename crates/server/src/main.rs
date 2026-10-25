@@ -31,6 +31,10 @@ async fn main() -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().skip(i + 1).collect();
         return flow_command(&cfg, &args).await;
     }
+    if let Some(i) = std::env::args().position(|a| a == "debug") {
+        let args: Vec<String> = std::env::args().skip(i + 1).collect();
+        return debug_command(&cfg, &args).await;
+    }
     let _telemetry = integraal_core::telemetry::init("integraal-server", cfg.log_filter())
         .map_err(anyhow::Error::msg)?;
 
@@ -41,6 +45,28 @@ async fn main() -> anyhow::Result<()> {
         .with_background_http();
     if let Some(throttle) = cfg.throttle().map_err(anyhow::Error::msg)? {
         engine = engine.with_throttle(throttle);
+    }
+
+    if let Some(d) = cfg.debug.as_ref().filter(|d| d.dir.is_some()) {
+        // Disk captures have no lifecycle rule: sweep the old ones hourly.
+        let (dir, max_age) = (
+            std::path::PathBuf::from(d.dir.clone().unwrap_or_default()),
+            std::time::Duration::from_secs(d.retention_hours * 3600),
+        );
+        tokio::spawn(async move {
+            loop {
+                let (dir, max_age) = (dir.clone(), max_age);
+                match tokio::task::spawn_blocking(move || {
+                    integraal_core::debug::DebugSink::sweep_dirs(&dir, max_age)
+                })
+                .await
+                {
+                    Ok(n) if n > 0 => tracing::info!(removed = n, "swept old debug captures"),
+                    _ => {}
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
     }
 
     if let Some(queue) = &cfg.queue {
@@ -129,12 +155,38 @@ async fn flow_command(cfg: &GlobalConfig, args: &[String]) -> anyhow::Result<()>
     Ok(())
 }
 
+/// `integraal-server debug show <tenant> <trace id>` prints the captures of watched invocations in
+/// a flow, as one JSON document per line.
+async fn debug_command(cfg: &GlobalConfig, args: &[String]) -> anyhow::Result<()> {
+    let [verb, tenant, trace] = args else {
+        anyhow::bail!("usage: integraal-server debug show <tenant> <trace id>");
+    };
+    anyhow::ensure!(
+        verb == "show",
+        "usage: integraal-server debug show <tenant> <trace id>"
+    );
+    let engine = cfg.engine().await.map_err(anyhow::Error::msg)?;
+    let sink = engine
+        .debug_sink()
+        .ok_or_else(|| anyhow::anyhow!("the config has no debug section"))?
+        .clone();
+    let (tenant, trace) = (tenant.clone(), trace.clone());
+    let captures = tokio::task::spawn_blocking(move || sink.read(&tenant, &trace))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    for c in captures {
+        println!("{c}");
+    }
+    Ok(())
+}
+
 /// Read-only flow log queries, served on loopback only (`local_api`).
 ///
 /// - `GET /flows/{tenant}?day=yyyy-mm-dd`          flows that started that UTC day (default: today)
 /// - `GET /flows/{tenant}/{trace}?since=<ms>`      the merged log; `since` keeps only later lines
 /// - `GET /flows/{tenant}/{trace}/summary`         one row per invocation
 /// - `GET /flows/{tenant}/{trace}/state`           what the flow is waiting on: timers, barriers, callbacks, batch jobs
+/// - `GET /debug/{tenant}/{trace}`                 captures of watched invocations (needs `debug`)
 /// - `GET /running`                                invocations in flight in this process
 fn local_router(engine: Engine) -> Router {
     let sink = engine
@@ -149,6 +201,7 @@ fn local_router(engine: Engine) -> Router {
     Router::new()
         .route("/running", get(local_running))
         .route("/flows/{tenant}/{trace}/state", get(local_state))
+        .route("/debug/{tenant}/{trace}", get(local_debug))
         .with_state(engine)
         .merge(flows)
 }
@@ -157,21 +210,29 @@ async fn local_running(State(engine): State<Engine>) -> AdminResult {
     (StatusCode::OK, Json(Value::Array(engine.running())))
 }
 
+async fn local_debug(
+    State(engine): State<Engine>,
+    Path((tenant, trace)): Path<(String, String)>,
+) -> AdminResult {
+    let Some(sink) = engine.debug_sink().cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "the config has no debug section" })),
+        );
+    };
+    blocking_read(move || sink.read(&tenant, &trace).map(Value::Array)).await
+}
+
 async fn local_state(
     State(engine): State<Engine>,
     Path((tenant, trace)): Path<(String, String)>,
 ) -> AdminResult {
-    blocking_read(move || {
-        engine.pending(&tenant, &trace)
-    })
-    .await
+    blocking_read(move || engine.pending(&tenant, &trace)).await
 }
 
 type Sink = State<integraal_core::flow_log::FlowLogSink>;
 
-async fn blocking_read(
-    f: impl FnOnce() -> Result<Value, String> + Send + 'static,
-) -> AdminResult {
+async fn blocking_read(f: impl FnOnce() -> Result<Value, String> + Send + 'static) -> AdminResult {
     vault_call(f, |v| (StatusCode::OK, Json(v))).await
 }
 
@@ -196,7 +257,11 @@ async fn local_show(
     blocking_read(move || {
         let mut lines = sink.read_flow(&tenant, &trace)?;
         lines.retain(|l| {
-            l["t"].as_u64().or_else(|| l["start_ms"].as_u64()).unwrap_or(0) > since
+            l["t"]
+                .as_u64()
+                .or_else(|| l["start_ms"].as_u64())
+                .unwrap_or(0)
+                > since
         });
         Ok(Value::Array(lines))
     })

@@ -39,6 +39,7 @@ Each section is documented in the chapter for the feature it configures.
 | `queue` | [Queue](queue.md#tenant-config-and-deployment) |
 | `batch` | [Batch jobs](batch.md#tenant-config-and-deployment) |
 | `flow_logs` | [Flow logs](observability.md#flow-logs) |
+| `debug` | [Debug captures](observability.md#debug-captures): coverage, a sampling profile and the input event for watched scripts, until a set time |
 | `http.allow` | [Outbound HTTP](http.md#tenant-config-httpallow) |
 | `limits` | [Limits](limits.md) |
 | `vars` | [below](#vars) |

@@ -91,7 +91,12 @@ pub fn default_ttl(now: u64) -> u64 {
 
 /// A barrier that still exists: its member counts, deadline and continuation. `None` once it expired
 /// or was cleaned up.
-pub fn describe_barrier(backend: &dyn ItemBackend, tenant: &str, id: &str, now: u64) -> Result<Option<Json>, String> {
+pub fn describe_barrier(
+    backend: &dyn ItemBackend,
+    tenant: &str,
+    id: &str,
+    now: u64,
+) -> Result<Option<Json>, String> {
     let pk = crate::db::barrier_partition(tenant, id);
     let Some(h) = backend.get(&pk, "")?.filter(|i| i.ttl > now) else {
         return Ok(None);
@@ -105,7 +110,12 @@ pub fn describe_barrier(backend: &dyn ItemBackend, tenant: &str, id: &str, now: 
 }
 
 /// A callback nobody has presented yet, with when it expires. `None` once it was taken or expired.
-pub fn describe_callback(backend: &dyn ItemBackend, tenant: &str, id: &str, now: u64) -> Result<Option<Json>, String> {
+pub fn describe_callback(
+    backend: &dyn ItemBackend,
+    tenant: &str,
+    id: &str,
+    now: u64,
+) -> Result<Option<Json>, String> {
     let pk = crate::db::callback_partition(tenant, id);
     Ok(backend
         .get(&pk, "")?
@@ -119,7 +129,10 @@ mod tests {
     use crate::timer::tests::Mem;
 
     fn ctx(id: &str) -> TraceContext {
-        TraceContext::from([("traceparent".to_string(), format!("00-{id}-00f067aa0ba902b7-01"))])
+        TraceContext::from([(
+            "traceparent".to_string(),
+            format!("00-{id}-00f067aa0ba902b7-01"),
+        )])
     }
 
     #[test]
@@ -129,12 +142,23 @@ mod tests {
         record(&db, "acme", &ctx(a), "barrier", "b1", 999, 10);
         record(&db, "acme", &ctx(a), "callback", "c1", 999, 11);
         record(&db, "other", &ctx(a), "barrier", "b2", 999, 12);
-        record(&db, "acme", &ctx("5bf92f3577b34da6a3ce929d0e0e4736"), "batch", "j1", 999, 13);
+        record(
+            &db,
+            "acme",
+            &ctx("5bf92f3577b34da6a3ce929d0e0e4736"),
+            "batch",
+            "j1",
+            999,
+            13,
+        );
         record(&db, "acme", &TraceContext::new(), "batch", "j2", 999, 14);
         let got = list(&db, "acme", &a.to_uppercase(), 10).unwrap();
         assert_eq!(
             got,
-            [("barrier".into(), "b1".into(), 10), ("callback".into(), "c1".into(), 11)]
+            [
+                ("barrier".into(), "b1".into(), 10),
+                ("callback".into(), "c1".into(), 11)
+            ]
         );
         assert_eq!(list(&db, "acme", a, 1).unwrap().len(), 1);
     }

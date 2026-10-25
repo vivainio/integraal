@@ -2,8 +2,10 @@
 //! an invocation to the handler matching the trigger.
 
 mod config;
+pub mod debug;
 mod dynamo_db;
 mod engine;
+pub mod failure;
 pub mod flow_log;
 pub mod ingress;
 mod modules;

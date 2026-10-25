@@ -100,6 +100,7 @@ so only processes on the same host (or its container) can connect. From elsewher
 | `GET /flows/{tenant}/{trace}?since=<ms>` | the merged log; `since` keeps only later lines, for tailing |
 | `GET /flows/{tenant}/{trace}/summary` | one row per invocation: script, outcome, duration, error, log line count, failed http calls; `outcome` is `null` when the invocation wrote no footer |
 | `GET /flows/{tenant}/{trace}/state` | what the flow is waiting on: `timers` (including barrier deadlines), `barriers` (members `total` and `pending`, `due_s`, `then`), `callbacks` (`expires_s`) and `batch` jobs (`done` once the partner's `done.json` exists) |
+| `GET /debug/{tenant}/{trace}` | the [debug captures](#debug-captures) of the flow's watched invocations (needs `debug`) |
 | `GET /running` | the invocations in flight in this process (tenant, script, trigger, attempt, trace id, span id, `start_ms`, `running_ms`), longest-running first |
 
 Two limits to know when reading these:
@@ -126,6 +127,68 @@ integraal-client running
 ```
 
 The process needs `s3:ListBucket` and `s3:GetObject` on the flow log bucket for this.
+
+### Script failures
+
+An invocation that fails writes a structured `failure` into its segment footer, whether or not the
+tenant is watched: `kind` (`syntax`, `runtime`, `native`, `timeout`, `memory`, `bad_result`), the
+`message` and the `frames` (`chunk`, `line`, `function`) from the innermost call out. A timeout
+reports where the script was when its time ran out; a memory failure has no frames, because Luau
+does not run the error handler for it. `summary` shows each row's `failure.kind` and top frame.
+
+The failure never holds values. A table thrown with `error({...})` is described by its keys only.
+
+## Debug captures
+
+For a script you are debugging, a tenant can ask for much more than a flow log keeps. Add a `debug`
+section to its `config.json`:
+
+```json
+"debug": { "until": "2026-11-01T00:00:00Z", "scripts": ["feed", "order_*"] }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `until` | UTC time after which the section is ignored. Required, so debugging cannot be left on |
+| `scripts` | scripts to watch; a trailing `*` matches a prefix. Left out, the whole tenant is watched: every invocation, the script a router picks, and the libs it requires. A routed invocation is matched by its router's name |
+| `capture` | `coverage`, `profile`, `event`. Everything when left out |
+
+Each watched invocation writes one capture object when it ends, to the deployment's debug sink
+(`debug` in `integraal.json`, see [Deployment](deployment.md)): a directory, a bucket, or both. The
+sink is never the flow log bucket. A capture can hold tenant data, which flow logs must not, so
+reading captures takes separate access.
+
+```text
+<prefix><tenant>/captures/<trace id>/<start ms>-<span id>.json.gz
+```
+
+A capture holds the header (tenant, script, trace and span id, trigger, attempt, outcome, error)
+and:
+
+- `event`: the input event.
+- `failure`: the structured failure above.
+- `coverage`: per chunk (the script and each lib), `lines` with hit counts of every line that has
+  code, `missed` (lines that never ran), `covered` and `executable`. Counts accumulate over a routed
+  run, since the router and its target share one VM.
+- `profile`: a sampling profile. The VM is sampled at most once per millisecond from its interrupt;
+  `hot` lists the busiest leaf lines with milliseconds, and `folded` holds the stacks in the
+  collapsed format flame graph tools read (`a;b;c <ms>`). The interrupt runs at calls and loop
+  back-edges, not on a timer, so time inside a native call (an HTTP wait) is credited to the stack
+  at the next interrupt: approximate, but it points at the right line.
+
+Coverage compiles the watched script with counters, and the profiler samples the stack, so a watched
+invocation runs slower. Tenants without a `debug` section pay nothing.
+
+Read captures with the server (it needs the sink's credentials) or the local API:
+
+```bash
+integraal-server debug show acme 4bf92f3577b34da6a3ce929d0e0e4736
+integraal-client debug acme 4bf92f3577b34da6a3ce929d0e0e4736
+```
+
+Directory captures are deleted after `retention_hours` (default 48) by an hourly sweep. Expire
+bucket captures with a lifecycle rule on `<prefix><tenant>/captures/`. The Lambda can use
+`debug.bucket` only (it needs `s3:PutObject`); a `debug.dir` refuses to start there.
 
 ## Metrics
 
