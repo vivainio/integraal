@@ -1,6 +1,6 @@
 --!strict
 -- Provisions every AWS resource the mega integration test needs; run by `roto-server --setup`.
--- Vars: FIXTURES (dir of the `mega` tenant's scripts), MEGALITH (base URL of the mock target, with a trailing slash).
+-- Vars: CONFIG_EXTRA (JSON members spliced into the tenant config, ending in a comma), FIXTURES (dir of the `mega` tenant's scripts), MEGALITH (base URL of the mock target, with a trailing slash).
 
 local DLQ = roto.sqs.queue("jobs-dlq")
 -- `jobs` is the queue the server polls; S3 notifications land here too.
@@ -17,6 +17,7 @@ roto.sqs.queue("jobs-large")
 roto.s3.bucket("scripts")
 roto.s3.bucket("data-out")
 roto.s3.bucket("data-temp")
+roto.s3.bucket("flow-logs")
 roto.s3.bucket("data-in", {
 	notify = { { queue = jobs, events = { "s3:ObjectCreated:*" } } },
 })
@@ -51,7 +52,7 @@ roto.s3.put(
 	`\{"router":"router",`
 		.. `"vars":\{"megalith":"{roto.vars.MEGALITH}"},`
 		.. `"buckets":\{"In":"readwrite","Out":"readwrite","Temp":"readwrite","Drops":"readwrite"},`
-		.. `"queue":true,"batch":true,"schedule":["hour"],`
+		.. `"queue":true,"batch":true,"schedule":["hour"],{roto.vars.CONFIG_EXTRA}`
 		.. `"placement":\{"class":"small","classes":["large"],"script":"place"},`
 		.. `"limits":\{"timeout_ms":20000},`
 		.. `"http":\{"allow":["$\{megalith}"]}}`,

@@ -12,4 +12,6 @@ dependencies = [
 
 [tool.pytest.ini_options]
 testpaths = ["."]
+# The developer-tools suite needs its own stack; run it with `pytest devtools`.
+norecursedirs = ["devtools", ".*"]
 addopts = "-ra"
