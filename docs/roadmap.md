@@ -13,11 +13,17 @@ deletes are implemented; the rest of the pipeline is not.
 - Idempotency keyed on `(key, etag, script)`; per-tenant event-rate and concurrency caps.
 
 ## Barriers
-- A timer trigger that runs a script when a barrier's `deadline_s` passes unresolved (today
-  `native.barrier.status` reports `overdue`, but something has to ask).
 - Growing a barrier after `create` (`add` and a `seal`), for work lists larger than one invocation's
   `max_data_ops`.
 - `reconcile`: ack members whose bucket object already exists, to recover a lost notification.
+
+## Schedules and timers
+- `native.timer` for scripts: `at`/`after` and `cancel`, on the [timers](schedules.md#timers) the
+  barrier deadline already uses.
+- Ticks and the timer sweep on Lambda (today only the Fargate server handles `system.tick`).
+- Creating a tenant's own EventBridge schedules from its config (cron, time zones).
+- Splitting a tick's fan-out into chunks for very large tenant lists.
+- `type` on callback and batch `done.json` events.
 
 ## Engine
 - Cache compiled Luau bytecode per `(script hash, runtime)`.

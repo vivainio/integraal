@@ -33,7 +33,8 @@ local id = native.barrier.create({
   members = names,                         -- what the acks will name, e.g. "a.xml"
   continue_with = "finalize",              -- script that runs when every member is resolved
   state = { ref = ev.ref },                -- handed to the continuation
-  deadline_s = 3600,                       -- optional; only feeds `status().overdue`
+  deadline_s = 3600,                       -- optional; see Deadlines
+  overdue_with = "chase",                  -- optional script for the overdue event; else the router picks
 })
 for _, name in names do native.bucket.In.put(batch .. "/" .. name, docs[name]) end
 
@@ -112,6 +113,29 @@ Two batches that both contain `invoice.xml` do not collide, because the barrier 
 address. If the partner can echo back nothing but the document key, store a `member -> batch` row in
 [`native.db`](dynamodb.md) when you send and look it up in the ack script.
 
+## Deadlines
+
+With `deadline_s` the barrier also sets a [timer](schedules.md#timers). If members are still pending
+when it comes due, the sweep sends the tenant
+
+```json
+{ "tenant": "acme", "script": "chase", "event": { "type": "barrier.overdue", "barrier": "b1" } }
+```
+
+(`script` only when `overdue_with` is set; otherwise the [router](router.md) picks one by
+`event.type`). The script looks at `native.barrier.pending(id)` and `status(id)` and decides: ask the
+partner again, alert someone, or ack the missing members itself.
+
+- **The barrier stays open.** Overdue only reports. A late ack still completes the barrier and sends
+  the continuation.
+- **At least once, and possibly late.** It needs the minute [tick](schedules.md#operator-ticks). The
+  ack that sends the continuation cancels the timer, but if that cancel is lost the script still runs
+  once for a finished barrier, so check `status(id).complete` first.
+- **Needs a queue** (`"queue": true` and a deployment queue). Without one, `deadline_s` only feeds
+  `status().overdue`.
+- `deadline_s` is at most six days.
+- The continuation event is `{ type = "barrier.complete", barrier = id }`.
+
 ## Guarantees
 
 - **No lost ack.** `ack` is a sequence of idempotent steps (record the outcome if absent, delete the
@@ -145,6 +169,9 @@ Every backend call is one `max_data_ops` ([limits](limits.md)).
 `create` is one invocation, so the work list must fit in the tenant's `max_data_ops`
 (default 1000, ceiling 10 000). Raise the tenant's limit for large batches.
 
+A barrier with `deadline_s` adds 1 data op to `create` and 1 to the ack that sends the continuation
+(it cancels the deadline timer).
+
 Rows expire after a week like all [`native.db`](dynamodb.md) items. `ack` stops accepting an hour
 before that, with `barrier expired`, so an expired pending row can never make a barrier look
 finished. `hydrate` returns `nil` after expiry.
@@ -164,10 +191,8 @@ work with `native.db.put_if_absent`.
 
 ## Not covered
 
-- **A member that never acks.** Nothing runs. `deadline_s` makes `status(id).overdue` true, but
-  something has to look: schedule a script that reads `status`, or send a delayed
-  [queue](queue.md) message from `create`'s caller (`delay_s` up to 15 minutes, re-sending itself).
-  A timer trigger is on the [roadmap](roadmap.md).
+- **A member that never acks, without a `deadline_s`.** Nothing runs; set one (see
+  [Deadlines](#deadlines)).
 - **Growing a barrier.** The members are fixed at `create`.
 - **Recovering a lost notification.** If a partner's ack object exists but its event was lost,
   nothing acks the member. List the bucket and ack the missing keys by hand.

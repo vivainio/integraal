@@ -38,6 +38,7 @@ process at startup.
 | `admin.port`, `admin.token_env` | server | operator API for the [credential vault](#vault) on its own port. Requires `db` and `crypto` |
 | `flow_logs.bucket`, `flow_logs.prefix` | server, Lambda | the dedicated bucket for [flow logs](observability.md#flow-logs) of tenants that enable them; not a data bucket, and scripts cannot reach it. The process needs `s3:PutObject` (and `s3:ListBucket`, `s3:GetObject` to read flows back) |
 | `queue.url` | server, webhook, Lambda | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `buckets.map` buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it, and so does [`native.queue.send`](queue.md) for tenants that enable it |
+| `schedule.spread_s` | server | seconds over which each [tick](schedules.md#spreading-the-load) spreads its per-tenant messages: `{ "minute": 20, "hour": 300, "day": 900 }` are the defaults |
 | `server.port` | server | HTTP port (default `8080`) |
 | `throttle` | server | outbound HTTP limits, see [Throttling](http.md#throttling) |
 | `ceiling` | server, Lambda | operator ceilings for tenant `timeout_ms` and `memory_mb`; see [Limits](limits.md#deployment-ceiling) |
@@ -85,6 +86,7 @@ fails loudly beyond that.
 ## Bucket layout
 
 ```
+<scripts.bucket>/tenants.json                       every tenant, for schedules
 <scripts.bucket>/<tenant>/<script>/latest.luau      mutable, revalidated
 <scripts.bucket>/<tenant>/<script>/<version>.luau   immutable
 <scripts.bucket>/<tenant>/config.json               operator-owned policy
@@ -92,12 +94,28 @@ fails loudly beyond that.
 <batch.bucket>/<batch.prefix><tenant>/jobs|state/...      batch jobs, see Batch jobs
 ```
 
+## Schedules
+
+Three EventBridge Scheduler schedules (`rate(1 minute)`, `rate(1 hour)`, `rate(1 day)`) send ticks to
+the queue, and the minute one also fires [timers](schedules.md#timers) such as barrier deadlines. Without
+the minute schedule, barrier deadlines never report. The exact inputs, `tenants.json` and the
+per-tenant opt-in are in [Schedules and timers](schedules.md). With several worker classes, point the
+schedules at the default class's queue: its server handles the tick, and the tenant messages it sends
+go to that server's `queue.url`.
+
+```bash
+aws scheduler create-schedule --name integraal-minute --schedule-expression 'rate(1 minute)' \
+  --flexible-time-window Mode=OFF \
+  --target '{"Arn":"arn:aws:sqs:eu-west-1:123456789012:integraal","RoleArn":"arn:aws:iam::123456789012:role/integraal-scheduler",
+             "Input":"{\"type\":\"system.tick\",\"every\":\"minute\",\"at\":\"<aws.scheduler.scheduled-time>\"}"}'
+```
+
 ## IAM
 
 Per-feature permissions are listed in each chapter: [Buckets](buckets.md#deployment),
 [DynamoDB](dynamodb.md#deployment), [Callbacks](callbacks.md#deployment-webhook-lambda). In
 addition the runtime role needs `s3:GetObject` on the script bucket and, for the server,
-`sqs:ReceiveMessage`/`DeleteMessage` on the queue. Give tenants no direct access to the script bucket.
+`sqs:ReceiveMessage`/`DeleteMessage` on the queue (and `sqs:SendMessage` for ticks and timers). Give tenants no direct access to the script bucket.
 
 ## Lambda
 

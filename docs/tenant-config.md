@@ -33,6 +33,7 @@ Each section is documented in the chapter for the feature it configures.
 | Key | Chapter |
 | --- | --- |
 | `router` | [Router](router.md#tenant-config-router) |
+| `schedule` | [Schedules](schedules.md#which-tenants) |
 | `placement` | [Worker classes](ingress.md#tenant-config-placement) |
 | `buckets` | [Buckets (S3)](buckets.md#grants) |
 | `queue` | [Queue](queue.md#tenant-config-and-deployment) |

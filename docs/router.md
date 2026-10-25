@@ -54,4 +54,7 @@ return { on_route = on_route }
 - Any envelope without a `script`: queue messages, `POST /v1/{tenant}` over HTTP, direct invokes.
 - [S3 notifications](triggers.md#s3-notifications), which never name a script.
 - [Callbacks](callbacks.md) created without `script`.
+- [Operator ticks](schedules.md#operator-ticks) (`type = "schedule"`) and barrier events
+  (`barrier.complete`, `barrier.overdue`) unless the barrier names a script. Match on `event.type`;
+  see [event types](schedules.md#event-types).
 - A [batch job](batch.md#wiring-the-continuation)'s `done.json`, which the router hands to `native.batch.route`.

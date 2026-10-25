@@ -19,7 +19,7 @@ use axum::{
 };
 use integraal_core::{
     s3_events::{classify, disposition, Disposition, Message},
-    Engine, Error, GlobalConfig, Invocation, S3Events, Trigger, Vault,
+    Engine, Error, Every, GlobalConfig, Invocation, S3Events, Spread, Trigger, Vault,
 };
 use serde_json::{json, Value};
 use tracing::Instrument;
@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
             engine.clone(),
             queue.url.clone(),
             S3Events::from_config(&cfg),
+            cfg.schedule.spread_s,
         ));
     }
 
@@ -362,7 +363,7 @@ fn status_for(e: &Error) -> StatusCode {
 /// Long-polls SQS. A message is deleted only once it is fully handled, so failures retry via
 /// the visibility timeout and eventually land in the queue's DLQ. S3 notifications are split into
 /// one invocation per object; when only some fail, just those are sent back (see `s3_events`).
-async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
+async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events, spread: Spread) {
     let client = aws_sdk_sqs::Client::new(&aws_config::load_from_env().await);
     loop {
         let resp = client
@@ -410,6 +411,7 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
                         &client,
                         &queue_url,
                         &s3,
+                        &spread,
                         msg.body().unwrap_or_default(),
                         attempt,
                         continues_trace,
@@ -442,6 +444,7 @@ async fn handle_message(
     client: &aws_sdk_sqs::Client,
     queue_url: &str,
     s3: &S3Events,
+    spread: &Spread,
     body: &str,
     attempt: u32,
     continues_trace: bool,
@@ -452,6 +455,17 @@ async fn handle_message(
             false // left for DLQ
         }
         Ok(Message::Ignored) => true,
+        Ok(Message::Tick(tick)) => match engine.tick(&tick, spread).await {
+            Ok(r) => {
+                tracing::debug!(every = tick.every.as_str(), at = %tick.at, sent = r.sent, "tick handled");
+                true
+            }
+            Err(e) => {
+                tracing::error!(error = %e, every = tick.every.as_str(), at = %tick.at, "tick failed");
+                // The minute tick comes again in a minute; the others are worth running again.
+                tick.every == Every::Minute
+            }
+        },
         Ok(Message::Envelope(mut inv)) => {
             inv.trigger = Trigger::Queue;
             inv.attempt = attempt;

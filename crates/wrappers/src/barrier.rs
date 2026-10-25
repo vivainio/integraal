@@ -13,6 +13,10 @@
 //! sk "~final"       "sending" (a short lease) then "sent": who dispatched the continuation
 //! ```
 //!
+//! A barrier with a deadline also has a timer (see `timer`): when it comes due the sweep sends the
+//! tenant `{ type = "barrier.overdue", barrier = id }`, and the call that dispatches the
+//! continuation cancels it.
+//!
 //! `ack` is a sequence of idempotent steps (record the outcome if absent, delete the pending row,
 //! look for any pending row left), so a redelivered ack after a crash repeats the steps and cannot
 //! leave the barrier one short. There is no counter to drift.
@@ -26,6 +30,7 @@ use serde_json::{json, Value as Json};
 use crate::{
     db::{check, now_secs},
     queue::{valid_name, OutMessage, QueueBackend},
+    timer::{self, Payload},
     trace::{inject_current, TraceContext},
     Budget, DbScope, HostContext, Item, ItemBackend, DB_TTL, MAX_QUERY_ITEMS,
 };
@@ -53,6 +58,9 @@ struct Header {
     ready: bool,
     #[serde(rename = "then")]
     continue_with: Option<String>,
+    /// Script that gets the overdue event; without it the tenant's router picks one.
+    #[serde(default)]
+    overdue_with: Option<String>,
     state: Json,
     expires_s: u64,
     due_s: Option<u64>,
@@ -77,8 +85,14 @@ pub struct CreateSpec {
     pub id: String,
     pub members: Vec<String>,
     pub continue_with: Option<String>,
+    pub overdue_with: Option<String>,
     pub state: Json,
     pub deadline_s: Option<u64>,
+}
+
+/// Timer id of a barrier's deadline.
+fn timer_id(id: &str) -> String {
+    format!("barrier.{id}")
 }
 
 /// The barrier operations, independent of Lua. Every backend call spends one `max_data_ops`.
@@ -128,6 +142,7 @@ impl Barriers {
             id,
             members,
             continue_with,
+            overdue_with,
             state,
             deadline_s,
         } = spec;
@@ -147,6 +162,17 @@ impl Barriers {
             if !seen.insert(m.as_str()) {
                 return Err(format!("duplicate barrier member {m:?}"));
             }
+        }
+        if let Some(s) = &overdue_with {
+            if !valid_name(s) {
+                return Err(format!("invalid script name {s:?}"));
+            }
+        }
+        if deadline_s.is_some_and(|d| d > timer::MAX_TIMER_AHEAD_SECS) {
+            return Err(format!(
+                "deadline_s is at most {} days",
+                timer::MAX_TIMER_AHEAD_SECS / 86_400
+            ));
         }
         if let Some(s) = &continue_with {
             if !valid_name(s) {
@@ -173,6 +199,7 @@ impl Barriers {
             total: members.len(),
             ready: false,
             continue_with,
+            overdue_with,
             state,
             expires_s: ttl - EXPIRY_SLACK_SECS,
             due_s: deadline_s.map(|d| now + d),
@@ -196,9 +223,28 @@ impl Barriers {
             self.op()?
                 .put_if_free(&pk, item(&format!("{PENDING}{m}"), "1".into(), ttl), now)?;
         }
+        let stored = self.header(&pk)?;
+        // Registered from the stored header, so a create that is repeated after a crash arms the same timer.
+        if let (Some(due), Some(_)) = (stored.due_s, &self.queue) {
+            let payload = Payload {
+                script: stored.overdue_with.clone(),
+                version: None,
+                event: json!({ "type": "barrier.overdue", "barrier": id }),
+                trace: Some(stored.trace.clone()),
+            };
+            self.budget.take_data()?;
+            timer::register(
+                self.db.raw().as_ref(),
+                &self.tenant,
+                &timer_id(&id),
+                due,
+                &payload,
+                now,
+            )?;
+        }
         let ready = Header {
             ready: true,
-            ..self.header(&pk)?
+            ..stored
         };
         self.op()?.put(&pk, item(HEADER, body(&ready)?, ttl))
     }
@@ -270,7 +316,10 @@ impl Barriers {
                 _ => Ok(false),
             };
         }
-        let mut envelope = json!({ "tenant": self.tenant, "event": { "barrier": id } });
+        let mut envelope = json!({
+            "tenant": self.tenant,
+            "event": { "type": "barrier.complete", "barrier": id },
+        });
         if let Some(s) = &header.continue_with {
             envelope["script"] = s.clone().into();
         }
@@ -284,6 +333,13 @@ impl Barriers {
             pk,
             item(FINAL, "sent".into(), now_secs() + DB_TTL.as_secs()),
         )?;
+        // The deadline no longer matters. If this fails the overdue script still runs once, for a
+        // barrier that is finished, and `status` tells it so.
+        if let Some(due) = header.due_s {
+            if self.budget.take_data().is_ok() {
+                let _ = timer::cancel(self.db.raw().as_ref(), &self.tenant, &timer_id(id), due);
+            }
+        }
         Ok(true)
     }
 
@@ -404,6 +460,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
                 id: id.clone(),
                 members,
                 continue_with: opts.get::<Option<String>>("continue_with")?,
+                overdue_with: opts.get::<Option<String>>("overdue_with")?,
                 state,
                 deadline_s: opts.get::<Option<u64>>("deadline_s")?,
             })
@@ -639,6 +696,7 @@ mod tests {
             id: id.into(),
             members: members.iter().map(|m| m.to_string()).collect(),
             continue_with: Some("finalize".into()),
+            overdue_with: None,
             state: json!({ "batch": 7 }),
             deadline_s: None,
         }
@@ -694,7 +752,10 @@ mod tests {
         let msg: Json = serde_json::from_str(&sent[0]).unwrap();
         assert_eq!(msg["tenant"], "acme");
         assert_eq!(msg["script"], "finalize");
-        assert_eq!(msg["event"], json!({ "barrier": "b1" }));
+        assert_eq!(
+            msg["event"],
+            json!({ "type": "barrier.complete", "barrier": "b1" })
+        );
     }
 
     #[test]
@@ -822,6 +883,66 @@ mod tests {
             ),
             (json!(true), json!(true), json!(false))
         );
+    }
+
+    #[test]
+    fn an_unresolved_barrier_gets_an_overdue_event_from_the_sweep() {
+        let (b, mem, sent) = setup();
+        let mut s = spec("b1", &["a", "b"]);
+        s.deadline_s = Some(60);
+        s.overdue_with = Some("chase".into());
+        b.create(s).unwrap();
+        b.ack("b1", "a", &ok()).unwrap();
+
+        let now = now_secs();
+        assert_eq!(
+            timer::sweep(&*mem, &*sent, now, 10).unwrap().fired,
+            0,
+            "not due yet"
+        );
+        assert_eq!(timer::sweep(&*mem, &*sent, now + 61, 10).unwrap().fired, 1);
+        let sent = sent.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let msg: Json = serde_json::from_str(&sent[0]).unwrap();
+        assert_eq!(
+            msg,
+            json!({
+                "tenant": "acme", "script": "chase",
+                "event": { "type": "barrier.overdue", "barrier": "b1" },
+            })
+        );
+    }
+
+    #[test]
+    fn completing_the_barrier_cancels_its_deadline() {
+        let (b, mem, sent) = setup();
+        let mut s = spec("b1", &["a"]);
+        s.deadline_s = Some(60);
+        b.create(s).unwrap();
+        assert!(b.ack("b1", "a", &ok()).unwrap().dispatched);
+        assert_eq!(sent.0.lock().unwrap().len(), 1, "only the continuation");
+        let r = timer::sweep(&*mem, &*sent, now_secs() + 3600, 10).unwrap();
+        assert_eq!(r, timer::SweepReport::default());
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_repeated_create_arms_the_deadline_once_and_a_far_one_is_refused() {
+        let (b, mem, sent) = setup();
+        let mut s = spec("b1", &["a"]);
+        s.deadline_s = Some(0);
+        b.create(s).unwrap();
+        let mut again = spec("b1", &["a"]);
+        again.deadline_s = Some(0);
+        b.create(again).unwrap();
+        assert_eq!(
+            timer::sweep(&*mem, &*sent, now_secs(), 10).unwrap().fired,
+            1
+        );
+
+        let mut far = spec("b2", &["a"]);
+        far.deadline_s = Some(timer::MAX_TIMER_AHEAD_SECS + 1);
+        assert!(b.create(far).unwrap_err().contains("deadline_s is at most"));
     }
 
     #[test]

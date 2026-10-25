@@ -35,6 +35,7 @@ nav = [
     { "Streams and XML" = "streams-xml.md" },
     { "SQL scratch databases" = "sql.md" },
     { "Router" = "router.md" },
+    { "Schedules and timers" = "schedules.md" },
     { "Worker classes" = "ingress.md" },
     { "Limits" = "limits.md" },
   ] },

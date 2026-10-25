@@ -20,6 +20,8 @@ enum Kind {
     Lib,
     /// Shared module `@shared/<name>/<version>.luau`; versions are always immutable.
     Shared,
+    /// `tenants.json`: the operator's list of every tenant; mutable, always revalidated.
+    Tenants,
 }
 
 /// Directory under a tenant that holds its `require("@lib/...")` modules. A script cannot use this name.
@@ -69,6 +71,16 @@ impl ScriptKey {
         })
     }
 
+    /// Key of the operator's list of tenants (`tenants.json`) in the script bucket.
+    pub fn tenants() -> Self {
+        Self {
+            tenant: String::new(),
+            script: String::new(),
+            version: String::new(),
+            kind: Kind::Tenants,
+        }
+    }
+
     /// A module in the tenant's `lib/` folder; `path` is `/`-separated without extension, e.g. `util/dates`.
     pub fn lib(tenant: &str, path: &str) -> Result<Self, LoadError> {
         if !valid(tenant) {
@@ -113,6 +125,7 @@ impl ScriptKey {
             Kind::Config => format!("{}/config.json", self.tenant),
             Kind::Lib => format!("{}/{LIB_DIR}/{}.luau", self.tenant, self.script),
             Kind::Shared => format!("{SHARED_DIR}/{}/{}.luau", self.script, self.version),
+            Kind::Tenants => "tenants.json".to_string(),
         }
     }
 
@@ -120,7 +133,7 @@ impl ScriptKey {
         match self.kind {
             Kind::Script => self.version != "latest",
             Kind::Shared => true,
-            Kind::Config | Kind::Lib => false,
+            Kind::Config | Kind::Lib | Kind::Tenants => false,
         }
     }
 }

@@ -246,7 +246,7 @@ declare native: {
     },
     barrier: {
         -- Registers the members to wait for (at most 10 000); returns the id (generated unless given).
-        create: (opts: { id: string?, members: { string }, continue_with: string?, state: any, deadline_s: number? }) -> string,
+        create: (opts: { id: string?, members: { string }, continue_with: string?, state: any, deadline_s: number?, overdue_with: string? }) -> string,
         -- Records a member's outcome (the first ack wins). `complete` once every member is resolved;
         -- `dispatched` when this call sent the continuation.
         ack: (id: string, member: string, outcome: { ok: boolean?, error: string?, result: any }?) -> { duplicate: boolean, complete: boolean, dispatched: boolean },

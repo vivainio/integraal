@@ -25,14 +25,33 @@ pub enum Message {
     Envelope(Invocation),
     /// S3 notification records, with how many times this set has already been re-sent.
     S3 { records: Vec<Value>, attempt: u32 },
+    /// A tick from an EventBridge schedule (`{"type":"system.tick","every":"minute","at":"..."}`):
+    /// not for any tenant, handled by the server itself.
+    Tick(Tick),
     /// Nothing to do (such as S3's `s3:TestEvent`): acknowledge it.
     Ignored,
+}
+
+/// One firing of an operator schedule.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Tick {
+    pub every: crate::schedule::Every,
+    /// The scheduled time as the schedule reported it (`<aws.scheduler.scheduled-time>`), not the
+    /// time the tick was handled: it is what handlers use to tell one firing from another.
+    pub at: String,
 }
 
 pub fn classify(body: &str) -> Result<Message, String> {
     let v: Value = serde_json::from_str(body).map_err(|e| format!("not JSON: {e}"))?;
     if v.get("Event").and_then(Value::as_str) == Some("s3:TestEvent") {
         return Ok(Message::Ignored);
+    }
+    if v.get("type").and_then(Value::as_str) == Some("system.tick") {
+        let tick: Tick = serde_json::from_value(v).map_err(|e| format!("bad tick: {e}"))?;
+        if tick.at.is_empty() || tick.at.len() > 64 {
+            return Err("bad tick: `at` must be 1 to 64 characters".into());
+        }
+        return Ok(Message::Tick(tick));
     }
     if let Some(records) = v.get("Records").and_then(Value::as_array) {
         let attempt = v.get(ATTEMPT_FIELD).and_then(Value::as_u64).unwrap_or(0) as u32;
@@ -167,6 +186,7 @@ impl S3Events {
             version: None,
             trigger: Trigger::Queue,
             event: json!({
+                "type": "s3.object",
                 "bucket": bucket,
                 "key": relative,
                 "size": s3.pointer("/object/size").cloned().unwrap_or(Value::Null),
@@ -215,6 +235,27 @@ mod tests {
     }
 
     #[test]
+    fn ticks_are_recognised_and_checked() {
+        let tick = |body: &str| classify(body);
+        match tick(r#"{"type":"system.tick","every":"hour","at":"2026-10-25T14:00:00Z"}"#).unwrap()
+        {
+            Message::Tick(t) => assert_eq!(
+                (t.every, t.at.as_str()),
+                (crate::Every::Hour, "2026-10-25T14:00:00Z")
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(tick(r#"{"type":"system.tick","every":"week","at":"x"}"#).is_err());
+        assert!(tick(r#"{"type":"system.tick","every":"day"}"#).is_err());
+        assert!(tick(r#"{"type":"system.tick","every":"day","at":""}"#).is_err());
+        // an ordinary envelope whose event happens to have a type is still an envelope
+        assert!(matches!(
+            tick(r#"{"tenant":"acme","event":{"type":"system.tick"}}"#).unwrap(),
+            Message::Envelope(_)
+        ));
+    }
+
+    #[test]
     fn batch_bucket_events_carry_the_reserved_bucket_name() {
         let ev = events().with_batch("acme-batch", "jobs-root/");
         let inv = ev
@@ -248,7 +289,7 @@ mod tests {
         assert_eq!(inv.trigger, Trigger::Queue);
         assert_eq!(
             inv.event,
-            json!({"bucket":"In","key":"incoming/my file+1.xml","size":12,"etag":"abc","event":"ObjectCreated:Put"})
+            json!({"type":"s3.object","bucket":"In","key":"incoming/my file+1.xml","size":12,"etag":"abc","event":"ObjectCreated:Put"})
         );
     }
 

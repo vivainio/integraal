@@ -51,9 +51,12 @@ roto.s3.put(
 	`\{"router":"router",`
 		.. `"vars":\{"megalith":"{roto.vars.MEGALITH}"},`
 		.. `"buckets":\{"In":"readwrite","Out":"readwrite","Temp":"readwrite","Drops":"readwrite"},`
-		.. `"queue":true,"batch":true,`
+		.. `"queue":true,"batch":true,"schedule":["hour"],`
 		.. `"placement":\{"class":"small","classes":["large"],"script":"place"},`
 		.. `"limits":\{"timeout_ms":20000},`
 		.. `"http":\{"allow":["$\{megalith}"]}}`,
 	{ content_type = "application/json" }
 )
+
+-- Every tenant, for the operator ticks.
+roto.s3.put("scripts", "tenants.json", `["mega"]`, { content_type = "application/json" })

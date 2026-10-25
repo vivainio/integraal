@@ -214,6 +214,7 @@ def stack(megalith):
             "admin": {"port": admin_port, "token_env": "INTEGRAAL_ADMIN_TOKEN"},
             "ingress": {"queues": {"small": queues["jobs-small"], "large": queues["jobs-large"]}, "default": "small"},
             "server": {"port": server_port},
+            "schedule": {"spread_s": {"minute": 1, "hour": 2, "day": 2}},
             "throttle": [{"url": f"{megalith.base}/slow/", "max_concurrent": 2, "per_second": 50}],
         }
         cfg_path = work / "server.json"

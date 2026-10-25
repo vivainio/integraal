@@ -10,6 +10,7 @@ mod modules;
 mod placement;
 mod s3_data;
 pub mod s3_events;
+pub mod schedule;
 mod sqs_queue;
 pub mod telemetry;
 
@@ -21,7 +22,8 @@ pub use dynamo_db::DynamoBackend;
 pub use engine::{Engine, Limits};
 pub use integraal_wrappers::{fail_inflight_http, Vault, VaultEntry};
 pub use s3_data::S3Backend;
-pub use s3_events::S3Events;
+pub use s3_events::{S3Events, Tick};
+pub use schedule::{Every, ScheduleConfig, Spread, TickReport};
 pub use sqs_queue::SqsBackend;
 
 use serde::{Deserialize, Serialize};

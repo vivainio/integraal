@@ -16,6 +16,7 @@
 //!   "admin":     { "port": 9090, "token_env": "INTEGRAAL_ADMIN_TOKEN" },
 //!   "queue":     { "url": "https://sqs.eu-west-1.amazonaws.com/123/integraal" },
 //!   "ingress":   { "queues": { "small": "https://sqs.../jobs-small", "large": "https://sqs.../jobs-large" }, "default": "small" },
+//!   "schedule":  { "spread_s": { "minute": 20, "hour": 300, "day": 900 } },
 //!   "server":    { "port": 8080 },
 //!   "throttle":  [{ "url": "https://api.partner.com/v1/", "max_concurrent": 2, "per_second": 5 }],
 //!   "ceiling":   { "timeout_ms": 60000, "memory_mb": 256 },
@@ -64,6 +65,9 @@ pub struct GlobalConfig {
     /// Intake Lambda only: the job queue of each worker size class.
     #[serde(default)]
     pub ingress: Option<IngressConfig>,
+    /// Operator ticks (the server handles `{"type":"system.tick"}` messages from EventBridge Scheduler).
+    #[serde(default)]
+    pub schedule: crate::ScheduleConfig,
     #[serde(default)]
     pub server: ServerConfig,
     /// Outbound HTTP limits; applied by the Fargate server only.
@@ -322,6 +326,7 @@ impl GlobalConfig {
                 return Err("ingress.queues: every class needs a queue URL".into());
             }
         }
+        self.schedule.validate()?;
         Throttle::new(self.throttle.clone())?;
         Ok(())
     }
@@ -417,7 +422,7 @@ mod tests {
             "batch": {"bucket": "partner-batch", "prefix": "tenants/"},
             "flow_logs": {"bucket": "flow-logs", "prefix": "logs/"},
             "db": {"table": "t"}, "callbacks": {"base_url": "https://h.example.com"},
-            "queue": {"url": "https://sqs/q"}, "admin": {"port": 9090, "token_env": "T"}, "crypto": {"keys": {"1": "K1", "2": "K2"}, "active": 2}, "server": {"port": 9000},
+            "queue": {"url": "https://sqs/q"}, "admin": {"port": 9090, "token_env": "T"}, "crypto": {"keys": {"1": "K1", "2": "K2"}, "active": 2}, "server": {"port": 9000}, "schedule": {"spread_s": {"hour": 120}},
             "throttle": [{"url": "https://api.partner.com/", "max_concurrent": 2}],
             "ingress": {"queues": {"small": "https://sqs/s", "large": "https://sqs/l"}, "default": "small", "place_timeout_ms": 200},
             "ceiling": {"timeout_ms": 5000, "memory_mb": 32}, "log": "debug"
@@ -460,6 +465,10 @@ mod tests {
             "rule without a limit"
         );
         assert!(bad(r#""server": {"port": 99999}"#), "port out of range");
+        assert!(
+            bad(r#""schedule": {"spread_s": {"minute": 60}}"#),
+            "spread as long as the period"
+        );
         assert!(
             bad(r#""ingress": {"queues": {"a": "u"}, "default": "b"}"#),
             "default class without a queue"

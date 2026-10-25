@@ -72,6 +72,13 @@ pub async fn plan(
                 });
             }
             Ok(Message::Ignored) => {}
+            // Ticks belong to no tenant. They go to the default class, whose server handles them.
+            Ok(Message::Tick(_)) => out.push(Outgoing {
+                class: cfg.default.clone(),
+                body: m.body.clone(),
+                source: m.id.clone(),
+                trace: m.trace.clone(),
+            }),
             Ok(Message::Envelope(inv)) => {
                 items.push(inv);
                 slots.push(Slot::Whole(i));

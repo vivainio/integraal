@@ -154,6 +154,10 @@ pub struct TenantConfig {
     /// Which worker size class this tenant's messages are forwarded to by the intake Lambda.
     #[serde(default)]
     pub placement: Placement,
+    /// Operator ticks this tenant receives (`"minute"`, `"hour"`, `"day"`), as events with
+    /// `type = "schedule"`. The tenant must also be listed in `tenants.json`.
+    #[serde(default)]
+    pub schedule: Vec<crate::schedule::Every>,
 }
 
 /// The `placement` block of a tenant's `config.json`; see `docs/ingress.md`.
@@ -343,6 +347,14 @@ impl Engine {
 
     pub(crate) fn loader(&self) -> &Arc<CachedLoader> {
         &self.loader
+    }
+
+    pub(crate) fn queue_backend(&self) -> Option<Arc<dyn QueueBackend>> {
+        self.queue.clone()
+    }
+
+    pub(crate) fn item_backend(&self) -> Option<Arc<dyn ItemBackend>> {
+        self.db.as_ref().map(|(backend, _)| backend.clone())
     }
 
     /// Like `invoke`, additionally capping the timeout (e.g. to the time a Lambda has left).
@@ -1675,6 +1687,92 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn ticks_reach_only_opted_in_tenants_and_the_minute_tick_sweeps_timers() {
+        use crate::{schedule::offset_secs, Every, Spread, Tick};
+        let store = Arc::new(MemoryStore::default());
+        store.put(
+            &ScriptKey::tenants(),
+            r#"["acme", "globex", "idle", "nocfg", "../bad"]"#,
+        );
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"schedule":["hour","day"]}"#,
+        );
+        store.put(
+            &ScriptKey::config("globex").unwrap(),
+            r#"{"schedule":["day"]}"#,
+        );
+        store.put(&ScriptKey::config("idle").unwrap(), "{}");
+        let queue = Arc::new(MemQueue::default());
+        let items = Arc::new(MemItems::default());
+        let engine = Engine::new(
+            Arc::new(CachedLoader::new(Shared(store), Duration::from_secs(60))),
+            Limits::default(),
+        )
+        .with_queue(queue.clone())
+        .with_db(items.clone());
+        let spread = Spread::default();
+        let tick = |every| Tick {
+            every,
+            at: "2026-10-25T14:00:00Z".into(),
+        };
+
+        let r = engine.tick(&tick(Every::Hour), &spread).await.unwrap();
+        assert_eq!(r.sent, 1);
+        assert_eq!(
+            *queue.0.lock().unwrap(),
+            vec![(
+                json!({"tenant":"acme","event":{"type":"schedule","every":"hour","at":"2026-10-25T14:00:00Z"}}),
+                offset_secs("acme", Every::Hour, spread.hour),
+            )]
+        );
+        queue.0.lock().unwrap().clear();
+        assert_eq!(
+            engine.tick(&tick(Every::Day), &spread).await.unwrap().sent,
+            2
+        );
+        queue.0.lock().unwrap().clear();
+
+        // The minute tick sends due timers; nobody asked for minute ticks, so that is all it sends.
+        let payload = integraal_wrappers::TimerPayload {
+            script: None,
+            version: None,
+            event: json!({"type":"timer"}),
+            trace: None,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        integraal_wrappers::register_timer(&*items, "acme", "t1", now - 1, &payload, now - 5)
+            .unwrap();
+        let r = engine.tick(&tick(Every::Minute), &spread).await.unwrap();
+        assert_eq!((r.swept.unwrap().fired, r.sent), (1, 0));
+        assert_eq!(
+            *queue.0.lock().unwrap(),
+            vec![(json!({"tenant":"acme","event":{"type":"timer"}}), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn ticks_without_tenants_json_or_a_queue() {
+        use crate::{Every, Spread, Tick};
+        let store = Arc::new(MemoryStore::default());
+        let loader = Arc::new(CachedLoader::new(Shared(store), Duration::from_secs(60)));
+        let tick = Tick {
+            every: Every::Hour,
+            at: "x".into(),
+        };
+        let bare = Engine::new(loader.clone(), Limits::default());
+        assert!(bare.tick(&tick, &Spread::default()).await.is_err());
+        let engine = bare.with_queue(Arc::new(MemQueue::default()));
+        assert_eq!(
+            engine.tick(&tick, &Spread::default()).await.unwrap().sent,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn barrier_collects_acks_and_continues_once() {
         let src = r#"return { handle = function(ctx, ev)
             if ev.step == "create" then
@@ -1724,7 +1822,7 @@ pub(crate) mod tests {
         assert_eq!(
             *queue.0.lock().unwrap(),
             vec![(
-                json!({"tenant":"acme","script":"finalize","event":{"barrier":"b1"}}),
+                json!({"tenant":"acme","script":"finalize","event":{"type":"barrier.complete","barrier":"b1"}}),
                 0
             )]
         );

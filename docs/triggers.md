@@ -53,6 +53,12 @@ Set `queue.url` in the config. The message body is the envelope; omit `script` t
 **deletes a message only on success**; failures return to the queue after the visibility timeout
 and eventually land in the queue's dead-letter queue.
 
+## Schedules
+
+EventBridge Scheduler can send ticks to the same queue. A `{"type":"system.tick",...}` message is
+handled by the server itself and fanned out to the tenants that opted in; see
+[Schedules and timers](schedules.md).
+
 ## S3 notifications
 
 Point an S3 event notification (`s3:ObjectCreated:*`) from each bucket at the queue. The
@@ -60,7 +66,7 @@ server recognises the notification and splits it into **one invocation per objec
 
 - the tenant is the first path segment after `buckets.prefix`, so one notification serves all tenants;
 - no script is named, so the tenant's [router](router.md) picks one;
-- the event is `{ bucket, key, size, etag, event }`, where `bucket` is the logical name (`In`) and
+- the event is `{ type = "s3.object", bucket, key, size, etag, event }`, where `bucket` is the logical name (`In`) and
   `key` is relative to the tenant's prefix, so both can go straight to `native.bucket`;
 - other event types, folder markers and S3's test event are acknowledged and skipped.
 

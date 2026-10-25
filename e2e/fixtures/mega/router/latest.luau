@@ -2,6 +2,12 @@
 --!runtime 1
 -- Routes everything that arrives without a script name.
 local function on_route(_ctx, event)
+	if event.type == "schedule" then
+		return "ticker"
+	end
+	if event.type == "barrier.overdue" then
+		return "overdue"
+	end
 	local batch = native.batch.route(event)
 	if batch then
 		return batch.script and { script = batch.script, event = batch.event } or "hello"
