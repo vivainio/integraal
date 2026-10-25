@@ -38,6 +38,7 @@ nav = [
     { "SQL scratch databases" = "sql.md" },
     { "Router" = "router.md" },
     { "Schedules and timers" = "schedules.md" },
+    { "Hooking up event sources" = "event-sources.md" },
     { "Worker classes" = "ingress.md" },
     { "Limits" = "limits.md" },
   ] },
