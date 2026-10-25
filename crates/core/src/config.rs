@@ -14,6 +14,7 @@
 //!   "callbacks": { "base_url": "https://hooks.example.com" },
 //!   "crypto":    { "keys": { "1": "INTEGRAAL_KEY_1" }, "active": 1 },
 //!   "admin":     { "port": 9090, "token_env": "INTEGRAAL_ADMIN_TOKEN" },
+//!   "local_api": { "port": 9091 },
 //!   "queue":     { "url": "https://sqs.eu-west-1.amazonaws.com/123/integraal" },
 //!   "ingress":   { "queues": { "small": "https://sqs.../jobs-small", "large": "https://sqs.../jobs-large" }, "default": "small" },
 //!   "schedule":  { "spread_s": { "minute": 20, "hour": 300, "day": 900 } },
@@ -59,6 +60,9 @@ pub struct GlobalConfig {
     /// Operator API on its own port (server only); see the server crate.
     #[serde(default)]
     pub admin: Option<AdminConfig>,
+    /// Read-only query API for flow logs, bound to loopback only (server only).
+    #[serde(default)]
+    pub local_api: Option<LocalApiConfig>,
     /// SQS queue: the server polls it, the webhook Lambda sends to it.
     #[serde(default)]
     pub queue: Option<QueueConfig>,
@@ -141,6 +145,14 @@ pub struct CallbacksConfig {
 pub struct AdminConfig {
     pub port: u16,
     pub token_env: String,
+}
+
+/// Read-only flow log queries on `127.0.0.1:<port>`; no token, because only processes on the same
+/// host can connect. Needs `flow_logs`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalApiConfig {
+    pub port: u16,
 }
 
 /// Master keys are secrets, so the file only names the environment variables that hold them
@@ -308,6 +320,14 @@ impl GlobalConfig {
             }
             if self.db.is_none() || self.crypto.is_none() {
                 return Err("admin needs db and crypto (the vault lives in the table, sealed with the master keys)".into());
+            }
+        }
+        if let Some(l) = &self.local_api {
+            if self.flow_logs.is_none() {
+                return Err("local_api needs flow_logs".into());
+            }
+            if l.port == self.server.port || self.admin.as_ref().is_some_and(|a| a.port == l.port) {
+                return Err("local_api.port must differ from server.port and admin.port".into());
             }
         }
         if self.db.as_ref().is_some_and(|d| d.table.is_empty())

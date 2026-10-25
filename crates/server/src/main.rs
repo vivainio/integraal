@@ -69,6 +69,21 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    if let Some(l) = &cfg.local_api {
+        let sink = engine
+            .flow_logs()
+            .expect("config validation requires flow_logs")
+            .clone();
+        // Loopback only: reaching the port at all is the access check.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", l.port)).await?;
+        tracing::info!(port = %l.port, "local api listening");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, local_router(sink)).await {
+                tracing::error!(error = %e, "local api stopped");
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/{tenant}/{script}", post(http_invoke))
@@ -115,6 +130,73 @@ async fn flow_command(cfg: &GlobalConfig, args: &[String]) -> anyhow::Result<()>
         println!("{l}");
     }
     Ok(())
+}
+
+/// Read-only flow log queries, served on loopback only (`local_api`).
+///
+/// - `GET /flows/{tenant}?day=yyyy-mm-dd`          flows that started that UTC day (default: today)
+/// - `GET /flows/{tenant}/{trace}?since=<ms>`      the merged log; `since` keeps only later lines
+/// - `GET /flows/{tenant}/{trace}/summary`         one row per invocation
+fn local_router(sink: integraal_core::flow_log::FlowLogSink) -> Router {
+    Router::new()
+        .route("/flows/{tenant}", get(local_list))
+        .route("/flows/{tenant}/{trace}", get(local_show))
+        .route("/flows/{tenant}/{trace}/summary", get(local_summary))
+        .with_state(sink)
+}
+
+type Sink = State<integraal_core::flow_log::FlowLogSink>;
+
+async fn blocking_read(
+    f: impl FnOnce() -> Result<Value, String> + Send + 'static,
+) -> AdminResult {
+    vault_call(f, |v| (StatusCode::OK, Json(v))).await
+}
+
+async fn local_list(
+    State(sink): Sink,
+    Path(tenant): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> AdminResult {
+    let day = q
+        .get("day")
+        .cloned()
+        .unwrap_or_else(|| integraal_core::flow_log::utc_day(now_ms()));
+    blocking_read(move || sink.list_day(&tenant, &day).map(Value::Array)).await
+}
+
+async fn local_show(
+    State(sink): Sink,
+    Path((tenant, trace)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> AdminResult {
+    let since: u64 = q.get("since").and_then(|s| s.parse().ok()).unwrap_or(0);
+    blocking_read(move || {
+        let mut lines = sink.read_flow(&tenant, &trace)?;
+        lines.retain(|l| {
+            l["t"].as_u64().or_else(|| l["start_ms"].as_u64()).unwrap_or(0) > since
+        });
+        Ok(Value::Array(lines))
+    })
+    .await
+}
+
+async fn local_summary(
+    State(sink): Sink,
+    Path((tenant, trace)): Path<(String, String)>,
+) -> AdminResult {
+    blocking_read(move || {
+        sink.read_flow(&tenant, &trace)
+            .map(|l| integraal_core::flow_log::summarize(&l))
+    })
+    .await
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Resolves on SIGTERM (what ECS sends on a deploy or scale-in) or Ctrl-C.

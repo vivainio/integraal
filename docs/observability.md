@@ -87,6 +87,28 @@ integraal-server flow show acme 4bf92f3577b34da6a3ce929d0e0e4736
 integraal-server flow list acme 2026-10-25
 ```
 
+### Local query API
+
+With `"local_api": { "port": 9091 }` in `integraal.json` (needs `flow_logs`), the server also answers
+read-only flow queries on `127.0.0.1:<port>`. There is no token: the listener is bound to loopback,
+so only processes on the same host (or its container) can connect. From elsewhere, use
+`ssh host integraal-client ...` or an SSH tunnel.
+
+| Request | Returns |
+| --- | --- |
+| `GET /flows/{tenant}?day=yyyy-mm-dd` | the flows that started that UTC day (default today) |
+| `GET /flows/{tenant}/{trace}?since=<ms>` | the merged log; `since` keeps only later lines, for tailing |
+| `GET /flows/{tenant}/{trace}/summary` | one row per invocation: script, outcome, duration, error, log line count, failed http calls; `outcome` is `null` when the invocation wrote no footer |
+
+`integraal-client` is a thin wrapper that prints each response as it came (`INTEGRAAL_URL`
+overrides `http://127.0.0.1:9091`):
+
+```bash
+integraal-client flows acme 2026-10-25
+integraal-client summary acme 4bf92f3577b34da6a3ce929d0e0e4736
+integraal-client flow acme 4bf92f3577b34da6a3ce929d0e0e4736 --since 1761390000000
+```
+
 The process needs `s3:ListBucket` and `s3:GetObject` on the flow log bucket for this.
 
 ## Metrics

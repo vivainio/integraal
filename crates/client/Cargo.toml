@@ -1,0 +1,7 @@
+[package]
+name = "integraal-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ureq = "2"

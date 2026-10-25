@@ -167,9 +167,76 @@ impl FlowLogSink {
     }
 }
 
+/// The UTC day (`yyyy-mm-dd`) of a Unix time in milliseconds.
+pub fn utc_day(ms: u64) -> String {
+    let (y, m, d) = civil(ms);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// One row per invocation of a merged flow (see `FlowLogSink::read_flow`): its script, outcome,
+/// duration and error, how many log lines and failed http calls it had, and the failed calls.
+/// An invocation whose segment has no `end` line reports `outcome: null`.
+pub fn summarize(lines: &[Value]) -> Value {
+    let mut rows: Vec<Value> = Vec::new();
+    for l in lines {
+        let span = l["span_id"].as_str().unwrap_or("");
+        let at = rows.iter().position(|r| r["span_id"] == span);
+        let i = at.unwrap_or_else(|| {
+            rows.push(serde_json::json!({
+                "span_id": span, "outcome": null, "log_lines": 0, "failed_http": [],
+            }));
+            rows.len() - 1
+        });
+        let r = &mut rows[i];
+        match l["type"].as_str() {
+            Some("header") => {
+                for k in ["script", "version", "trigger", "attempt", "start_ms"] {
+                    r[k] = l[k].clone();
+                }
+            }
+            Some("end") => {
+                for k in ["outcome", "duration_ms", "error"] {
+                    r[k] = l[k].clone();
+                }
+            }
+            Some("log") => r["log_lines"] = (r["log_lines"].as_u64().unwrap_or(0) + 1).into(),
+            Some("http") if !(200..400).contains(&l["status"].as_u64().unwrap_or(0)) => {
+                if let Some(a) = r["failed_http"].as_array_mut() {
+                    a.push(serde_json::json!({
+                        "method": l["method"], "host": l["host"], "status": l["status"],
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    rows.sort_by_key(|r| r["start_ms"].as_u64().unwrap_or(0));
+    Value::Array(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_has_a_row_per_invocation() {
+        use serde_json::json;
+        let lines = vec![
+            json!({"type":"header","span_id":"b","script":"s2","start_ms":20}),
+            json!({"type":"header","span_id":"a","script":"s1","start_ms":10}),
+            json!({"type":"log","span_id":"a","t":11}),
+            json!({"type":"http","span_id":"a","t":12,"method":"GET","host":"h","status":500}),
+            json!({"type":"http","span_id":"a","t":13,"method":"GET","host":"h","status":200}),
+            json!({"type":"end","span_id":"a","t":14,"outcome":"ok","duration_ms":4}),
+        ];
+        let rows = summarize(&lines);
+        assert_eq!(rows[0]["script"], "s1");
+        assert_eq!(rows[0]["outcome"], "ok");
+        assert_eq!(rows[0]["log_lines"], 1);
+        assert_eq!(rows[0]["failed_http"].as_array().unwrap().len(), 1);
+        assert_eq!(rows[1]["script"], "s2");
+        assert!(rows[1]["outcome"].is_null());
+    }
 
     #[test]
     fn civil_dates() {

@@ -1983,6 +1983,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "integraal-client"
+version = "0.1.0"
+dependencies = [
+ "ureq 2.12.1",
+]
+
+[[package]]
 name = "integraal-core"
 version = "0.1.0"
 dependencies = [
@@ -2111,7 +2118,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uppsala",
- "ureq",
+ "ureq 3.5.0",
  "url",
 ]
 
@@ -4021,6 +4028,22 @@ checksum = "717b252544d044a701181a32cf7ff443b86603acf99faf8d45e14b20a8c769be"
 
 [[package]]
 name = "ureq"
+version = "2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "log",
+ "once_cell",
+ "rustls 0.23.46",
+ "rustls-pki-types",
+ "url",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ureq"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cde93ff05758a36a851a398a772b0b79a82fbe3c186a46f2696baaeaf84c966b"
@@ -4033,7 +4056,7 @@ dependencies = [
  "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -4221,6 +4244,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
