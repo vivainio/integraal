@@ -65,17 +65,7 @@ In the [global config](deployment.md#configuration):
 
 - `buckets.map` names the buckets (letters, digits and `_`) and maps them to real S3 bucket names.
   This enables `native.bucket.<name>`.
-- `buckets.dirs` maps names to **whitelisted directories** on the host's file system
-  (`{ "Local": "/srv/integraal/data" }`; absolute paths, same name rules, and a name may not also be in
-  `buckets.map`). A directory may instead be an object with per-invocation byte limits that differ per path:
-  `{ "Local": { "path": "/srv/integraal/data", "max_read_mb": 200, "max_write_mb": 50 } }`.
-  Once an invocation has read or written more than the limit, further calls (and streams in progress) fail.
-  Every byte moved is counted in the `integraal.fs.bytes` metric (labels `tenant`, `dir`, `direction`).
-  They behave exactly like S3 buckets for scripts and grants: tenant data is
-  `<dir>/<buckets.prefix><tenant>/`, keys are relative, and scripts can never name a path outside it
-  (`..` is rejected and symlinks that lead out of the directory are refused). Presigned URLs and
-  S3 event notifications are not available for directories. On Lambda the directory must be a mounted
-  volume such as EFS.
+- `buckets.dirs` maps names to whitelisted host directories instead of S3 buckets; see [File system](filesystem.md).
 - `buckets.prefix` is the base prefix in every data bucket (empty or ending in `/`). Tenant data lives
   at `<prefix><tenant>/`.
 

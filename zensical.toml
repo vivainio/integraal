@@ -24,6 +24,7 @@ nav = [
   { "Features" = [
     { "Native API overview" = "native-api.md" },
     { "Buckets (S3)" = "buckets.md" },
+    { "File system" = "filesystem.md" },
     { "DynamoDB" = "dynamodb.md" },
     { "Locks" = "locks.md" },
     { "Queue" = "queue.md" },

@@ -160,6 +160,8 @@ end
 -- Object functions for one bucket, scoped to the tenant's prefix. Which buckets exist, and whether
 -- they are read, write or readwrite, comes from the tenant's config.json `buckets` block.
 -- Bucket names are operator-defined; the conventional ones are In, Out, Backup and Temp.
+-- A name may also be a whitelisted host directory (see docs/filesystem.md); the functions are the same,
+-- except presign_get and presign_put, which directories do not support.
 declare extern type Bucket with
     get: (key: string) -> string?
     put: (key: string, body: string) -> ()

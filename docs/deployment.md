@@ -31,7 +31,7 @@ process at startup.
 | `scripts.bucket` | all (required) | bucket holding scripts and tenant `config.json` files |
 | `scripts.prefix` | all | key prefix, concatenated as-is (end it with `/`) |
 | `buckets.map` | server, Lambda | named buckets (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`). Enables `native.bucket.<name>`; see [Buckets](buckets.md#deployment) |
-| `buckets.dirs` | server, Lambda | named whitelisted host directories, used like `buckets.map` buckets (absolute paths; no presigning or event notifications); see [Buckets](buckets.md#deployment) |
+| `buckets.dirs` | server, Lambda | named whitelisted host directories, used like `buckets.map` buckets (absolute paths; no presigning or event notifications); see [File system](filesystem.md) |
 | `buckets.prefix` | server, Lambda | base prefix applied in every bucket; empty or ending in `/`. Tenant data lives at `<prefix><tenant>/` |
 | `batch.bucket`, `batch.prefix` | server, Lambda | the dedicated bucket behind `native.batch`, kept apart from `buckets.map`; its [S3 notifications](batch.md#wiring-the-continuation) go to the same queue. See [Batch jobs](batch.md#tenant-config-and-deployment) |
 | `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |

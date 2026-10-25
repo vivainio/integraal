@@ -8,7 +8,7 @@ deployment settings behind it:
 
 | Namespace | Chapter |
 | --- | --- |
-| `native.bucket.<bucket>` | [Buckets (S3)](buckets.md) |
+| `native.bucket.<bucket>` | [Buckets (S3)](buckets.md), also whitelisted host directories: [File system](filesystem.md) |
 | `native.db` | [DynamoDB](dynamodb.md) |
 | `native.lock` | [Locks](locks.md) |
 | `native.queue` | [Queue](queue.md) |

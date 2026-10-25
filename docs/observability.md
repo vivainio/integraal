@@ -199,6 +199,7 @@ bucket captures with a lifecycle rule on `<prefix><tenant>/captures/`. The Lambd
 | `integraal.http.throttle.wait` | |
 | `integraal.loader.lookups` | `result`: `hit`, `revalidated`, `miss` |
 | `integraal.sqs.messages` | `disposition`: `acked`, `retry`, `requeued` |
+| `integraal.fs.bytes` | `tenant`, `dir`, `direction` (`read`, `write`): bytes moved through [whitelisted directories](filesystem.md) |
 | `integraal.placement.fallbacks` | |
 
 `tenant` is the only label without a fixed set of values.
