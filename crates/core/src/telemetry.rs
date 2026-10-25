@@ -22,6 +22,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use crate::Trigger;
+pub use integraal_wrappers::trace::{inject_current, TraceContext};
 
 const ENDPOINT_VARS: [&str; 3] = [
     "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -178,37 +179,18 @@ pub fn sqs_message(disposition: &'static str) {
         .add(1, &[KeyValue::new("disposition", disposition)]);
 }
 
-struct Carrier(std::collections::HashMap<&'static str, String>);
-
-impl opentelemetry::propagation::Extractor for Carrier {
-    fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).map(String::as_str)
-    }
-    fn keys(&self) -> Vec<&str> {
-        self.0.keys().copied().collect()
-    }
-}
-
 /// Make `span` a child of the caller's trace, given a lookup for incoming W3C headers
 /// (`traceparent`, `tracestate`). Does nothing when the headers are absent or telemetry is off.
 pub fn adopt_parent(span: &tracing::Span, header: impl Fn(&str) -> Option<String>) {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
-    let carrier = Carrier(
-        ["traceparent", "tracestate"]
-            .into_iter()
-            .filter_map(|k| header(k).map(|v| (k, v)))
-            .collect(),
-    );
-    if carrier.0.is_empty() {
-        return;
+    let trace: TraceContext = ["traceparent", "tracestate"]
+        .into_iter()
+        .filter_map(|k| header(k).map(|v| (k.to_string(), v)))
+        .collect();
+    if !trace.is_empty() {
+        let _ = span.set_parent(integraal_wrappers::trace::extract(&trace));
     }
-    let cx = global::get_text_map_propagator(|p| p.extract(&carrier));
-    let _ = span.set_parent(cx);
 }
-
-/// W3C trace context headers (`traceparent`, `tracestate`) of a message, as carried in SQS message
-/// attributes so that the work a message causes joins the trace that caused it.
-pub type TraceContext = std::collections::BTreeMap<String, String>;
 
 /// Message attributes for `ctx`, ready for the SQS builders.
 pub fn sqs_attributes(
@@ -224,23 +206,6 @@ pub fn sqs_attributes(
             Some((k.clone(), a))
         })
         .collect()
-}
-
-struct Injector<'a>(&'a mut TraceContext);
-
-impl opentelemetry::propagation::Injector for Injector<'_> {
-    fn set(&mut self, key: &str, value: String) {
-        self.0.insert(key.to_string(), value);
-    }
-}
-
-/// The trace context of the current span; empty when the span has no valid context.
-pub fn inject_current() -> TraceContext {
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
-    let cx = tracing::Span::current().context();
-    let mut out = TraceContext::new();
-    global::get_text_map_propagator(|p| p.inject_context(&cx, &mut Injector(&mut out)));
-    out
 }
 
 #[cfg(test)]

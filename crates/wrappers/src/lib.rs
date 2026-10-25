@@ -27,6 +27,7 @@ mod sink;
 mod sql;
 mod telemetry;
 mod throttle;
+pub mod trace;
 mod v1;
 mod vault;
 mod xml;

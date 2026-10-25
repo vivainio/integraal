@@ -229,6 +229,8 @@ impl DbScope {
 pub struct Callback {
     pub script: Option<String>,
     pub state: serde_json::Value,
+    /// The trace of the invocation that created the callback; the work it triggers joins it.
+    pub trace: crate::trace::TraceContext,
 }
 
 /// A consumed callback. `item` and `id` let a caller that fails to deliver put it back.
@@ -374,7 +376,10 @@ impl DbScope {
         ttl: Duration,
     ) -> Result<String, String> {
         let id = hex(&random::<16>()?);
-        let value = serde_json::json!({ "script": script, "state": state }).to_string();
+        let value = serde_json::json!({
+            "script": script, "state": state, "trace": crate::trace::inject_current()
+        })
+        .to_string();
         self.put_for(&callback_pk(&id), "", value, ttl)?;
         let exp = now_secs() + ttl.min(DB_TTL).as_secs();
         self.signer.sign(&self.tenant, &id, exp)
@@ -402,6 +407,10 @@ impl DbScope {
         let callback = Callback {
             script,
             state: v.get("state").cloned().unwrap_or(serde_json::Value::Null),
+            trace: v
+                .get("trace")
+                .and_then(|t| serde_json::from_value(t.clone()).ok())
+                .unwrap_or_default(),
         };
         Ok(Take::Found(Taken { callback, id, item }))
     }

@@ -26,6 +26,7 @@ use serde_json::{json, Value as Json};
 use crate::{
     db::{check, now_secs},
     queue::{valid_name, OutMessage, QueueBackend},
+    trace::{inject_current, TraceContext},
     Budget, DbScope, HostContext, Item, ItemBackend, DB_TTL, MAX_QUERY_ITEMS,
 };
 
@@ -55,6 +56,9 @@ struct Header {
     state: Json,
     expires_s: u64,
     due_s: Option<u64>,
+    /// The trace of the invocation that created the barrier; the continuation joins it.
+    #[serde(default)]
+    trace: TraceContext,
 }
 
 /// What one `ack` call found.
@@ -172,6 +176,7 @@ impl Barriers {
             state,
             expires_s: ttl - EXPIRY_SLACK_SECS,
             due_s: deadline_s.map(|d| now + d),
+            trace: inject_current(),
         };
         let body = |h: &Header| serde_json::to_string(h).map_err(|e| e.to_string());
         if !self
@@ -273,6 +278,7 @@ impl Barriers {
         queue.send(&[OutMessage {
             body: envelope.to_string(),
             delay_secs: 0,
+            trace: Some(header.trace.clone()),
         }])?;
         self.op()?.put(
             pk,
@@ -591,13 +597,17 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Sent(Mutex<Vec<String>>);
+    struct Sent(Mutex<Vec<String>>, Mutex<Vec<Option<TraceContext>>>);
     impl QueueBackend for Sent {
         fn send(&self, messages: &[OutMessage]) -> Result<(), String> {
             self.0
                 .lock()
                 .unwrap()
                 .extend(messages.iter().map(|m| m.body.clone()));
+            self.1
+                .lock()
+                .unwrap()
+                .extend(messages.iter().map(|m| m.trace.clone()));
             Ok(())
         }
     }
@@ -636,6 +646,35 @@ mod tests {
 
     fn ok() -> Json {
         json!({ "ok": true })
+    }
+
+    #[test]
+    fn the_continuation_joins_the_trace_that_created_the_barrier() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt;
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer.tracer("test")));
+        tracing::subscriber::with_default(subscriber, || {
+            let (b, _, sent) = setup();
+            let created = tracing::info_span!("create").in_scope(|| {
+                b.create(spec("t1", &["a"])).unwrap();
+                inject_current()
+            });
+            // A different invocation, with a trace of its own, resolves the last member.
+            tracing::info_span!("ack").in_scope(|| {
+                assert!(b.ack("t1", "a", &json!({})).unwrap().dispatched);
+            });
+            let traces = sent.1.lock().unwrap();
+            assert_eq!(traces.len(), 1);
+            let trace = traces[0].as_ref().expect("dispatch names its trace");
+            assert!(trace["traceparent"].starts_with("00-"));
+            let id = |t: &TraceContext| t["traceparent"].split('-').nth(1).unwrap().to_string();
+            assert_eq!(id(trace), id(&created));
+        });
     }
 
     #[test]

@@ -131,7 +131,7 @@ async fn handle(
         .queue_url(queue_url)
         .message_body(message.to_string())
         .set_message_attributes(Some(
-            integraal_core::telemetry::sqs_attributes(&integraal_core::telemetry::inject_current())
+            integraal_core::telemetry::sqs_attributes(&cb.trace)
                 .into_iter()
                 .collect(),
         ))

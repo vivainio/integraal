@@ -45,7 +45,7 @@ fn batches(messages: &[OutMessage]) -> Vec<&[OutMessage]> {
 impl QueueBackend for SqsBackend {
     #[tracing::instrument(name = "sqs.send", skip_all, fields(messages = messages.len()))]
     fn send(&self, messages: &[OutMessage]) -> Result<(), String> {
-        let trace = crate::telemetry::sqs_attributes(&crate::telemetry::inject_current());
+        let current = crate::telemetry::inject_current();
         for batch in batches(messages) {
             let entries = batch
                 .iter()
@@ -55,7 +55,11 @@ impl QueueBackend for SqsBackend {
                         .id(i.to_string())
                         .message_body(&m.body)
                         .delay_seconds(m.delay_secs as i32)
-                        .set_message_attributes(Some(trace.iter().cloned().collect()))
+                        .set_message_attributes(Some(
+                            crate::telemetry::sqs_attributes(m.trace.as_ref().unwrap_or(&current))
+                                .into_iter()
+                                .collect(),
+                        ))
                         .build()
                         .map_err(|e| sdk_err(&e))
                 })
@@ -90,6 +94,7 @@ mod tests {
             .map(|n| OutMessage {
                 body: "x".repeat(*n),
                 delay_secs: 0,
+                trace: None,
             })
             .collect()
     }

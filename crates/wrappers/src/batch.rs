@@ -557,6 +557,7 @@ impl UserData for Job {
                     .chain(d.http.iter().map(|(n, _)| n.as_str()))
                     .collect::<Vec<_>>(),
                 "created_ms": now,
+                "trace": crate::trace::inject_current(),
                 "inputs": d.inputs.values()
                     .flat_map(|i| i.parts.iter().filter_map(|p| p.get("key").and_then(Json::as_str)))
                     .collect::<Vec<_>>(),
@@ -709,6 +710,13 @@ fn load_envelope(ctx: &Ctx, scope: &BucketScope, id: &str) -> mlua::Result<Optio
     if j.get("v").and_then(Json::as_u64) != Some(FORMAT) {
         return Err(err(format!("batch {id}: unsupported job state version")));
     }
+    // The partner's `done.json` carries no trace, so the invocation that resumes the job links back
+    // to the one that submitted it instead.
+    let trace: crate::trace::TraceContext = j
+        .get("trace")
+        .and_then(|t| serde_json::from_value(t.clone()).ok())
+        .unwrap_or_default();
+    crate::trace::link_current_to(&trace);
     Ok(Some(Envelope {
         script: j.get("continue").and_then(Json::as_str).map(str::to_string),
         queries: j

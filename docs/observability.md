@@ -35,6 +35,15 @@ carries the W3C `traceparent` and `tracestate` as SQS message attributes; the in
 forwards them, and the server continues the trace in its `sqs_message` span. Messages from senders
 that set no such attributes start a new trace.
 
+Work that is picked up later also keeps the trace of whoever created it:
+
+- A **barrier** stores the creating invocation's trace, and the continuation message it sends when
+  the last member is acked joins that trace, however many invocations acked in between.
+- A **callback** (`native.callback`) stores it too, and the message the webhook enqueues joins it.
+- A **batch job** is resumed by the partner's `done.json`, an S3 notification that carries no
+  trace. The invocation that routes or hydrates the job therefore starts a new trace and adds a
+  span **link** to the submitting invocation's.
+
 The tracer is installed even when no OTLP endpoint is set, so the trace id exists (and is
 propagated) without a collector.
 

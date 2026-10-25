@@ -25,6 +25,8 @@ pub const SEND_CHUNK: usize = 10;
 pub struct OutMessage {
     pub body: String,
     pub delay_secs: u32,
+    /// The trace the message belongs to; `None` means the sending invocation's own.
+    pub trace: Option<crate::trace::TraceContext>,
 }
 
 /// Where `native.queue.send` delivers (SQS in production). Implementations may block and split the
@@ -113,6 +115,7 @@ pub(crate) fn api(
                 out.push(OutMessage {
                     body,
                     delay_secs: delay,
+                    trace: None,
                 });
             }
             for chunk in out.chunks(SEND_CHUNK) {
