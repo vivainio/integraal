@@ -1,4 +1,11 @@
-use std::{collections::HashMap, io::Read, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::Read,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 pub const MAX_OBJECT_BYTES: usize = 5 * 1024 * 1024;
 pub const MAX_LIST_KEYS: usize = 1000;
@@ -112,6 +119,104 @@ impl<'de> serde::Deserialize<'de> for Access {
     }
 }
 
+/// Byte limits on one bucket for a single invocation; `None` is unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IoLimits {
+    pub max_read_bytes: Option<u64>,
+    pub max_write_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoDir {
+    Read,
+    Write,
+}
+
+/// Called with every chunk of I/O that actually happened, for accounting.
+pub type IoObserver = Arc<dyn Fn(IoDir, u64) + Send + Sync>;
+
+/// Bytes moved through one bucket during one invocation, shared by every clone of its scope
+/// and by the streams it handed out.
+struct IoMeter {
+    limits: IoLimits,
+    read: AtomicU64,
+    written: AtomicU64,
+    observer: Option<IoObserver>,
+}
+
+impl IoMeter {
+    fn counter(&self, dir: IoDir) -> (&AtomicU64, Option<u64>, &'static str) {
+        match dir {
+            IoDir::Read => (&self.read, self.limits.max_read_bytes, "read"),
+            IoDir::Write => (&self.written, self.limits.max_write_bytes, "write"),
+        }
+    }
+
+    /// Fails if the limit is already used up (before an operation starts).
+    fn check(&self, dir: IoDir) -> Result<(), String> {
+        let (n, max, what) = self.counter(dir);
+        match max {
+            Some(max) if n.load(Ordering::Relaxed) >= max => Err(format!(
+                "file {what} limit of {max} bytes exceeded for this invocation"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Records `n` bytes; errors once the total passes the limit.
+    fn add(&self, dir: IoDir, n: u64) -> Result<(), String> {
+        let (c, max, what) = self.counter(dir);
+        let total = c.fetch_add(n, Ordering::Relaxed) + n;
+        if let Some(f) = &self.observer {
+            f(dir, n);
+        }
+        match max {
+            Some(max) if total > max => Err(format!(
+                "file {what} limit of {max} bytes exceeded for this invocation"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+struct MeteredReader {
+    inner: Box<dyn Read + Send>,
+    meter: Arc<IoMeter>,
+}
+
+impl Read for MeteredReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.meter
+            .check(IoDir::Read)
+            .map_err(std::io::Error::other)?;
+        let n = self.inner.read(out)?;
+        self.meter
+            .add(IoDir::Read, n as u64)
+            .map_err(std::io::Error::other)?;
+        Ok(n)
+    }
+}
+
+struct MeteredWriter {
+    inner: Box<dyn ObjectWriter>,
+    meter: Arc<IoMeter>,
+}
+
+impl ObjectWriter for MeteredWriter {
+    fn write(&mut self, data: &[u8]) -> Result<(), String> {
+        self.meter.add(IoDir::Write, data.len() as u64)?;
+        self.inner.write(data)
+    }
+
+    fn commit(self: Box<Self>) -> Result<(), String> {
+        self.inner.commit()
+    }
+
+    fn abort(self: Box<Self>) {
+        self.inner.abort()
+    }
+}
+
 /// The buckets one invocation may use, by name.
 pub type BucketScopes = HashMap<String, BucketScope>;
 
@@ -123,6 +228,7 @@ pub struct BucketScope {
     prefix: String,
     max_object_bytes: usize,
     access: Access,
+    meter: Option<Arc<IoMeter>>,
 }
 
 impl BucketScope {
@@ -135,7 +241,30 @@ impl BucketScope {
             prefix,
             max_object_bytes: MAX_OBJECT_BYTES,
             access: Access::READ_WRITE,
+            meter: None,
         }
+    }
+
+    /// Accounts the bytes read and written through this scope (shared by its clones) and
+    /// enforces `limits` for the rest of the invocation. Call once per invocation.
+    pub fn with_io(mut self, limits: IoLimits, observer: Option<IoObserver>) -> Self {
+        self.meter = Some(Arc::new(IoMeter {
+            limits,
+            read: AtomicU64::new(0),
+            written: AtomicU64::new(0),
+            observer,
+        }));
+        self
+    }
+
+    /// `(read, written)` bytes so far, when metered.
+    pub fn io_bytes(&self) -> Option<(u64, u64)> {
+        self.meter.as_ref().map(|m| {
+            (
+                m.read.load(Ordering::Relaxed),
+                m.written.load(Ordering::Relaxed),
+            )
+        })
     }
 
     pub fn with_access(mut self, access: Access) -> Self {
@@ -178,7 +307,14 @@ impl BucketScope {
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.need_read()?;
-        self.backend.get(&self.full(key)?)
+        if let Some(m) = &self.meter {
+            m.check(IoDir::Read)?;
+        }
+        let body = self.backend.get(&self.full(key)?)?;
+        if let (Some(m), Some(b)) = (&self.meter, &body) {
+            m.add(IoDir::Read, b.len() as u64)?;
+        }
+        Ok(body)
     }
 
     pub fn put(&self, key: &str, body: Vec<u8>) -> Result<(), String> {
@@ -186,18 +322,42 @@ impl BucketScope {
         if body.len() > self.max_object_bytes {
             return Err(format!("object exceeds {} bytes", self.max_object_bytes));
         }
+        if let Some(m) = &self.meter {
+            m.check(IoDir::Write)?;
+            m.add(IoDir::Write, body.len() as u64)?;
+        }
         self.backend.put(&self.full(key)?, body)
     }
 
     /// Streaming upload; requires the `write` grant.
     pub fn create(&self, key: &str) -> Result<Box<dyn ObjectWriter>, String> {
         self.need_write()?;
-        self.backend.create(&self.full(key)?)
+        if let Some(m) = &self.meter {
+            m.check(IoDir::Write)?;
+        }
+        let w = self.backend.create(&self.full(key)?)?;
+        Ok(match &self.meter {
+            Some(m) => Box::new(MeteredWriter {
+                inner: w,
+                meter: m.clone(),
+            }),
+            None => w,
+        })
     }
 
     pub fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String> {
         self.need_read()?;
-        self.backend.open(&self.full(key)?)
+        if let Some(m) = &self.meter {
+            m.check(IoDir::Read)?;
+        }
+        let r = self.backend.open(&self.full(key)?)?;
+        Ok(match (&self.meter, r) {
+            (Some(m), Some(inner)) => Some(Box::new(MeteredReader {
+                inner,
+                meter: m.clone(),
+            })),
+            (_, r) => r,
+        })
     }
 
     /// A presigned URL for one key of this scope. GET needs the `download` grant, PUT needs `upload`.

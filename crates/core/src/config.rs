@@ -108,6 +108,47 @@ pub struct BucketsConfig {
     /// Logical name (letters, digits, `_`; by convention `In`, `Out`, `Backup`, `Temp`) to S3 bucket.
     #[serde(default)]
     pub map: BTreeMap<String, String>,
+    /// Logical name to an absolute directory the operator whitelists for scripts. Tenant data is
+    /// `<dir>/<prefix><tenant>/`; the grants and the `native.bucket.<name>` API are the same as for S3 buckets.
+    #[serde(default)]
+    pub dirs: BTreeMap<String, DirConfig>,
+}
+
+/// A whitelisted directory: just the path, or the path with per-invocation I/O limits.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum DirConfig {
+    Path(String),
+    Limited(DirLimits),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirLimits {
+    pub path: String,
+    /// Most megabytes one invocation may read from this directory; unlimited when absent.
+    pub max_read_mb: Option<u64>,
+    /// Most megabytes one invocation may write to this directory; unlimited when absent.
+    pub max_write_mb: Option<u64>,
+}
+
+impl DirConfig {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Path(p) => p,
+            Self::Limited(l) => &l.path,
+        }
+    }
+
+    pub fn io_limits(&self) -> integraal_wrappers::IoLimits {
+        match self {
+            Self::Path(_) => Default::default(),
+            Self::Limited(l) => integraal_wrappers::IoLimits {
+                max_read_bytes: l.max_read_mb.map(|m| m * 1024 * 1024),
+                max_write_bytes: l.max_write_mb.map(|m| m * 1024 * 1024),
+            },
+        }
+    }
 }
 
 /// The bucket partners exchange batch jobs through. Tenants only reach it when their
@@ -289,6 +330,18 @@ impl GlobalConfig {
         if !(self.buckets.prefix.is_empty() || self.buckets.prefix.ends_with('/')) {
             return Err("buckets.prefix must be empty or end with '/'".into());
         }
+        for (name, dir) in &self.buckets.dirs {
+            let ok =
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !ok || !std::path::Path::new(dir.path()).is_absolute() {
+                return Err(format!(
+                    "buckets.dirs entry {name:?} is invalid (letters, digits and _; the directory must be an absolute path)"
+                ));
+            }
+            if self.buckets.map.contains_key(name) {
+                return Err(format!("buckets.dirs {name:?} is also in buckets.map"));
+            }
+        }
         for (name, bucket) in &self.buckets.map {
             let ok =
                 !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -439,6 +492,12 @@ impl GlobalConfig {
             let backend = crate::S3Backend::from_env(bucket).await;
             engine = engine.with_bucket(name, Arc::new(backend), self.buckets.prefix.clone());
         }
+        for (name, dir) in &self.buckets.dirs {
+            let backend = crate::debug::FsBackend::new(dir.path());
+            engine = engine
+                .with_bucket(name, Arc::new(backend), self.buckets.prefix.clone())
+                .with_bucket_io(name, dir.io_limits());
+        }
         if let Some(b) = &self.batch {
             let backend = crate::S3Backend::from_env(&b.bucket).await;
             engine = engine.with_batch_bucket(Arc::new(backend), b.prefix.clone());
@@ -531,6 +590,22 @@ mod tests {
         };
         assert!(GlobalConfig::parse("{}").is_err(), "scripts is required");
         assert!(bad(r#""bucket": "x""#), "unknown top-level key");
+        assert!(!bad(r#""buckets": {"dirs": {"Local": "/srv/data"}}"#));
+        assert!(!bad(
+            r#""buckets": {"dirs": {"Local": {"path": "/d", "max_read_mb": 5, "max_write_mb": 1}}}"#
+        ));
+        assert!(
+            bad(r#""buckets": {"dirs": {"Local": {"path": "/d", "max_rd": 5}}}"#),
+            "unknown dir key"
+        );
+        assert!(
+            bad(r#""buckets": {"dirs": {"Local": "data"}}"#),
+            "relative dir"
+        );
+        assert!(
+            bad(r#""buckets": {"dirs": {"In": "/d"}, "map": {"In": "b"}}"#),
+            "name in both map and dirs"
+        );
         assert!(
             bad(r#""buckets": {"prefix": "tenants"}"#),
             "prefix without slash"

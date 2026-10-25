@@ -20,7 +20,7 @@ use std::{
 };
 
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use integraal_wrappers::ObjectBackend;
+use integraal_wrappers::{ObjectBackend, ObjectWriter};
 use mlua::{Function, Lua};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -158,7 +158,56 @@ impl FsBackend {
         {
             return Err(format!("bad key {key:?}"));
         }
-        Ok(self.root.join(key))
+        let path = self.root.join(key);
+        self.confine(&path)?;
+        Ok(path)
+    }
+
+    /// Rejects a path whose deepest existing ancestor resolves (through symlinks) outside the root.
+    fn confine(&self, path: &Path) -> Result<(), String> {
+        let Ok(root) = self.root.canonicalize() else {
+            return Ok(()); // root not created yet, so nothing under it can be a symlink
+        };
+        let mut probe = path;
+        loop {
+            match probe.canonicalize() {
+                Ok(real) if real.starts_with(&root) => return Ok(()),
+                Ok(_) => return Err(format!("{} resolves outside its directory", path.display())),
+                Err(_) => match probe.parent() {
+                    Some(p) => probe = p,
+                    None => return Ok(()),
+                },
+            }
+        }
+    }
+}
+
+/// Streams into a temp file next to the target; the object appears on `commit`.
+struct FsWriter {
+    file: Option<std::fs::File>,
+    tmp: PathBuf,
+    path: PathBuf,
+}
+
+impl ObjectWriter for FsWriter {
+    fn write(&mut self, data: &[u8]) -> Result<(), String> {
+        let f = self.file.as_mut().ok_or("writer is closed")?;
+        f.write_all(data)
+            .map_err(|e| format!("{}: {e}", self.tmp.display()))
+    }
+
+    fn commit(mut self: Box<Self>) -> Result<(), String> {
+        drop(self.file.take());
+        std::fs::rename(&self.tmp, &self.path).map_err(|e| format!("{}: {e}", self.path.display()))
+    }
+
+    fn abort(self: Box<Self>) {}
+}
+
+impl Drop for FsWriter {
+    fn drop(&mut self) {
+        // After a commit the temp file is already renamed away.
+        let _ = std::fs::remove_file(&self.tmp);
     }
 }
 
@@ -175,6 +224,7 @@ impl ObjectBackend for FsBackend {
         let path = self.path(key)?;
         let dir = path.parent().ok_or("bad key")?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        self.confine(&path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -202,6 +252,20 @@ impl ObjectBackend for FsBackend {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("{key}: {e}")),
         }
+    }
+
+    fn create(&self, key: &str) -> Result<Box<dyn ObjectWriter>, String> {
+        let path = self.path(key)?;
+        let dir = path.parent().ok_or("bad key")?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        self.confine(&path)?;
+        let tmp = path.with_extension("tmp");
+        let file = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        Ok(Box::new(FsWriter {
+            file: Some(file),
+            tmp,
+            path,
+        }))
     }
 
     fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String> {
@@ -612,6 +676,71 @@ mod tests {
         assert!(b.get("a//b").is_err());
         b.delete("a/b/c.txt").unwrap();
         assert!(b.get("a/b/c.txt").unwrap().is_none());
+
+        let mut w = b.create("s/big.bin").unwrap();
+        w.write(b"ab").unwrap();
+        w.write(b"cd").unwrap();
+        assert!(
+            b.get("s/big.bin").unwrap().is_none(),
+            "invisible until commit"
+        );
+        w.commit().unwrap();
+        assert_eq!(b.get("s/big.bin").unwrap().unwrap(), b"abcd");
+        let mut w = b.create("s/gone.bin").unwrap();
+        w.write(b"x").unwrap();
+        w.abort();
+        assert!(b.get("s/gone.bin").unwrap().is_none());
+        assert_eq!(b.list("s/", 10).unwrap(), ["s/big.bin"]);
+
+        #[cfg(unix)]
+        {
+            let outside =
+                std::env::temp_dir().join(format!("integraal-out-{}", std::process::id()));
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("secret"), "s").unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+            assert!(b.get("link/secret").is_err(), "symlink out of the root");
+            assert!(b.put("link/new", vec![1]).is_err());
+            assert!(!outside.join("new").exists());
+            let _ = std::fs::remove_dir_all(&outside);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_io_is_metered_and_capped_per_scope() {
+        use integraal_wrappers::{BucketScope, IoDir, IoLimits};
+        use std::sync::Mutex;
+        let dir = std::env::temp_dir().join(format!("integraal-io-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seen = Arc::new(Mutex::new((0u64, 0u64)));
+        let obs = seen.clone();
+        let scope = BucketScope::new(Arc::new(FsBackend::new(&dir)), "acme/").with_io(
+            IoLimits {
+                max_read_bytes: Some(10),
+                max_write_bytes: Some(8),
+            },
+            Some(Arc::new(move |d, n| {
+                let mut s = obs.lock().unwrap();
+                match d {
+                    IoDir::Read => s.0 += n,
+                    IoDir::Write => s.1 += n,
+                }
+            })),
+        );
+        scope.put("a", vec![0; 6]).unwrap();
+        assert!(scope.put("b", vec![0; 6]).is_err(), "write cap");
+        assert!(scope.create("c").is_err(), "write budget used up");
+        assert_eq!(scope.get("a").unwrap().unwrap().len(), 6);
+        let mut buf = Vec::new();
+        let mut r = scope.open("a").unwrap().unwrap();
+        assert!(
+            std::io::Read::read_to_end(&mut r, &mut buf).is_err(),
+            "streamed read passes the cap"
+        );
+        assert!(scope.get("a").is_err(), "exhausted");
+        assert_eq!(scope.io_bytes().unwrap().1, 12);
+        assert_eq!(seen.lock().unwrap().1, 12);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

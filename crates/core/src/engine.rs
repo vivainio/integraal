@@ -200,6 +200,8 @@ pub struct Engine {
     ceiling: Limits,
     /// Named buckets with the base key prefix each tenant's directory sits under.
     buckets: HashMap<String, (Arc<dyn ObjectBackend>, String)>,
+    /// Per-invocation byte limits of buckets that are metered (host directories).
+    bucket_io: HashMap<String, integraal_wrappers::IoLimits>,
     /// The one bucket behind `native.batch`, kept apart from the data buckets.
     batch: Option<(Arc<dyn ObjectBackend>, String)>,
     db: Option<(
@@ -256,6 +258,7 @@ impl Engine {
             limits,
             ceiling: Limits::ceiling(),
             buckets: HashMap::new(),
+            bucket_io: HashMap::new(),
             batch: None,
             db: None,
             callback_base_url: None,
@@ -285,6 +288,16 @@ impl Engine {
     ) -> Self {
         self.buckets
             .insert(name.into(), (backend, base_prefix.into()));
+        self
+    }
+
+    /// Meters the named bucket: its I/O is counted in telemetry and capped per invocation.
+    pub fn with_bucket_io(
+        mut self,
+        name: impl Into<String>,
+        limits: integraal_wrappers::IoLimits,
+    ) -> Self {
+        self.bucket_io.insert(name.into(), limits);
         self
     }
 
@@ -600,9 +613,18 @@ impl Engine {
                     "bucket {name:?} is not configured on this deployment"
                 ))
             })?;
-            let scope = BucketScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
+            let mut scope = BucketScope::new(backend.clone(), format!("{base}{}/", inv.tenant))
                 .with_max_object_bytes(limits.max_object_bytes)
                 .with_access(*access);
+            if let Some(io) = self.bucket_io.get(name) {
+                let (tenant, dir) = (inv.tenant.clone(), name.clone());
+                scope = scope.with_io(
+                    *io,
+                    Some(Arc::new(move |d, n| {
+                        crate::telemetry::fs_bytes(&tenant, &dir, d, n)
+                    })),
+                );
+            }
             buckets.insert(name.clone(), scope);
         }
         let batch = if config.batch {

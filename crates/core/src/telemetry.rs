@@ -125,6 +125,7 @@ struct Instruments {
     invocation_secs: Histogram<f64>,
     placement_fallbacks: Counter<u64>,
     sqs_messages: Counter<u64>,
+    fs_bytes: Counter<u64>,
 }
 
 fn instruments() -> &'static Instruments {
@@ -149,6 +150,11 @@ fn instruments() -> &'static Instruments {
                 .u64_counter("integraal.sqs.messages")
                 .with_description("Queue messages by disposition")
                 .build(),
+            fs_bytes: m
+                .u64_counter("integraal.fs.bytes")
+                .with_unit("By")
+                .with_description("Bytes read from or written to whitelisted host directories")
+                .build(),
         }
     })
 }
@@ -163,6 +169,22 @@ pub fn invocation(tenant: &str, trigger: Trigger, outcome: &'static str, took: D
     let i = instruments();
     i.invocations.add(1, &attrs);
     i.invocation_secs.record(took.as_secs_f64(), &attrs);
+}
+
+/// Bytes moved through a whitelisted host directory.
+pub fn fs_bytes(tenant: &str, dir: &str, direction: integraal_wrappers::IoDir, n: u64) {
+    let attrs = [
+        KeyValue::new("tenant", tenant.to_string()),
+        KeyValue::new("dir", dir.to_string()),
+        KeyValue::new(
+            "direction",
+            match direction {
+                integraal_wrappers::IoDir::Read => "read",
+                integraal_wrappers::IoDir::Write => "write",
+            },
+        ),
+    ];
+    instruments().fs_bytes.add(n, &attrs);
 }
 
 /// Messages that fell back to the tenant's static class.

@@ -42,8 +42,8 @@ mod zip_writer;
 pub use barrier::{AckOutcome, Barriers, CreateSpec, MAX_BARRIER_MEMBERS};
 pub use batch::{fail_inflight_http, BATCH_BUCKET};
 pub use bucket::{
-    Access, BucketScope, BucketScopes, ObjectBackend, ObjectWriter, PresignMethod, MAX_LIST_KEYS,
-    MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
+    Access, BucketScope, BucketScopes, IoDir, IoLimits, IoObserver, ObjectBackend, ObjectWriter,
+    PresignMethod, MAX_LIST_KEYS, MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
 };
 pub use crypto::{MasterKey, MasterKeys};
 pub use db::{
