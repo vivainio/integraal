@@ -288,3 +288,43 @@ def test_a_batch_job_resumed_by_the_partner_starts_a_new_trace_linked_to_the_sub
     # ...which the flow log lists under its own trace id, not the submitter's.
     assert cont["trace_id"] in {f["trace_id"] for f in dev.json(f"/flows/{TENANT}")}
     assert {r["script"] for r in dev.json(f"/flows/{TENANT}/{trace}/summary")} == {"batch_start"}
+
+
+# -- task records
+
+def task_records(stack, what):
+    """Every task record in the flow log bucket whose title names `what`."""
+    import gzip
+    found = []
+    for key in stack.keys("flow-logs", "tasks/"):
+        body = stack.get("flow-logs", key)
+        for line in gzip.decompress(body).decode().splitlines():
+            rec = json.loads(line)
+            if rec.get("title", "").endswith(what):
+                found.append(rec)
+    return found
+
+
+def test_every_task_leaves_a_record_with_what_the_script_attached(stack, dev):
+    what = uid()
+    r, trace = run(stack, dev, "tasker", {"what": what})
+    assert r.status_code == 200
+    [rec] = eventually(lambda: task_records(stack, what), what="task record")
+    assert (rec["tenant"], rec["script"], rec["trigger"], rec["outcome"]) == (TENANT, "tasker", "http", "ok")
+    assert rec["trace_id"] == trace and rec["routed"] is False
+    assert rec["title"] == f"tasker {what}"
+    assert rec["metrics"] == {"rows": 15} and rec["attrs"] == {"region": "eu"}
+    assert rec["detail"] == {"skipped": [1, 2]}
+    assert rec["log_lines"] == 1 and rec["duration_ms"] >= 0
+
+
+def test_a_failed_task_keeps_what_it_attached_before_failing(stack, dev):
+    what = uid()
+    r, trace = run(stack, dev, "tasker", {"what": what, "fail": True})
+    assert r.status_code >= 400
+    [rec] = eventually(lambda: task_records(stack, what), what="task record")
+    assert rec["outcome"] == "script_error" and rec["trace_id"] == trace
+    assert rec["failure_kind"] == "runtime" and "tasker" in rec["failure_frame"]
+    assert "tasker failed" in rec["error"]
+    assert rec["metrics"] == {"rows": 15}
+

@@ -17,7 +17,7 @@ use crate::{
     failure::{CaptureSlot, Failure, Kind},
     Error, Invocation, Trigger,
 };
-use integraal_wrappers::{now_ms, FlowLog};
+use integraal_wrappers::{now_ms, FlowLog, Summary};
 
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -214,6 +214,7 @@ pub struct Engine {
     background_http: bool,
     master_keys: Option<MasterKeys>,
     flow_logs: Option<crate::flow_log::FlowLogSink>,
+    tasks: Option<Arc<crate::tasks::TaskLog>>,
     debug_sink: Option<crate::debug::DebugSink>,
     /// Invocations in flight in this process, by span id; see `Engine::running`.
     running: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
@@ -245,6 +246,7 @@ pub(crate) struct Services {
     background_http: bool,
     master_keys: Option<MasterKeys>,
     flow_log: Option<FlowLog>,
+    summary: Option<Summary>,
     debug: Option<DebugRun>,
     vault: Option<Arc<Vault>>,
     /// Source for `require`; absent in VMs that run no tenant code of their own.
@@ -267,6 +269,7 @@ impl Engine {
             background_http: false,
             master_keys: None,
             flow_logs: None,
+            tasks: None,
             debug_sink: None,
             running: Arc::default(),
         }
@@ -340,6 +343,30 @@ impl Engine {
     ) -> Self {
         self.flow_logs = Some(crate::flow_log::FlowLogSink::new(backend, base_prefix));
         self
+    }
+
+    /// Keeps a record of every task (invocation) of every tenant, written as
+    /// `<base_prefix>tasks/...` in this bucket. See `crate::tasks`. Call `flush_tasks` to write the
+    /// buffered records: a server on a timer, a Lambda after each invocation.
+    pub fn with_tasks(
+        mut self,
+        backend: Arc<dyn ObjectBackend>,
+        base_prefix: impl Into<String>,
+    ) -> Self {
+        self.tasks = Some(Arc::new(crate::tasks::TaskLog::new(backend, base_prefix)));
+        self
+    }
+
+    /// Writes the buffered task records. A failure is logged and nothing more.
+    pub async fn flush_tasks(&self) {
+        let Some(tasks) = self.tasks.clone() else {
+            return;
+        };
+        match tokio::task::spawn_blocking(move || tasks.flush()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "could not write the task records"),
+            Err(e) => tracing::warn!(error = %e, "task record flush failed"),
+        }
     }
 
     /// Where the captures of watched scripts go (tenants with a `debug` section). Not the flow log
@@ -541,8 +568,9 @@ impl Engine {
         let start = Instant::now();
         let flow_log = std::sync::OnceLock::new();
         let debug = std::sync::OnceLock::new();
+        let summary = Summary::new();
         let result = self
-            .invoke_inner(inv, max_time, &flow_log, &debug)
+            .invoke_inner(inv, max_time, &flow_log, &debug, &summary)
             .instrument(span.clone())
             .await;
         let outcome = match &result {
@@ -556,6 +584,12 @@ impl Engine {
             span.record("otel.status_code", "ERROR");
         }
         crate::telemetry::invocation(&tenant, trigger, outcome, start.elapsed());
+        if let Some(tasks) = &self.tasks {
+            let line = about.task_line(&span, &summary, outcome, start.elapsed(), &result);
+            if tasks.record(&line) {
+                self.flush_tasks().await;
+            }
+        }
         if let (Some(run), Some(sink)) = (debug.into_inner(), &self.debug_sink) {
             let error = result.as_ref().err().map(|e| e.to_string());
             about
@@ -577,6 +611,7 @@ impl Engine {
         max_time: Option<Duration>,
         flow_slot: &std::sync::OnceLock<FlowLog>,
         debug_slot: &std::sync::OnceLock<DebugRun>,
+        summary: &Summary,
     ) -> Result<serde_json::Value, Error> {
         let config = Arc::new(self.tenant_config(&inv.tenant).await?);
         // A routed invocation is matched by its router's name: the script it picks is not known yet.
@@ -659,6 +694,7 @@ impl Engine {
             background_http: self.background_http,
             master_keys: self.master_keys.clone(),
             flow_log,
+            summary: Some(summary.clone()),
             debug: debug.clone(),
             vault: self.vault().map(Arc::new),
             modules: Some(crate::modules::ModuleHost {
@@ -738,6 +774,47 @@ impl FlowSegment {
             continues_trace: inv.continues_trace,
             start_ms,
         }
+    }
+
+    /// The task record: one flat line per invocation (see `crate::tasks`). The engine's fields
+    /// come first; the summary's (the script that really ran, counts, what the script attached)
+    /// are added to them.
+    fn task_line(
+        &self,
+        span: &tracing::Span,
+        summary: &Summary,
+        outcome: &str,
+        took: Duration,
+        result: &Result<serde_json::Value, Error>,
+    ) -> serde_json::Value {
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        let sc = span.context().span().span_context().clone();
+        let (trace_id, span_id) = if sc.is_valid() {
+            (sc.trace_id().to_string(), sc.span_id().to_string())
+        } else {
+            (String::new(), String::new())
+        };
+        let error = result.as_ref().err().map(|e| {
+            let e = e.to_string();
+            let mut end = e.len().min(500);
+            while !e.is_char_boundary(end) {
+                end -= 1;
+            }
+            e[..end].to_string()
+        });
+        let mut line = serde_json::json!({
+            "v": 1, "tenant": self.tenant, "script": self.script,
+            "routed": self.script == "<routed>", "version": self.version,
+            "trigger": self.trigger, "attempt": self.attempt,
+            "continues_trace": self.continues_trace, "trace_id": trace_id, "span_id": span_id,
+            "start_ms": self.start_ms, "duration_ms": took.as_millis() as u64,
+            "outcome": outcome, "error": error,
+        });
+        for (k, v) in summary.fields() {
+            line[k] = v;
+        }
+        line
     }
 
     /// Writes the capture of a watched invocation. A failure is logged and nothing more.
@@ -849,6 +926,7 @@ impl Services {
             background_http: false,
             master_keys: None,
             flow_log: None,
+            summary: None,
             debug: None,
             vault: None,
             modules: None,
@@ -866,6 +944,7 @@ pub(crate) struct Vm {
     batch: Option<StoreScope>,
     capture: CaptureSlot,
     flow_log: Option<FlowLog>,
+    summary: Option<Summary>,
     debug: Option<DebugRun>,
 }
 
@@ -913,6 +992,7 @@ pub(crate) fn new_vm(
                 max_http_timeout: limits.max_http_timeout,
             },
             flow_log: svc.flow_log.clone(),
+            summary: svc.summary.clone(),
         },
     )?;
     if let Some(host) = &svc.modules {
@@ -950,6 +1030,7 @@ pub(crate) fn new_vm(
         batch: svc.batch.clone(),
         capture,
         flow_log: svc.flow_log.clone(),
+        summary: svc.summary.clone(),
         debug,
     })
 }
@@ -994,7 +1075,10 @@ impl Vm {
             d.collector.put_first("failure", value.clone());
         }
         if let Some(log) = &self.flow_log {
-            log.failure(value);
+            log.failure(value.clone());
+        }
+        if let Some(s) = &self.summary {
+            s.failure(value);
         }
     }
 }
@@ -1011,6 +1095,9 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
 fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, Error> {
     let lua = &vm.lua;
     *vm.script.lock().unwrap() = call.script.clone();
+    if let Some(s) = &vm.summary {
+        s.script(&call.script);
+    }
 
     let chunk_name = format!("={}/{}", call.tenant, call.script);
     let chunk = lua
@@ -1779,6 +1866,81 @@ pub(crate) mod tests {
         let logged = logs.0.lock().unwrap();
         let hello = logged.iter().find(|(m, _)| m == "hello-otel").unwrap();
         assert_eq!(hello.1.as_deref(), Some("invoke"));
+    }
+
+    /// Every invocation of every tenant leaves one task record, flow logs or not, including the
+    /// ones that fail after attaching data, and a flush writes them as a single object.
+    #[tokio::test]
+    async fn every_task_leaves_a_record_with_what_the_script_attached() {
+        let bucket = Arc::new(MemBackend::default());
+        let e = engine(
+            r#"return { handle = function(ctx, ev)
+                 native.task.title("import " .. ev.n)
+                 native.task.metric("rows", 10)
+                 native.task.add("rows", 5)
+                 native.task.attr("region", "eu")
+                 native.task.detail({ skipped = { 1, 2 } })
+                 native.log("error", "noisy")
+                 if ev.fail then error("boom") end
+                 return ev.n
+               end }"#,
+            Limits::default(),
+        )
+        .with_tasks(bucket.clone(), "logs/");
+
+        e.invoke(inv(Trigger::Invoke, json!({"n": 1})))
+            .await
+            .unwrap();
+        e.invoke(inv(Trigger::Invoke, json!({"n": 2, "fail": true})))
+            .await
+            .unwrap_err();
+        assert!(
+            bucket.0.lock().unwrap().is_empty(),
+            "nothing is written before the flush"
+        );
+        e.flush_tasks().await;
+
+        let objects = bucket.0.lock().unwrap().clone();
+        assert_eq!(objects.len(), 1, "{:?}", objects.keys());
+        let (key, body) = objects.iter().next().unwrap();
+        assert!(key.starts_with("logs/tasks/20"), "{key}");
+        assert!(key.ends_with(".ndjson.gz"));
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&body[..]), &mut text)
+            .unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+
+        let ok = &lines[0];
+        assert_eq!(ok["tenant"], "acme");
+        assert_eq!(ok["outcome"], "ok");
+        assert_eq!(ok["title"], "import 1");
+        assert_eq!(ok["metrics"], json!({"rows": 15.0}));
+        assert_eq!(ok["attrs"], json!({"region": "eu"}));
+        assert_eq!(ok["detail"], json!({"skipped": [1, 2]}));
+        assert_eq!(
+            (ok["log_lines"].clone(), ok["log_errors"].clone()),
+            (1.into(), 1.into())
+        );
+        assert_eq!(ok["trigger"], "invoke");
+        assert_eq!(ok["routed"], false);
+        assert!(ok["start_ms"].as_u64().unwrap() > 0);
+
+        let failed = &lines[1];
+        assert_eq!(failed["outcome"], "script_error");
+        assert_eq!(
+            failed["title"], "import 2",
+            "what was set before the failure survives"
+        );
+        assert_eq!(failed["failure_kind"], "runtime");
+        assert!(failed["error"].as_str().unwrap().contains("boom"));
+
+        // A second flush with nothing buffered writes nothing.
+        e.flush_tasks().await;
+        assert_eq!(bucket.0.lock().unwrap().len(), 1);
     }
 
     #[derive(Default)]

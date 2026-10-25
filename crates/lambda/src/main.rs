@@ -34,6 +34,7 @@ async fn main() -> Result<(), Error> {
                 Ok(result) => json!({ "ok": true, "result": result }),
                 Err(e) => json!({ "ok": false, "error": e.to_string() }),
             };
+            engine.flush_tasks().await; // likewise: one object per invocation
             telemetry.flush(); // the environment may freeze as soon as we return
             Ok::<_, Error>(out)
         }

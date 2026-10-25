@@ -15,6 +15,7 @@ deployment settings behind it:
 | `native.callback` | [Callbacks](callbacks.md) |
 | `native.batch`, `native.ndjson` | [Batch jobs](batch.md) |
 | `native.barrier` | [Barriers](barrier.md) |
+| `native.task` | [Task records](observability.md#task-records) |
 | `native.crypto` | [Crypto](crypto.md) |
 | `native.http` | [Outbound HTTP](http.md) |
 | `native.xml`, `native.zip`, `native.gzip`, byte streams | [Streams and XML](streams-xml.md) |

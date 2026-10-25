@@ -138,6 +138,67 @@ does not run the error handler for it. `summary` shows each row's `failure.kind`
 
 The failure never holds values. A table thrown with `error({...})` is described by its keys only.
 
+## Task records
+
+When `flow_logs` is configured, every invocation of every tenant also leaves one **task record**, in
+the same bucket. A tenant does not opt in. Where flow logs are for reading one flow in depth, task
+records are for seeing what happened across all of them: a line per task, with the outcome, the
+duration and whatever the script attached.
+
+```text
+<prefix>tasks/<yyyy>/<mm>/<dd>/<hhmm>/<process>-<flush ms>-<seq>.ndjson.gz
+```
+
+A server buffers records and writes one object every `flow_logs.task_flush_secs` (60 by default), or sooner if the buffer reaches 5 MB, and
+once more on shutdown. A Lambda writes one object per invocation, since its environment can be
+frozen as soon as the handler returns. The date and minute in the key are those of the write, not
+of the tasks inside; to find tasks by start time, list the minutes around the window and filter on
+`start_ms`. Nothing is sampled: a failed write is logged as a warning and loses that object's
+records, but never fails the invocation. Expire the objects with an S3 lifecycle rule on
+`<prefix>tasks/`.
+
+Each line is a flat JSON object. Only `metrics`, `attrs` and `detail` are nested, so the records map
+onto columns if you compact them into a columnar format later.
+
+| Field | Meaning |
+| --- | --- |
+| `v` | format version, `1` |
+| `tenant`, `script`, `version`, `trigger`, `attempt` | what ran. `script` is the script that really ran: the one a router picked, or the router itself if it failed first. `routed` says the invocation named no script |
+| `trace_id`, `span_id`, `continues_trace` | the [flow](#one-trace-per-flow) the task belongs to, and whether the task continued it or started it |
+| `start_ms`, `duration_ms`, `outcome`, `error` | `outcome` is `ok`, `timeout`, `script_error` or `error`; `error` is cut at 500 bytes |
+| `failure_kind`, `failure_frame` | the [structured failure](#script-failures): its kind, and the innermost script frame as `chunk:line function` |
+| `http_requests`, `http_failed` | outbound `native.http` calls, and those with no response or a status outside 2xx and 3xx |
+| `log_lines`, `log_errors` | `native.log` lines, and those at level `error` |
+| `title`, `metrics`, `attrs`, `detail`, `truncated` | what the script attached; see below |
+
+### `native.task`
+
+A script describes its own task with `native.task`. The functions can be called any number of times
+and in any order, and the record keeps whatever was set before a timeout or an error, so set things
+as you learn them instead of at the end.
+
+```lua
+native.task.title("Imported orders from acme-eu")
+native.task.metric("orders.rows", 1432)     -- a number; setting it again replaces it
+native.task.add("orders.skipped")           -- adds 1, or the given delta, to a metric
+native.task.attr("region", "eu")            -- a short string you can filter on
+native.task.detail({ skipped = { "a", "b" } })
+```
+
+| Function | Limit |
+| --- | --- |
+| `title(text)` | 200 bytes |
+| `metric(name, number)`, `add(name, delta?)` | 32 metrics; names up to 64 bytes; numbers must be finite |
+| `attr(name, text)` | 32 attributes; names up to 64 bytes, values up to 256 |
+| `detail(value)` | any JSON value, up to 8 KB serialized |
+
+A value over a limit is cut or dropped and the record says `"truncated": true`; the call never fails
+the task. A `detail` value that is not JSON raises an error in the script, as `native.json.encode`
+would. Use dotted names such as `orders.rows` to group metrics and attributes.
+
+Scripts can put any data in these fields, unlike flow logs, which hold none. Read the bucket's
+`tasks/` prefix with an identity that is allowed to see tenant data.
+
 ## Debug captures
 
 For a script you are debugging, a tenant can ask for much more than a flow log keeps. Add a `debug`

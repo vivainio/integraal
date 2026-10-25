@@ -15,6 +15,7 @@ mod s3_data;
 pub mod s3_events;
 pub mod schedule;
 mod sqs_queue;
+pub mod tasks;
 pub mod telemetry;
 
 pub use engine::{Placement, TenantConfig, TenantLimits};

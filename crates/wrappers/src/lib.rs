@@ -9,7 +9,7 @@
 //! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
 //! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
 //! under the tenant's own partition keys, each expiring after a week), and `native.crypto`
-//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from stores), and `native.queue` (send new work to the job queue), and `native.barrier` (wait for a known set of acknowledgements, then continue once).
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from stores), and `native.queue` (send new work to the job queue), and `native.barrier` (wait for a known set of acknowledgements, then continue once), and `native.task` (attach a title, metrics, attributes and details to the task's execution summary).
 
 mod barrier;
 mod batch;
@@ -26,6 +26,7 @@ mod queue;
 mod sink;
 mod sql;
 mod store;
+mod summary;
 mod telemetry;
 mod throttle;
 mod timer;
@@ -57,6 +58,7 @@ pub use store::{
     Access, IoDir, IoLimits, IoObserver, ObjectBackend, ObjectWriter, PresignMethod, StoreScope,
     StoreScopes, MAX_LIST_KEYS, MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
 };
+pub use summary::{Summary, MAX_DETAIL_BYTES};
 pub use throttle::{Slot, Throttle, ThrottleRule};
 pub use timer::{
     cancel as cancel_timer, list as list_timers, register as register_timer, sweep as sweep_timers,
@@ -169,6 +171,9 @@ pub struct HostContext {
     pub limits: HostLimits,
     /// Collects this invocation's log for the flow it belongs to; absent when the tenant has no flow logs.
     pub flow_log: Option<FlowLog>,
+    /// Collects this invocation's task summary (`native.task`); scripts may call it without one,
+    /// and what they set is discarded.
+    pub summary: Option<Summary>,
 }
 
 /// Reads `--!runtime N` from the leading comment lines of a script.

@@ -12,12 +12,16 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
 
     let (tenant, script_name) = (host.tenant.clone(), host.script.clone());
     let flow_log = host.flow_log.clone();
+    let summary = host.summary.clone();
     native.set(
         "log",
         lua.create_function(move |_, (level, msg): (String, String)| {
             let script = script_name.lock().unwrap().clone();
             if let Some(f) = &flow_log {
                 f.log(&level, &script, &msg);
+            }
+            if let Some(s) = &summary {
+                s.log(&level);
             }
             match level.as_str() {
                 "error" => tracing::error!(%tenant, %script, "{msg}"),
@@ -87,6 +91,10 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
         )?,
     )?;
     native.set("http", http_api(lua, host, budget)?)?;
+    native.set(
+        "task",
+        crate::summary::api(lua, host.summary.clone().unwrap_or_default())?,
+    )?;
     native.set(
         "deadline",
         crate::deadline::api(lua, host.limits.deadline.clone())?,
@@ -432,6 +440,7 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
     let (vault, tenant) = (host.vault.clone(), host.tenant.clone());
     let throttle = host.throttle.clone();
     let flow_log = host.flow_log.clone();
+    let summary = host.summary.clone();
     let (max_timeout, max_body) = (
         host.limits.max_http_timeout,
         host.limits.max_http_response_bytes,
@@ -570,6 +579,9 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                 if let Some(f) = &flow_log {
                     f.http(&method, &host, None, started.elapsed().as_millis() as u64);
                 }
+                if let Some(s) = &summary {
+                    s.http(true);
+                }
                 scrub(format!("http request failed: {e}"))
             })?;
         let status = resp.status().as_u16();
@@ -585,6 +597,9 @@ fn http_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<
                 Some(status),
                 started.elapsed().as_millis() as u64,
             );
+        }
+        if let Some(s) = &summary {
+            s.http(!(200..400).contains(&status));
         }
 
         let out = lua.create_table()?;

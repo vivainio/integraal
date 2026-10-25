@@ -177,6 +177,13 @@ declare native: {
     version: number,
     log: (level: "error" | "warn" | "info" | "debug", message: string) -> (),
     config: { [string]: any },
+    task: {
+        title: (text: string) -> (),
+        metric: (name: string, value: number) -> (),
+        add: (name: string, delta: number?) -> (),
+        attr: (name: string, value: string) -> (),
+        detail: (value: any) -> (),
+    },
     json: {
         encode: (value: any) -> string,
         decode: (text: string) -> any,

@@ -36,7 +36,7 @@ fn trace_id_ok(s: &str) -> bool {
 }
 
 /// (year, month, day) of a Unix time in milliseconds, UTC.
-fn civil(ms: u64) -> (i64, u32, u32) {
+pub(crate) fn civil(ms: u64) -> (i64, u32, u32) {
     let z = (ms / 86_400_000) as i64 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

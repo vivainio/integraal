@@ -371,6 +371,14 @@ pub struct FlowLogsConfig {
     /// Base prefix; empty or ending with `/`. A tenant's logs are `<prefix><tenant>/flows/...`.
     #[serde(default)]
     pub prefix: String,
+    /// How often a server writes its buffered task records, in seconds. Default 60. A Lambda writes
+    /// after every invocation.
+    #[serde(default = "default_task_flush_secs")]
+    pub task_flush_secs: u64,
+}
+
+fn default_task_flush_secs() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -706,7 +714,10 @@ impl GlobalConfig {
         }
         if let Some(f) = &self.flow_logs {
             let backend = crate::S3Backend::from_env(&f.bucket).await;
-            engine = engine.with_flow_logs(Arc::new(backend), f.prefix.clone());
+            let backend = Arc::new(backend);
+            engine = engine
+                .with_flow_logs(backend.clone(), f.prefix.clone())
+                .with_tasks(backend, f.prefix.clone());
         }
         if let Some(d) = &self.debug {
             let mut backends: Vec<Arc<dyn integraal_wrappers::ObjectBackend>> = Vec::new();

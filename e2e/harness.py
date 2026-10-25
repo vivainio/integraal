@@ -200,7 +200,7 @@ def launch(megalith, devtools=False, server_env=None):
         local_port = debug_dir = None
         if devtools:
             local_port, debug_dir = free_port(), work / "debug"
-            cfg["flow_logs"] = {"bucket": "flow-logs", "prefix": ""}
+            cfg["flow_logs"] = {"bucket": "flow-logs", "prefix": "", "task_flush_secs": 1}
             cfg["debug"] = {"dir": str(debug_dir)}
             cfg["local_api"] = {"port": local_port}
         cfg_path = work / "server.json"

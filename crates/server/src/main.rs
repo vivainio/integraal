@@ -69,6 +69,18 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    if let Some(f) = &cfg.flow_logs {
+        // Task records go out on a timer (earlier if the buffer fills up, and at shutdown).
+        let (engine, every) = (engine.clone(), Duration::from_secs(f.task_flush_secs));
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            loop {
+                tick.tick().await;
+                engine.flush_tasks().await;
+            }
+        });
+    }
+
     if let Some(queue) = &cfg.queue {
         tokio::spawn(poll_queue(
             engine.clone(),
@@ -111,18 +123,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/{tenant}/{script}", post(http_invoke))
         .route("/v1/{tenant}", post(http_routed))
-        .with_state(engine);
+        .with_state(engine.clone());
     let port = cfg.server.port;
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!(%port, "listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             stop_signal().await;
             // Background http requests die with this process; give their jobs an outcome now rather
             // than after the connections drain, which ECS may not wait for.
             let failed = tokio::task::spawn_blocking(integraal_core::fail_inflight_http)
                 .await
                 .unwrap_or(0);
+            engine.flush_tasks().await;
             tracing::info!(failed, "stopping");
         })
         .await?;
