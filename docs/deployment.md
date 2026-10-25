@@ -26,6 +26,8 @@ process at startup.
 }
 ```
 
+A JSON Schema for the file is in [`types/integraal.schema.json`](https://github.com/vivainio/integraal/blob/main/types/integraal.schema.json). Point `"$schema"` at it (the server ignores that key) and editors will complete and check the config, including the fields each `buckets.stores` `type` allows.
+
 | Key | Used by | Meaning |
 | --- | --- | --- |
 | `scripts.bucket` | all (required) | bucket holding scripts and tenant `config.json` files |

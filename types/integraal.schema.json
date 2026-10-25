@@ -1,0 +1,642 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vivainio/integraal/types/integraal.schema.json",
+  "title": "Integraal global config",
+  "description": "The deployment-wide config file (integraal.json). Unknown keys are rejected everywhere, as the server does.",
+  "type": "object",
+  "required": [
+    "scripts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "scripts": {
+      "description": "Where scripts and each tenant's config.json live.",
+      "type": "object",
+      "required": [
+        "bucket"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Key prefix concatenated as-is; end it with '/'."
+        }
+      }
+    },
+    "buckets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stores": {
+          "description": "Store name (letters, digits, '_') to the store behind native.bucket.<name>.",
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_]+$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/store"
+          }
+        }
+      }
+    },
+    "batch": {
+      "$ref": "#/$defs/s3Place",
+      "description": "Dedicated bucket behind native.batch; must not also be an s3 store."
+    },
+    "flow_logs": {
+      "$ref": "#/$defs/s3Place",
+      "description": "Bucket for invocation flow logs; must not be a data or batch bucket."
+    },
+    "debug": {
+      "description": "Where debug captures go: a directory, a bucket, or both.",
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "dir"
+          ]
+        },
+        {
+          "required": [
+            "bucket"
+          ]
+        }
+      ],
+      "properties": {
+        "dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bucket": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prefix": {
+          "$ref": "#/$defs/prefix"
+        },
+        "retention_hours": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 48
+        }
+      }
+    },
+    "db": {
+      "type": "object",
+      "required": [
+        "table"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "table": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "callbacks": {
+      "description": "Requires db.",
+      "type": "object",
+      "required": [
+        "base_url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "crypto": {
+      "type": "object",
+      "required": [
+        "keys",
+        "active"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "keys": {
+          "description": "Key id (0-255) to the name of the environment variable holding the key.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[0-9]{1,3}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "active": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255,
+          "description": "Must be one of the key ids."
+        }
+      }
+    },
+    "admin": {
+      "type": "object",
+      "required": [
+        "port",
+        "token_env"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "$ref": "#/$defs/port"
+        },
+        "token_env": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "local_api": {
+      "type": "object",
+      "required": [
+        "port"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "$ref": "#/$defs/port"
+        }
+      }
+    },
+    "queue": {
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "required": [
+        "queues",
+        "default"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "queues": {
+          "description": "Worker size class to its job queue URL.",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "default": {
+          "type": "string",
+          "description": "Must be one of queues."
+        },
+        "place_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "place_memory_mb": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spread_s": {
+          "description": "How far each tick's messages are spread, in seconds; each must be shorter than its period.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minute": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 59,
+              "default": 20
+            },
+            "hour": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3599,
+              "default": 300
+            },
+            "day": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86399,
+              "default": 900
+            }
+          }
+        }
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "$ref": "#/$defs/port",
+          "default": 8080
+        }
+      }
+    },
+    "throttle": {
+      "description": "Outbound HTTP limits (Fargate server only).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "max_concurrent"
+            ]
+          },
+          {
+            "required": [
+              "per_second"
+            ]
+          }
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1
+          },
+          "max_concurrent": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "per_second": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        }
+      }
+    },
+    "ceiling": {
+      "description": "Most any tenant config may request.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_mb": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "log": {
+      "type": "string",
+      "description": "tracing filter such as info or integraal_core=debug.",
+      "default": "info"
+    }
+  },
+  "$defs": {
+    "port": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "prefix": {
+      "description": "Empty, or ending in '/'.",
+      "type": "string",
+      "pattern": "^(|.*/)$"
+    },
+    "s3Place": {
+      "type": "object",
+      "required": [
+        "bucket"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prefix": {
+          "$ref": "#/$defs/prefix"
+        }
+      }
+    },
+    "megabytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "hostName": {
+      "description": "A host name or address, no credentials or path.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9.:\\[\\]-]+$"
+    },
+    "remoteDir": {
+      "description": "A directory: starts and ends with '/', no '.' or '..' segments.",
+      "type": "string",
+      "pattern": "^/(.*/)?$",
+      "not": {
+        "pattern": "(^|/)\\.{1,2}(/|$)"
+      }
+    },
+    "store": {
+      "description": "One data store. 'type' selects the kind and with it the fields allowed.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "s3",
+            "dir",
+            "ftp",
+            "sftp"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "s3"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/s3Store"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "dir"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/dirStore"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "ftp"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/ftpStore"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "sftp"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/sftpStore"
+          }
+        }
+      ]
+    },
+    "s3Store": {
+      "description": "An S3 bucket.",
+      "type": "object",
+      "required": [
+        "type",
+        "bucket"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "s3"
+        },
+        "bucket": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prefix": {
+          "$ref": "#/$defs/prefix"
+        },
+        "max_read_mb": {
+          "$ref": "#/$defs/megabytes"
+        },
+        "max_write_mb": {
+          "$ref": "#/$defs/megabytes"
+        }
+      }
+    },
+    "dirStore": {
+      "description": "A directory on the host that the operator whitelists for scripts.",
+      "type": "object",
+      "required": [
+        "type",
+        "path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "dir"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute directory."
+        },
+        "prefix": {
+          "$ref": "#/$defs/prefix"
+        },
+        "max_read_mb": {
+          "$ref": "#/$defs/megabytes"
+        },
+        "max_write_mb": {
+          "$ref": "#/$defs/megabytes"
+        }
+      }
+    },
+    "ftpStore": {
+      "description": "An FTP or FTPS server, reached through the curl binary.",
+      "type": "object",
+      "required": [
+        "type",
+        "host",
+        "path"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "password_env": [
+          "user"
+        ]
+      },
+      "properties": {
+        "type": {
+          "const": "ftp"
+        },
+        "host": {
+          "$ref": "#/$defs/hostName"
+        },
+        "port": {
+          "$ref": "#/$defs/port"
+        },
+        "path": {
+          "$ref": "#/$defs/remoteDir",
+          "description": "Relative to the login directory; '//srv/out/' is absolute on the server."
+        },
+        "user": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Anonymous login when absent."
+        },
+        "password_env": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the environment variable holding the password."
+        },
+        "tls": {
+          "enum": [
+            "none",
+            "explicit",
+            "implicit"
+          ],
+          "default": "none"
+        },
+        "prefix": {
+          "$ref": "#/$defs/prefix"
+        },
+        "max_read_mb": {
+          "$ref": "#/$defs/megabytes"
+        },
+        "max_write_mb": {
+          "$ref": "#/$defs/megabytes"
+        },
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60
+        },
+        "curl": {
+          "type": "string",
+          "minLength": 1,
+          "default": "curl"
+        }
+      }
+    },
+    "sftpStore": {
+      "description": "An SFTP server, reached through the curl binary.",
+      "type": "object",
+      "required": [
+        "type",
+        "host",
+        "path",
+        "user",
+        "host_key_sha256"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "password_env"
+          ]
+        },
+        {
+          "required": [
+            "key_file"
+          ]
+        }
+      ],
+      "properties": {
+        "type": {
+          "const": "sftp"
+        },
+        "host": {
+          "$ref": "#/$defs/hostName"
+        },
+        "port": {
+          "$ref": "#/$defs/port"
+        },
+        "path": {
+          "$ref": "#/$defs/remoteDir",
+          "description": "Absolute directory."
+        },
+        "user": {
+          "type": "string",
+          "minLength": 1
+        },
+        "password_env": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Give this or key_file."
+        },
+        "key_file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Private key file. Give this or password_env."
+        },
+        "host_key_sha256": {
+          "description": "Base64 SHA-256 of the server's host key, as curl --hostpubsha256 takes it.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{43}=$"
+        },
+        "prefix": {
+          "$ref": "#/$defs/prefix"
+        },
+        "max_read_mb": {
+          "$ref": "#/$defs/megabytes"
+        },
+        "max_write_mb": {
+          "$ref": "#/$defs/megabytes"
+        },
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60
+        },
+        "curl": {
+          "type": "string",
+          "minLength": 1,
+          "default": "curl"
+        }
+      }
+    }
+  }
+}

@@ -37,6 +37,9 @@ use crate::{Engine, Limits};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
+    /// Lets editors attach `types/integraal.schema.json`; ignored.
+    #[serde(default, rename = "$schema")]
+    _schema: Option<String>,
     /// Where scripts and each tenant's `config.json` live.
     pub scripts: ScriptsConfig,
     /// Named tenant buckets (`native.bucket.<name>`).
@@ -767,6 +770,10 @@ mod tests {
             (8080, "info", 0)
         );
         assert!(c.throttle().unwrap().is_none());
+        assert!(
+            GlobalConfig::parse(r#"{"$schema":"x.json","scripts":{"bucket":"s"}}"#).is_ok(),
+            "a $schema key is allowed"
+        );
 
         let full = r#"{
             "scripts": {"bucket": "s", "prefix": "p/"},

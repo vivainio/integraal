@@ -1,4 +1,5 @@
 {
+  "$schema": "../types/integraal.schema.json",
   "scripts": { "bucket": "scripts" },
   "buckets": { "stores": {
     "In":   { "type": "s3", "bucket": "data-in",   "prefix": "tenants/" },
