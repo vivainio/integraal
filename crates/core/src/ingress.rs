@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use crate::{
     s3_events::{classify, Message, ATTEMPT_FIELD},
+    telemetry::TraceContext,
     Engine, IngressConfig, Invocation, PlaceOptions, Placed, S3Events,
 };
 
@@ -21,6 +22,8 @@ use crate::{
 pub struct Incoming {
     pub id: String,
     pub body: String,
+    /// The sender's trace context, forwarded with the message.
+    pub trace: TraceContext,
 }
 
 /// One message to send to a class's job queue.
@@ -31,6 +34,7 @@ pub struct Outgoing {
     /// The intake message this came from. It may only be acknowledged once every message
     /// derived from it has been sent.
     pub source: String,
+    pub trace: TraceContext,
 }
 
 /// SQS accepts at most this many entries, and 256 KiB in total, per batch request.
@@ -64,6 +68,7 @@ pub async fn plan(
                     class: cfg.default.clone(),
                     body: m.body.clone(),
                     source: m.id.clone(),
+                    trace: m.trace.clone(),
                 });
             }
             Ok(Message::Ignored) => {}
@@ -105,6 +110,7 @@ pub async fn plan(
                 class,
                 body: incoming[i].body.clone(),
                 source: incoming[i].id.clone(),
+                trace: incoming[i].trace.clone(),
             }),
             Slot::Record(i, rec, attempt) => records
                 .entry((i, class))
@@ -122,6 +128,7 @@ pub async fn plan(
             class,
             body: body.to_string(),
             source: incoming[i].id.clone(),
+            trace: incoming[i].trace.clone(),
         });
     }
     out
@@ -218,6 +225,7 @@ mod tests {
         Incoming {
             id: id.into(),
             body: body.to_string(),
+            trace: TraceContext::new(),
         }
     }
 
@@ -243,6 +251,7 @@ mod tests {
             Incoming {
                 id: "4".into(),
                 body: "not json".into(),
+                trace: TraceContext::new(),
             },
         ];
         let out = plan(&e, &cfg(), &s3(), &incoming, &PlaceOptions::default()).await;
@@ -328,6 +337,7 @@ mod tests {
             class: class.into(),
             body: "x".repeat(len),
             source: "s".into(),
+            trace: TraceContext::new(),
         };
         let mut out: Vec<_> = (0..23).map(|_| mk("a", 10)).collect();
         out.push(mk("b", 10));

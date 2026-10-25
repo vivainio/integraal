@@ -80,32 +80,33 @@ pub fn init(
     let filter = EnvFilter::try_new(log_filter)?;
     let fmt = tracing_subscriber::fmt::layer().json();
 
-    if !enabled() {
-        tracing_subscriber::registry().with(filter).with(fmt).init();
-        return Ok(Guard {
-            tracer: None,
-            meter: None,
-        });
-    }
-
     let mut resource = Resource::builder();
     if std::env::var_os("OTEL_SERVICE_NAME").is_none() {
         resource = resource.with_service_name(service);
     }
     let resource = resource.build();
 
-    let tracer = SdkTracerProvider::builder()
-        .with_resource(resource.clone())
-        .with_batch_exporter(SpanExporter::builder().with_http().build()?)
-        .build();
-    let meter = SdkMeterProvider::builder()
-        .with_resource(resource)
-        .with_periodic_exporter(MetricExporter::builder().with_http().build()?)
-        .build();
-
+    // The tracer is always installed, even with nothing to export to: spans then still carry a
+    // trace id, which is what ties the messages of one flow together (see `inject_current`).
+    let export = enabled();
+    let mut tracer = SdkTracerProvider::builder().with_resource(resource.clone());
+    if export {
+        tracer = tracer.with_batch_exporter(SpanExporter::builder().with_http().build()?);
+    }
+    let tracer = tracer.build();
     global::set_text_map_propagator(TraceContextPropagator::new());
-    global::set_meter_provider(meter.clone());
     let otel = tracing_opentelemetry::layer().with_tracer(tracer.tracer(service));
+
+    let meter = if export {
+        let meter = SdkMeterProvider::builder()
+            .with_resource(resource)
+            .with_periodic_exporter(MetricExporter::builder().with_http().build()?)
+            .build();
+        global::set_meter_provider(meter.clone());
+        Some(meter)
+    } else {
+        None
+    };
 
     tracing_subscriber::registry()
         .with(filter)
@@ -114,7 +115,7 @@ pub fn init(
         .init();
     Ok(Guard {
         tracer: Some(tracer),
-        meter: Some(meter),
+        meter,
     })
 }
 
@@ -203,4 +204,68 @@ pub fn adopt_parent(span: &tracing::Span, header: impl Fn(&str) -> Option<String
     }
     let cx = global::get_text_map_propagator(|p| p.extract(&carrier));
     let _ = span.set_parent(cx);
+}
+
+/// W3C trace context headers (`traceparent`, `tracestate`) of a message, as carried in SQS message
+/// attributes so that the work a message causes joins the trace that caused it.
+pub type TraceContext = std::collections::BTreeMap<String, String>;
+
+/// Message attributes for `ctx`, ready for the SQS builders.
+pub fn sqs_attributes(
+    ctx: &TraceContext,
+) -> Vec<(String, aws_sdk_sqs::types::MessageAttributeValue)> {
+    ctx.iter()
+        .filter_map(|(k, v)| {
+            let a = aws_sdk_sqs::types::MessageAttributeValue::builder()
+                .data_type("String")
+                .string_value(v)
+                .build()
+                .ok()?;
+            Some((k.clone(), a))
+        })
+        .collect()
+}
+
+struct Injector<'a>(&'a mut TraceContext);
+
+impl opentelemetry::propagation::Injector for Injector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+}
+
+/// The trace context of the current span; empty when the span has no valid context.
+pub fn inject_current() -> TraceContext {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let cx = tracing::Span::current().context();
+    let mut out = TraceContext::new();
+    global::get_text_map_propagator(|p| p.inject_context(&cx, &mut Injector(&mut out)));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing::info_span;
+
+    #[test]
+    fn a_span_without_a_parent_still_has_a_trace_context() {
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        let tracer = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer.tracer("test")));
+        tracing::subscriber::with_default(subscriber, || {
+            let first = info_span!("a");
+            let (tp, again) = first.in_scope(|| (inject_current(), inject_current()));
+            assert!(tp["traceparent"].starts_with("00-"));
+            assert_eq!(tp, again);
+
+            let child = info_span!("b");
+            adopt_parent(&child, |k| tp.get(k).cloned());
+            let got = child.in_scope(inject_current);
+            let trace_id =
+                |m: &TraceContext| m["traceparent"].split('-').nth(1).unwrap().to_string();
+            assert_eq!(trace_id(&got), trace_id(&tp));
+        });
+    }
 }

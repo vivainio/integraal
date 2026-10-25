@@ -339,6 +339,8 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
             .queue_url(&queue_url)
             .max_number_of_messages(10)
             .message_system_attribute_names(MessageSystemAttributeName::ApproximateReceiveCount)
+            .message_attribute_names("traceparent")
+            .message_attribute_names("tracestate")
             .wait_time_seconds(10)
             .send()
             .await;
@@ -358,6 +360,13 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
                 queue_url.clone(),
                 s3.clone(),
             );
+            let span = tracing::info_span!("sqs_message", otel.kind = "consumer");
+            integraal_core::telemetry::adopt_parent(&span, |k| {
+                msg.message_attributes()?
+                    .get(k)?
+                    .string_value()
+                    .map(str::to_string)
+            });
             tasks.push(tokio::spawn(
                 async move {
                     let attempt = msg
@@ -386,7 +395,7 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events) {
                         }
                     }
                 }
-                .instrument(tracing::info_span!("sqs_message", otel.kind = "consumer")),
+                .instrument(span),
             ));
         }
         for t in tasks {
@@ -450,6 +459,13 @@ async fn handle_message(
                         .queue_url(queue_url)
                         .message_body(body)
                         .delay_seconds(delay_secs)
+                        .set_message_attributes(Some(
+                            integraal_core::telemetry::sqs_attributes(
+                                &integraal_core::telemetry::inject_current(),
+                            )
+                            .into_iter()
+                            .collect(),
+                        ))
                         .send()
                         .await;
                     if let Err(e) = &sent {

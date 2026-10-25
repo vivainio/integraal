@@ -27,6 +27,17 @@ The `log` setting still filters spans and logs. A span below that level is not e
 | `http.client` | each outbound `native.http` request: method, host and status only, never the path or query |
 | `dynamodb.*`, `s3.*`, `sqs.send` | calls the runtime makes for `native.db`, buckets and `native.queue` |
 
+## One trace per flow
+
+An event and everything it causes share one trace id, across queue hops. Every message the runtime
+sends to SQS (`native.queue.send`, barrier completions, webhook callbacks, requeued S3 records)
+carries the W3C `traceparent` and `tracestate` as SQS message attributes; the intake Lambda
+forwards them, and the server continues the trace in its `sqs_message` span. Messages from senders
+that set no such attributes start a new trace.
+
+The tracer is installed even when no OTLP endpoint is set, so the trace id exists (and is
+propagated) without a collector.
+
 `native.log` lines are ordinary log events inside the invocation's span, so each carries the
 invocation's trace.
 

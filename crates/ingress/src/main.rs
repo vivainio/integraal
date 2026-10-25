@@ -10,6 +10,7 @@
 
 use std::{collections::BTreeSet, time::Duration};
 
+use integraal_core::telemetry::TraceContext;
 use integraal_core::{
     ingress::{batches, plan, Incoming, Outgoing},
     GlobalConfig, IngressConfig, S3Events,
@@ -94,6 +95,13 @@ fn parse(event: &Value) -> Vec<Incoming> {
             Some(Incoming {
                 id: r["messageId"].as_str()?.to_string(),
                 body: r["body"].as_str()?.to_string(),
+                trace: ["traceparent", "tracestate"]
+                    .into_iter()
+                    .filter_map(|k| {
+                        let v = r["messageAttributes"][k]["stringValue"].as_str()?;
+                        Some((k.to_string(), v.to_string()))
+                    })
+                    .collect(),
             })
         })
         .collect()
@@ -115,8 +123,10 @@ async fn send(
                 failed.extend(indices.iter().map(|&i| out[i].source.clone()));
                 continue;
             };
-            let entries: Vec<(usize, String)> =
-                indices.iter().map(|&i| (i, out[i].body.clone())).collect();
+            let entries: Vec<(usize, String, TraceContext)> = indices
+                .iter()
+                .map(|&i| (i, out[i].body.clone(), out[i].trace.clone()))
+                .collect();
             let sqs = sqs.clone();
             set.spawn(async move { send_batch(&sqs, &url, entries).await });
         }
@@ -140,15 +150,20 @@ async fn send(
 async fn send_batch(
     sqs: &aws_sdk_sqs::Client,
     url: &str,
-    entries: Vec<(usize, String)>,
+    entries: Vec<(usize, String, TraceContext)>,
 ) -> Vec<usize> {
     use aws_sdk_sqs::types::SendMessageBatchRequestEntry;
-    let all: Vec<usize> = entries.iter().map(|(i, _)| *i).collect();
+    let all: Vec<usize> = entries.iter().map(|(i, ..)| *i).collect();
     let mut request = sqs.send_message_batch().queue_url(url);
-    for (i, body) in entries {
+    for (i, body, trace) in entries {
         match SendMessageBatchRequestEntry::builder()
             .id(i.to_string())
             .message_body(body)
+            .set_message_attributes(Some(
+                integraal_core::telemetry::sqs_attributes(&trace)
+                    .into_iter()
+                    .collect(),
+            ))
             .build()
         {
             Ok(e) => request = request.entries(e),
@@ -181,6 +196,13 @@ async fn send_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_context_comes_from_message_attributes() {
+        let ev = json!({"Records": [{"messageId": "a", "body": "{}", "messageAttributes": {
+            "traceparent": {"stringValue": "00-aa-bb-01", "dataType": "String"}}}]});
+        assert_eq!(parse(&ev)[0].trace["traceparent"], "00-aa-bb-01");
+    }
 
     #[test]
     fn sqs_event_records_become_incoming_messages() {
