@@ -17,6 +17,7 @@ nav = [
   { "Overview" = "index.md" },
   { "Concepts" = [
     { "Architecture" = "architecture.md" },
+    { "Choosing entrypoints" = "choosing-entrypoints.md" },
     { "Integration patterns" = "patterns.md" },
     { "Writing scripts" = "writing-scripts.md" },
     { "Types" = "types.md" },

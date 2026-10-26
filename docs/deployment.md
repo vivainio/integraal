@@ -1,5 +1,8 @@
 # Deployment
 
+See [Choosing entrypoints](choosing-entrypoints.md) for the recommended split between public
+webhook intake, runtime Lambda lookups and private Fargate workers.
+
 ## Configuration
 
 All deployment settings live in one JSON file, not in environment variables. Each binary reads
@@ -132,8 +135,10 @@ cargo lambda build --release --arm64 -p integraal-lambda
 
 ## Fargate
 
-Build `integraal-server` into a container image and run it behind an ALB (target group health
-check `GET /healthz`). Add `queue.url` to have the same task consume a queue.
+Build `integraal-server` into a container image and configure `queue.url` for queue workers.
+For synchronous calls from a peer system in the same VPC, run it behind an internal ALB
+(target group health check `GET /healthz`). An ALB is recommended only for that same-VPC
+use case; external partner callbacks use the webhook Lambda. Queue-only workers need no ALB.
 
 !!! note
     Infrastructure-as-code (CDK/Terraform) is not part of the repository yet.

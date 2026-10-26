@@ -28,6 +28,9 @@ The trigger is always `invoke`.
 
 ## ALB → Fargate (HTTP)
 
+Recommended for a peer system in the same VPC, using an internal ALB. For external partner
+callbacks use the webhook Lambda; see [Choosing entrypoints](choosing-entrypoints.md).
+
 ```bash
 curl -X POST http://host:8080/v1/acme/hello \
   -H 'content-type: application/json' \

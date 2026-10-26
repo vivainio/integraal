@@ -35,6 +35,7 @@ return { handle = handle }
 | I want to… | Read |
 | --- | --- |
 | understand how the pieces fit | [Architecture](architecture.md) |
+| choose Lambda, Fargate or an internal ALB | [Choosing entrypoints](choosing-entrypoints.md) |
 | write my first script | [Writing scripts](writing-scripts.md) |
 | look up a native function | [Native API](native-api.md) |
 | configure a tenant | [Tenant config](tenant-config.md) |

@@ -19,6 +19,9 @@ sequenceDiagram
 ```
 
 ### Synchronous HTTP (ALB → Fargate)
+Recommended through an internal ALB when the peer system and cluster share a VPC. External
+partner callbacks use the webhook Lambda. See [Choosing entrypoints](choosing-entrypoints.md).
+
 `POST /v1/{tenant}/{script}`; body is the event, response is the return value. [Triggers](triggers.md#alb-fargate-http)
 
 ```mermaid
