@@ -6,6 +6,9 @@ consumed by the first parser that takes it; `stream:close()` releases it early. 
 in chunks, so a multi-gigabyte object never sits in memory (limited by `max_stream_mb`, see
 [Limits](limits.md)).
 
+Read XML by streaming: use `native.xml.extract` for records and `native.xml.events` when you need
+full control. `native.xml.parse` (a DOM) exists but should be avoided.
+
 ## `native.xml.events(source, opts?)`
 A **pull parser** over a string or a stream. Returns an iterator of events:
 
@@ -60,45 +63,6 @@ end
   evaluated in one forward pass, so records arrive as the document streams past.
 - A bad rule text, malformed XML or DTD raises an error; stream and time limits apply as for
   `events`. The full rule syntax is in the [xmlstream](https://github.com/vivainio/xmlstream) README.
-
-## `native.xml.parse(source, opts?)`
-Builds an in-memory tree from a string or stream and returns the **document node**. Use it for
-documents that fit in memory (partner messages, small feeds), where the pull parser is too low
-level; `trim = true` drops whitespace-only text and trims the rest, as for `events`. The whole
-document is read first, capped by the object size limit (see [Limits](limits.md)); DTDs are
-rejected and nesting is limited to 256 levels. The tree and XPath engine are the
-[`uppsala`](https://crates.io/crates/uppsala) crate.
-
-```lua
-local doc = native.xml.parse(body, { trim = true })
-for _, item in ipairs(doc:xpath("/feed/item[@kind='a']")) do
-  native.log("info", item:attr("id") .. " " .. item:child("name"):text())
-end
-local total = doc:xpath("sum(//price)")
-```
-
-| node method | |
-| --- | --- |
-| `kind()` | `"document"`, `"element"`, `"text"` (also CDATA), `"comment"`, `"processing-instruction"` or `"attribute"` |
-| `name()`, `local_name()`, `namespace()` | qualified name, name without prefix, resolved namespace URI (`""` if none) |
-| `text()` | all descendant text, concatenated (the attribute value for attributes) |
-| `attr(name)`, `attrs()` | an attribute value or `nil` by qualified name; all attributes as a table (namespace declarations are not attributes) |
-| `children(name?)`, `child(name)` | element children, optionally by qualified name; the first one with that name |
-| `root()`, `parent()` | the document element; the parent node |
-| `xpath(expr, ns?)` | evaluates an XPath 1.0 expression relative to the node |
-| `first(expr, ns?)` | like `xpath`, but a node-set yields only its first node (or `nil`) |
-| `xml()` | serializes the node and its subtree |
-
-Nodes compare with `==`. `xpath` returns an array of nodes in document order for a node-set, and a
-Lua string, number or boolean for other results.
-
-XPath 1.0 is evaluated strictly. In particular an unprefixed name test only matches elements in **no
-namespace**, so for a document with a default namespace (`<feed xmlns="urn:f">`) bind a prefix of your
-choice with `ns` and use it: `doc:xpath("//f:item", { f = "urn:f" })`. Prefixes declared on the
-document element can be used as written, and `*[local-name()='item']` ignores namespaces entirely.
-Evaluation has a node-visit budget, so a pathological expression fails with an error instead of
-running for long. XPath variables (`$name`) cannot be bound yet, so build expressions from trusted
-text only and compare returned values in Lua.
 
 ## `native.xml.writer(sink?, opts?)`
 Generates XML. Text and attribute values are escaped, names and characters are validated and the
@@ -195,3 +159,47 @@ out:close()
 ```
 Decompressed output counts against `max_stream_mb`, which guards against decompression bombs. Corrupt
 data or a bad checksum raises an error.
+
+## `native.xml.parse(source, opts?)`
+!!! warning "Avoid in new scripts"
+    Prefer [`native.xml.extract`](#nativexmlextractsource-rules) or
+    [`native.xml.events`](#nativexmleventssource-opts): they run in constant memory and take streams
+    of any size. `parse` reads the whole document into memory and is only for small, fixed-shape
+    messages where streaming is clearly overkill.
+
+Builds an in-memory tree from a string or stream and returns the **document node**;
+`trim = true` drops whitespace-only text and trims the rest, as for `events`. The whole
+document is read first, capped by the object size limit (see [Limits](limits.md)); DTDs are
+rejected and nesting is limited to 256 levels. The tree and XPath engine are the
+[`uppsala`](https://crates.io/crates/uppsala) crate.
+
+```lua
+local doc = native.xml.parse(body, { trim = true })
+for _, item in ipairs(doc:xpath("/feed/item[@kind='a']")) do
+  native.log("info", item:attr("id") .. " " .. item:child("name"):text())
+end
+local total = doc:xpath("sum(//price)")
+```
+
+| node method | |
+| --- | --- |
+| `kind()` | `"document"`, `"element"`, `"text"` (also CDATA), `"comment"`, `"processing-instruction"` or `"attribute"` |
+| `name()`, `local_name()`, `namespace()` | qualified name, name without prefix, resolved namespace URI (`""` if none) |
+| `text()` | all descendant text, concatenated (the attribute value for attributes) |
+| `attr(name)`, `attrs()` | an attribute value or `nil` by qualified name; all attributes as a table (namespace declarations are not attributes) |
+| `children(name?)`, `child(name)` | element children, optionally by qualified name; the first one with that name |
+| `root()`, `parent()` | the document element; the parent node |
+| `xpath(expr, ns?)` | evaluates an XPath 1.0 expression relative to the node |
+| `first(expr, ns?)` | like `xpath`, but a node-set yields only its first node (or `nil`) |
+| `xml()` | serializes the node and its subtree |
+
+Nodes compare with `==`. `xpath` returns an array of nodes in document order for a node-set, and a
+Lua string, number or boolean for other results.
+
+XPath 1.0 is evaluated strictly. In particular an unprefixed name test only matches elements in **no
+namespace**, so for a document with a default namespace (`<feed xmlns="urn:f">`) bind a prefix of your
+choice with `ns` and use it: `doc:xpath("//f:item", { f = "urn:f" })`. Prefixes declared on the
+document element can be used as written, and `*[local-name()='item']` ignores namespaces entirely.
+Evaluation has a node-visit budget, so a pathological expression fails with an error instead of
+running for long. XPath variables (`$name`) cannot be bound yet, so build expressions from trusted
+text only and compare returned values in Lua.
