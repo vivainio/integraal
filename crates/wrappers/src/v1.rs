@@ -74,10 +74,9 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
         )?,
     )?;
     native.set("db", db_api(lua, host, budget.clone())?)?;
-    native.set(
-        "queue",
-        crate::queue::api(lua, &host.tenant, host.queue.clone(), budget.clone())?,
-    )?;
+    let queue = crate::queue::api(lua, &host.tenant, host.queue.clone(), budget.clone())?;
+    crate::outbox::install(lua, &queue, host, budget.clone())?;
+    native.set("queue", queue)?;
     native.set("callback", callback_api(lua, host, budget.clone())?)?;
     native.set("barrier", crate::barrier::api(lua, host, budget.clone())?)?;
     native.set(

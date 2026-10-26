@@ -109,7 +109,7 @@ Two limits to know when reading these:
   ends, so a running invocation shows up here and not in `flow`; match them by trace id. Other
   servers and Lambdas have their own lists, and the Lambda has no local API.
 - `state` finds barriers, callbacks and batch jobs through an index row (`SYS#trace#<trace id>`) that
-  creating them writes next to the work itself. The row is best effort and expires with the work, so
+  creating them writes next to the work itself. The row is best effort and has no DynamoDB TTL, so
   a barrier or callback whose row could not be written is missing from the answer, and `state` lists
   only work that still exists (a taken callback or an expired barrier is gone). Batch jobs are
   indexed only for tenants that also have `db`, and only when the job is submitted. `covers` names

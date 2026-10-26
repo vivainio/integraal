@@ -5,13 +5,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// Every item expires this long after its last write.
+/// Tenant data expires this long after its last write.
 pub const DB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const MAX_ITEM_BYTES: usize = 64 * 1024;
 pub const MAX_QUERY_ITEMS: usize = 100;
 const MAX_KEY_LEN: usize = 256;
 
-/// One stored item. `ttl` is the Unix expiry in seconds (the DynamoDB TTL attribute).
+/// No expiry for durable system records; backends omit the DynamoDB TTL attribute.
+pub const NO_EXPIRY: u64 = u64::MAX;
+
+/// One stored item. `ttl` is the Unix expiry in seconds, or `NO_EXPIRY`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub sk: String,
@@ -273,8 +276,8 @@ pub enum Take {
 }
 
 const KEY_PK: &str = "SYS#callback-key";
-/// Far-future expiry: DynamoDB TTL only deletes items whose `ttl` has passed.
-pub(crate) const KEY_TTL: u64 = 253_402_300_799;
+/// System records persist until explicitly removed.
+pub(crate) const KEY_TTL: u64 = NO_EXPIRY;
 
 /// HMAC key for callback tokens. Nobody configures it: the first process to need it
 /// generates a random key and stores it in the table outside any `TEN#` partition

@@ -164,92 +164,87 @@ flowchart LR
 
 ## Scatter and gather
 
-Split work into parts that run in parallel, then do one final step when every part is done.
-There are two ways, depending on who does the parallel work.
-
-### Acknowledgements arrive from outside
-You put documents in a store, the other end acks them over any channel (S3 marker objects, queue
-messages, a callback), and something must happen when the last ack is in. That is a
-[barrier](barrier.md): the work list is the set of object keys you sent, each ack records an outcome,
-and the ack that resolves the last member sends the continuation.
-
-```mermaid
-flowchart LR
-    S["sender<br/>barrier.create, store.In.put x N"] --> P(("partner"))
-    P -->|"ack: S3 object, queue message, callback"| R["router → ack script<br/>barrier.ack(id, key, outcome)"]
-    R -->|"last member resolved"| F["continuation<br/>barrier.hydrate"]
-    R -. not yet .-> X[end]
-```
-
-```lua
--- send
-local id = native.barrier.create({ id = batch, members = names, continue_with = "finalize",
-                                   state = { ref = ev.ref }, deadline_s = 3600 })
-for _, name in names do native.store.In.put(batch .. "/" .. name, docs[name]) end
-
--- ack (routed from an S3 event on "Acks/<batch>/<name>.json")
-native.barrier.ack(batch, name, { ok = true })
-
--- finalize
-local b = native.barrier.hydrate(ev)
-if not b then return end
-for member, outcome in b:results() do ... end
-```
-
-### Partner does the parallel work
-One [batch job](batch.md) with several independent queries: the partner runs them however it likes,
-and `done.json` is the barrier. The continuation sees every result at once.
+Split work into parts that run in parallel, then do one final step when every part has an
+outcome. Scatter dispatches the work; a [barrier](barrier.md) coordinates the gather for a known
+set of members. The same barrier works for queue workers and external acknowledgements.
 
 ### Workers do the parallel work
-The script scatters with [`native.queue.send`](queue.md), each shard counts itself with
-[`native.db`](dynamodb.md) when it finishes, and the shard that completes the set sends the gather
-message. `put_if_absent` makes a repeated delivery count once, and claiming the gather the same way
-makes it run exactly once.
+
+Create the barrier before recording work with [`native.queue.handoff`](queue.md#durable-handoff).
+The minute sweep delivers each persisted message, recovering interrupted sends. Each worker
+saves its result and acknowledges its member. The last acknowledgement sends the continuation,
+which reads the outcomes with `hydrate`.
 
 ```mermaid
 flowchart LR
-    S["scatter script<br/>db.put flow, queue.send x N"] --> Q[(job queue)]
-    Q --> W1[shard 1] & W2[shard 2] & W3[shard N]
-    W1 & W2 & W3 -->|"put_if_absent claim, then db.add done"| C{{"done == total?"}}
-    C -->|"claim gather, queue.send"| G[gather script]
-    C -. not yet .-> X[end]
+    S["scatter script<br/>barrier.create, queue.handoff x N"] --> Q[(job queue)]
+    Q --> W1[worker 1] & W2[worker 2] & W3[worker N]
+    W1 & W2 & W3 -->|"save result, barrier.ack"| B[barrier]
+    B -->|"last member resolved"| G["gather script<br/>barrier.hydrate"]
 ```
 
 ```lua
--- scatter
-local flow = native.crypto.hex_encode(native.crypto.random(8))
-native.db.put("flow", flow, { total = #chunks, gather = "merge" })
+-- scatter: ev.flow and ev.chunks must be stable across retries of this request
+local names = {}
+for i, _ in ipairs(ev.chunks) do names[i] = tostring(i) end
+if #names == 0 then return end
+local id = native.barrier.create({
+  id = ev.flow, members = names, continue_with = "merge", deadline_s = 3600,
+})
 local msgs = {}
-for i, chunk in ipairs(chunks) do
-  msgs[i] = { script = "work", event = { flow = flow, shard = i, chunk = chunk } }
+for i, chunk in ipairs(ev.chunks) do
+  msgs[i] = { script = "work", event = { flow = id, member = names[i], chunk = chunk } }
 end
-native.queue.send(msgs)
+for _, message in ipairs(msgs) do
+  native.queue.handoff(id .. "/" .. message.event.member, message)
+end
 
--- shard (on_queue)
+-- work (on_queue): do_work and the result write must be safe to repeat
 local result = do_work(ev.chunk)
-native.store.Out.put(ev.flow .. "/" .. ev.shard .. ".json", native.json.encode(result))
-if native.db.put_if_absent("flow-seen", ev.flow .. "/" .. ev.shard, true) then   -- once per shard
-  local flow = native.db.get("flow", ev.flow)
-  if native.db.add("flow-done", ev.flow) == flow.total
-     and native.db.put_if_absent("flow-gathered", ev.flow, true) then             -- once per flow
-    native.queue.send({ script = flow.gather, event = { flow = ev.flow } })
-  end
+local key = ev.flow .. "/" .. ev.member .. ".json"
+native.store.Out.put(key, native.json.encode(result))
+native.barrier.ack(ev.flow, ev.member, { ok = true, result = { key = key } })
+
+-- merge (on_queue): publishing the merged output must also be safe to repeat
+local b = native.barrier.hydrate(ev)
+if not b then return end
+for member, outcome in b:results() do
+  -- Read successful results from outcome.result.key; handle failures explicitly.
 end
 ```
 
-For a known list of members (documents you sent, files you expect back) use a
-[barrier](barrier.md) instead of this recipe: it records an outcome per member, can say which are
-still missing, and has no counter that a crash can leave short.
+The barrier replaces the manual `put_if_absent` → `db.add` → claim → send recipe. That recipe
+can lose a count if a worker dies after claiming its member, and lose the gather message if it dies
+after claiming dispatch. Repeating `barrier.ack` repairs an interrupted acknowledgement and retries
+continuation dispatch. It does not make the entire workflow atomic:
 
-Two things the recipe does not do for you:
+- **Scatter can stop halfway.** Retry the originating request with the same flow id, member list
+  and inputs, and resend the work. Barrier creation is retryable and duplicate acks are harmless;
+  workers must tolerate duplicate messages. A fresh random flow id on each attempt would create
+  separate, unfinished flows. Arrange a durable retry source, such as an incoming queue message.
+- **A worker can stop between its side effect and its ack.** Save the result before acking and let
+  failures propagate so the queue retries. Use stable result keys and, for external side effects,
+  the destination's idempotency mechanism. A `put_if_absent` claim before work can strand that work
+  after a crash; it is not a substitute for retryable effects.
+- **A member can exhaust its retries.** Set a deadline and handle the overdue event by inspecting
+  pending members, retrying missing work or explicitly acking a permanent failure. A deadline
+  reports overdue work; it does not resolve members or gather partial results automatically.
+- **The gather can run more than once.** Continuation delivery is at least once. Make its effects
+  safe to repeat too; see [barrier crash recovery](barrier.md#crash-recovery).
 
-- **A shard that fails for good.** On its last attempt (`ctx.attempt` equal to the queue's
-  `maxReceiveCount`) the shard can write a failure marker and count itself anyway, so the gather runs
-  with a partial result instead of waiting forever.
-- **A lost count.** A process that dies between `put_if_absent` and `add` leaves the counter one short.
-  Send a delayed check (`native.queue.send({ script = "check", event = { flow = flow }, delay_s = 600 })`)
-  that compares `native.db.get("flow-done", flow)` with `total`, and either re-sends itself, or gathers
-  what exists once the flow is overdue. Flow rows expire after a week.
+### Acknowledgements arrive from outside
+
+Create the barrier with the object keys you plan to send, then put the documents in a store.
+Route the partner's S3 marker objects, queue messages or callbacks to a script that calls
+`native.barrier.ack(id, member, outcome)`. The continuation gathers the outcomes just as it does
+for queue workers. Keep the batch id and object keys stable when retrying dispatch, and make
+partner submissions safe to repeat. See [getting acks in](barrier.md#getting-acks-in).
+
+### Partner does the parallel work
+
+One [batch job](batch.md) can contain several independent queries: the partner runs them however
+it likes, and `done.json` signals completion. The continuation sees every result at once; no
+separate `native.barrier` is needed.
 
 Many parts at once can flood the queue for everyone else; per-tenant concurrency caps are on the
 [roadmap](roadmap.md).
@@ -269,6 +264,6 @@ Many parts at once can flood the queue for everyone else; per-tenant concurrency
 | Protect a partner API from overload | HTTP throttle (`max_concurrent`, `per_second`) |
 | Crunch large files | Streams, zip, gzip, SQL |
 | Avoid concurrent runs | Locks |
-| Split work and join the results | Scatter and gather (`queue.send` plus `db.add`), or one batch job with several queries |
+| Split work and join the results | Scatter and gather (`queue.handoff` plus `barrier`), or one batch job with several queries |
 | Do something when every document has been acked | Barrier |
 | Run something once despite redelivery | `db.put_if_absent` |

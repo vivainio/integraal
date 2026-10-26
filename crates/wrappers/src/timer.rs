@@ -27,10 +27,10 @@ const CLAIMS: &str = "SYS#timer-claim";
 const SEP: char = '\u{1}';
 /// How long a sweeper holds a timer before another may take it over.
 const CLAIM_LEASE_SECS: u64 = 60;
-/// A timer row outlives its due time by this much, so a sweep that was down for a while still fires it.
-const GRACE_SECS: u64 = 24 * 60 * 60;
-/// Furthest ahead a timer may be set: the rows must expire within `DB_TTL` of being written.
-pub const MAX_TIMER_AHEAD_SECS: u64 = DB_TTL.as_secs() - GRACE_SECS;
+/// Recovery window after the timer becomes due.
+const GRACE_SECS: u64 = 30 * 24 * 60 * 60;
+/// Keep the existing six-day scheduling horizon, independently of retention.
+pub const MAX_TIMER_AHEAD_SECS: u64 = DB_TTL.as_secs() - 24 * 60 * 60;
 const MAX_ID_LEN: usize = 300;
 
 /// What a timer sends when it fires, besides the tenant (which is in the key).
@@ -48,7 +48,7 @@ pub struct Payload {
 }
 
 impl Payload {
-    fn envelope(&self, tenant: &str) -> String {
+    pub(crate) fn envelope(&self, tenant: &str) -> String {
         let mut e = json!({ "tenant": tenant, "event": self.event });
         if let Some(s) = &self.script {
             e["script"] = s.clone().into();
@@ -122,7 +122,7 @@ pub fn register(
         Item {
             sk: sk(due_s, tenant, id),
             value,
-            ttl: due_s.max(now) + GRACE_SECS,
+            ttl: due_s.saturating_add(GRACE_SECS),
         },
     )
 }
@@ -281,8 +281,8 @@ pub(crate) mod tests {
         fn take(&self, _: &str, _: &str) -> Result<Option<Item>, String> {
             unimplemented!()
         }
-        fn put_if_absent(&self, _: &str, _: Item) -> Result<bool, String> {
-            unimplemented!()
+        fn put_if_absent(&self, pk: &str, item: Item) -> Result<bool, String> {
+            self.put_if_free(pk, item, 0)
         }
         fn put_if_free(&self, pk: &str, item: Item, now: u64) -> Result<bool, String> {
             let mut m = self.0.lock().unwrap();
@@ -347,6 +347,19 @@ pub(crate) mod tests {
     }
 
     const NOW: u64 = 1_000_000;
+
+    #[test]
+    fn retention_is_thirty_days_after_due_time_not_creation() {
+        let db = Mem::default();
+        let sent = Sent::default();
+        let due = NOW + 5 * 86400;
+        register(&db, "acme", "future", due, &payload(json!({})), NOW).unwrap();
+        let row = db.get(TIMERS, &sk(due, "acme", "future")).unwrap().unwrap();
+        assert_eq!(row.ttl, due + 30 * 86400);
+        assert_eq!(sweep(&db, &sent, due + 29 * 86400, 100).unwrap().fired, 1);
+        register(&db, "acme", "expired", due, &payload(json!({})), NOW).unwrap();
+        assert_eq!(sweep(&db, &sent, due + 30 * 86400, 100).unwrap().dropped, 1);
+    }
 
     #[test]
     fn list_returns_one_tenants_pending_timers_in_due_order() {

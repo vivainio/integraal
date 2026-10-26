@@ -121,8 +121,9 @@ time, so the sweep finds what is due with a single ordered query and the table n
   and checked once more after the claim, so concurrent sweeps send it once. A sweeper that dies
   after sending lets the lease lapse and the next sweep sends again, so a timer fires at least once.
 - **A timer that cannot be sent stays.** The next minute tries again.
-- **A timer outlives its due time by a day.** After that, or if its row is malformed, the sweep deletes
-  it unsent.
-- **At most six days ahead.** Rows expire like all [`native.db`](dynamodb.md) items.
+- **Timer TTL is 30 days after its due time.** This gives the sweep a month to recover after a
+  missed firing, independently of when the timer was created. Delivery or cancellation removes it
+  earlier. The sweep drops expired or malformed rows. Dispatch leases still expire after 60 seconds.
+- **At most six days ahead.** This remains the scheduling horizon.
 - Timers need the `db` section and a `queue` in the [deployment config](deployment.md#configuration).
   They run only on the Fargate server.

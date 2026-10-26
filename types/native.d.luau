@@ -203,6 +203,8 @@ declare native: {
         query: (pk: string, opts: { sk_prefix: string?, limit: number? }?) -> { DbRow },
     },
     queue: {
+        -- Persist a stable-id handoff for the minute sweep; false for an identical existing intent.
+        handoff: (id: string, message: { script: string?, version: string?, event: any }) -> boolean,
         -- One message or an array; returns how many were sent.
         send: (messages: { script: string?, version: string?, event: any, delay_s: number? } | { { script: string?, version: string?, event: any, delay_s: number? } }) -> number,
     },
@@ -260,6 +262,8 @@ declare native: {
         -- Records a member's outcome (the first ack wins). `complete` once every member is resolved;
         -- `dispatched` when this call sent the continuation.
         ack: (id: string, member: string, outcome: { ok: boolean?, error: string?, result: any }?) -> { duplicate: boolean, complete: boolean, dispatched: boolean },
+        -- Retries dispatch for a complete barrier; true only if this call sent. Active lease raises.
+        resume: (id: string) -> boolean,
         -- Up to `limit` (default and maximum 100) members still waiting, in name order.
         pending: (id: string, limit: number?) -> { string },
         status: (id: string) -> { id: string, total: number, ready: boolean, complete: boolean, dispatched: boolean, overdue: boolean, due_s: number? },

@@ -28,12 +28,46 @@ your own**: a script can only queue work for itself.
 ## Retries and attempts
 
 Delivery is at least once, so a handler may run again for the same message. `ctx.attempt` tells a
-handler which delivery this is (`1` the first). A handler that must not do the same work twice can
-claim it with [`native.db.put_if_absent`](dynamodb.md); one that wants to give up cleanly on its
-last attempt can test `ctx.attempt` and report the failure instead of raising.
+handler which delivery this is (`1` the first). Make effects safe to repeat with stable output
+keys or a destination idempotency key. A [`native.db.put_if_absent`](dynamodb.md) claim before
+an effect can strand the work if the process crashes after claiming it. A handler that wants to
+give up cleanly on its last attempt can test `ctx.attempt` and report the failure instead of raising.
 
 Sending is **not atomic**: if a call fails halfway, some messages are already queued. Make the
-receiving handlers safe to repeat, or key them by an id you can claim.
+receiving handlers safe to repeat, and preserve request and member ids when retrying dispatch.
+For split work, see [scatter and gather](patterns.md#scatter-and-gather).
+
+## Durable handoff
+
+Use `native.queue.handoff(id, message)` when a queued follow-up must survive a crash after the
+intent is recorded. It persists the message; the Fargate minute tick delivers it later. It needs
+the deployment's `db`, a queue, tenant `"queue": true`, and the minute operator schedule.
+
+```lua
+native.queue.handoff("order/" .. ev.order_id .. "/price", {
+  script = "price", version = "v1", event = { order_id = ev.order_id },
+})
+```
+
+The id is tenant-scoped, 1–200 bytes, with no control characters. Repeating the same id and message
+returns `false`; a new intent returns `true`. Reusing an id with different script, version or event
+raises. Keep ids and inputs stable across retries. `version` can pin the receiving script.
+`delay_s` and `group` are not supported. The usual 200 KB message limit applies; each call reserves
+two data ops, including the duplicate check.
+
+Intent and dispatch receipt share one durable system row, with no DynamoDB TTL. The sweep claims
+pending rows with a 60-second lease, sends, then marks them sent. A crash before sending leaves
+work for a later sweep; a crash after sending can cause a duplicate. Receivers must make their
+effects safe to repeat. Persisting an intent does not roll back if the originating script later
+fails, and is not atomic with a separate database write or external effect. A crash before the
+handoff call still requires the originating request to be retried.
+
+Each minute tick examines at most 100 records, with a persisted cursor that wraps after reaching
+the end. Completed receipts are retained for deduplication and also count toward this scan budget,
+so delivery latency grows with retained history. Several sweepers may overlap safely, but leases
+are not an exactly-once guarantee. Monitor sweep failures; this is a bounded recovery scan, not a
+high-throughput outbox index. A handoff id cannot be reused unless its receipt is explicitly removed
+by an operator. Existing messages sent with `queue.send` are unaffected.
 
 ## Limits
 

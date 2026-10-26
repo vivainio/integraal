@@ -51,6 +51,18 @@ fn sk_value(stored: &str) -> String {
     }
 }
 
+fn item_attributes(pk: &str, item: &Item) -> std::collections::HashMap<String, AttributeValue> {
+    let mut attrs = std::collections::HashMap::from([
+        ("pk".into(), s(pk)),
+        ("sk".into(), sk_attr(&item.sk)),
+        ("v".into(), s(&item.value)),
+    ]);
+    if item.ttl != integraal_wrappers::NO_EXPIRY {
+        attrs.insert("ttl".into(), AttributeValue::N(item.ttl.to_string()));
+    }
+    attrs
+}
+
 fn parse(attrs: &std::collections::HashMap<String, AttributeValue>) -> Option<Item> {
     // A counter (`add`) keeps its number in `n`; that is its value.
     let value = match attrs.get("n") {
@@ -60,7 +72,10 @@ fn parse(attrs: &std::collections::HashMap<String, AttributeValue>) -> Option<It
     Some(Item {
         sk: sk_value(attrs.get("sk")?.as_s().ok()?),
         value,
-        ttl: attrs.get("ttl")?.as_n().ok()?.parse().ok()?,
+        ttl: match attrs.get("ttl") {
+            Some(value) => value.as_n().ok()?.parse().ok()?,
+            None => integraal_wrappers::NO_EXPIRY,
+        },
     })
 }
 
@@ -88,10 +103,7 @@ impl ItemBackend for DynamoBackend {
             self.client
                 .put_item()
                 .table_name(&self.table)
-                .item("pk", s(pk))
-                .item("sk", sk_attr(&item.sk))
-                .item("v", s(&item.value))
-                .item("ttl", AttributeValue::N(item.ttl.to_string()))
+                .set_item(Some(item_attributes(pk, &item)))
                 .send()
                 .await
                 .map(|_| ())
@@ -121,10 +133,7 @@ impl ItemBackend for DynamoBackend {
                 .client
                 .put_item()
                 .table_name(&self.table)
-                .item("pk", s(pk))
-                .item("sk", sk_attr(&item.sk))
-                .item("v", s(&item.value))
-                .item("ttl", AttributeValue::N(item.ttl.to_string()))
+                .set_item(Some(item_attributes(pk, &item)))
                 .condition_expression("attribute_not_exists(pk)")
                 .send()
                 .await;
@@ -147,10 +156,7 @@ impl ItemBackend for DynamoBackend {
                 .client
                 .put_item()
                 .table_name(&self.table)
-                .item("pk", s(pk))
-                .item("sk", sk_attr(&item.sk))
-                .item("v", s(&item.value))
-                .item("ttl", AttributeValue::N(item.ttl.to_string()))
+                .set_item(Some(item_attributes(pk, &item)))
                 .condition_expression("attribute_not_exists(pk) OR #t <= :now")
                 .expression_attribute_names("#t", "ttl")
                 .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
@@ -303,5 +309,29 @@ impl ItemBackend for DynamoBackend {
             let out = q.send().await.map_err(|e| sdk_err(&e))?;
             Ok(out.items().iter().filter_map(parse).collect())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn system_records_omit_ttl_and_roundtrip_without_expiry() {
+        let item = Item {
+            sk: "".into(),
+            value: "intent".into(),
+            ttl: integraal_wrappers::NO_EXPIRY,
+        };
+        let attrs = item_attributes("SYS#outbox", &item);
+        assert!(!attrs.contains_key("ttl"));
+        assert_eq!(parse(&attrs), Some(item));
+        let item = Item {
+            sk: "lease".into(),
+            value: "sending".into(),
+            ttl: 1234,
+        };
+        let attrs = item_attributes("SYS#outbox-claim", &item);
+        assert_eq!(attrs["ttl"], AttributeValue::N("1234".into()));
+        assert_eq!(parse(&attrs), Some(item));
     }
 }

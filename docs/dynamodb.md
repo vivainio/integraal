@@ -28,7 +28,9 @@ end
 
 `put_if_absent` and `add` are the building blocks for idempotency and for counting work across
 invocations: claim a key to run something once, or count finished pieces and act on the one that
-completes the set (see [Scatter and gather](patterns.md#scatter-and-gather)). Use keys that only
+completes the set. For [scatter and gather](patterns.md#scatter-and-gather), use a
+[barrier](barrier.md) to avoid a crash between claiming a member and incrementing its counter.
+Use keys that only
 `add` writes: `get` reads a counter back as a number, and a later `put` replaces it. Both calls count
 against `max_data_ops`.
 

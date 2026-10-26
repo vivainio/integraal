@@ -20,7 +20,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use integraal_loader::{LoadError, ScriptKey};
-use integraal_wrappers::{sweep_timers, SweepReport, MAX_DELAY_SECS};
+use integraal_wrappers::{sweep_outbox, sweep_timers, SweepReport, MAX_DELAY_SECS};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -159,6 +159,8 @@ pub fn parse_tenants(json: &str) -> Result<Vec<String>, String> {
 pub struct TickReport {
     /// The timer sweep, on minute ticks when the deployment has a table.
     pub swept: Option<SweepReport>,
+    /// Durable handoffs recovered on minute ticks.
+    pub outbox: Option<SweepReport>,
     /// Messages sent to tenants.
     pub sent: usize,
 }
@@ -195,6 +197,26 @@ impl Engine {
                         report.swept = Some(r);
                     }
                     Err(e) => tracing::error!(error = %e, "timer sweep failed"),
+                }
+            }
+        }
+
+        if tick.every == Every::Minute {
+            if let Some(items) = self.item_backend() {
+                let queue = queue.clone();
+                match tokio::task::spawn_blocking(move || {
+                    sweep_outbox(&*items, &*queue, unix_secs(), SWEEP_LIMIT)
+                })
+                .await
+                .map_err(|e| Error::Internal(e.to_string()))?
+                {
+                    Ok(r) => {
+                        if r.fired + r.failed > 0 {
+                            tracing::info!(fired = r.fired, failed = r.failed, "outbox swept");
+                        }
+                        report.outbox = Some(r);
+                    }
+                    Err(e) => tracing::error!(error = %e, "outbox sweep failed"),
                 }
             }
         }

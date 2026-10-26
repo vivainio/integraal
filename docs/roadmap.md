@@ -25,6 +25,10 @@ deletes are implemented; the rest of the pipeline is not.
 - Splitting a tick's fan-out into chunks for very large tenant lists.
 - `type` on callback and batch `done.json` events.
 
+## Durable handoff
+- An indexed pending-work queue to avoid scanning retained dispatch receipts.
+- Operator inspection and explicit receipt cleanup.
+
 ## Engine
 - Cache compiled Luau bytecode per `(script hash, runtime)`.
 - Per-script limit overrides; per-tenant concurrency caps on Fargate.

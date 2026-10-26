@@ -32,7 +32,7 @@ use crate::{
     queue::{valid_name, OutMessage, QueueBackend},
     timer::{self, Payload},
     trace::{inject_current, TraceContext},
-    Budget, DbScope, HostContext, Item, ItemBackend, DB_TTL, MAX_QUERY_ITEMS,
+    Budget, DbScope, HostContext, Item, ItemBackend, MAX_QUERY_ITEMS,
 };
 
 /// Most members one barrier may hold.
@@ -42,9 +42,6 @@ const MAX_OUTCOME_BYTES: usize = 8 * 1024;
 const MAX_STATE_BYTES: usize = 32 * 1024;
 /// How long a call that is about to dispatch the continuation holds the claim before another may.
 const CLAIM_LEASE_SECS: u64 = 60;
-/// Acks stop being accepted this long before the rows could expire, so an expired pending row can
-/// never make a barrier look finished.
-const EXPIRY_SLACK_SECS: u64 = 3600;
 
 const HEADER: &str = "";
 const PENDING: &str = "p#";
@@ -194,14 +191,14 @@ impl Barriers {
         }
 
         let now = now_secs();
-        let ttl = now + DB_TTL.as_secs();
+        let ttl = crate::NO_EXPIRY;
         let header = Header {
             total: members.len(),
             ready: false,
             continue_with,
             overdue_with,
             state,
-            expires_s: ttl - EXPIRY_SLACK_SECS,
+            expires_s: crate::NO_EXPIRY,
             due_s: deadline_s.map(|d| now + d),
             trace: inject_current(),
         };
@@ -266,7 +263,7 @@ impl Barriers {
             return Err(format!("ack outcome exceeds {MAX_OUTCOME_BYTES} bytes"));
         }
         let header = self.live_header(&pk)?;
-        let ttl = now_secs() + DB_TTL.as_secs();
+        let ttl = crate::NO_EXPIRY;
         let (p, r) = (format!("{PENDING}{member}"), format!("{RESULT}{member}"));
 
         let duplicate = match self.op()?.get(&pk, &p)?.and_then(DbScope::live) {
@@ -331,10 +328,8 @@ impl Barriers {
             trace: Some(header.trace.clone()),
             group: None,
         }])?;
-        self.op()?.put(
-            pk,
-            item(FINAL, "sent".into(), now_secs() + DB_TTL.as_secs()),
-        )?;
+        self.op()?
+            .put(pk, item(FINAL, "sent".into(), crate::NO_EXPIRY))?;
         // The deadline no longer matters. If this fails the overdue script still runs once, for a
         // barrier that is finished, and `status` tells it so.
         if let Some(due) = header.due_s {
@@ -343,6 +338,17 @@ impl Barriers {
             }
         }
         Ok(true)
+    }
+
+    /// Retry continuation dispatch without replaying an acknowledgement. Pending members are
+    /// unchanged; an active dispatch lease raises the same retryable error as `ack`.
+    pub fn resume(&self, id: &str) -> Result<bool, String> {
+        let pk = self.db.barrier_pk(id)?;
+        let header = self.live_header(&pk)?;
+        if self.any_pending(&pk)? {
+            return Ok(false);
+        }
+        self.dispatch(&pk, id, &header)
     }
 
     /// Up to `limit` (at most 100) members still pending, in name order.
@@ -483,6 +489,12 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             t.set("dispatched", r.dispatched)?;
             Ok(t)
         })?,
+    )?;
+
+    let mk = make.clone();
+    barrier.set(
+        "resume",
+        lua.create_function(move |_, id: String| mk()?.resume(&id).map_err(err))?,
     )?;
 
     let mk = make.clone();
@@ -830,6 +842,66 @@ mod tests {
             .unwrap();
         assert!(b.ack("b1", "a", &ok()).unwrap().dispatched);
         assert_eq!(sent.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resume_recovers_abandoned_dispatch_without_replaying_an_ack() {
+        let (b, mem, sent) = setup();
+        b.create(spec("b1", &["a"])).unwrap();
+        assert!(!b.resume("b1").unwrap());
+        assert_eq!(b.pending("b1", 10).unwrap(), vec!["a"]);
+        assert!(sent.0.lock().unwrap().is_empty());
+        let pk = b.db.barrier_pk("b1").unwrap();
+        // The last ack retired its member, then the process died holding the send lease.
+        mem.put(&pk, item("r#a", ok().to_string(), u64::MAX))
+            .unwrap();
+        mem.delete(&pk, "p#a").unwrap();
+        mem.put(&pk, item(FINAL, "sending".into(), now_secs() + 30))
+            .unwrap();
+        assert!(b.resume("b1").unwrap_err().contains("retry"));
+        mem.put(&pk, item(FINAL, "sending".into(), now_secs() - 1))
+            .unwrap();
+        assert!(b.resume("b1").unwrap());
+        assert!(!b.resume("b1").unwrap());
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+        assert_eq!(b.outcomes(&pk, "").unwrap(), vec![("a".into(), ok())]);
+    }
+
+    #[test]
+    fn orchestration_state_and_sent_receipts_do_not_expire() {
+        let (b, mem, _) = setup();
+        b.create(spec("b1", &["a"])).unwrap();
+        let pk = b.db.barrier_pk("b1").unwrap();
+        assert_eq!(b.header(&pk).unwrap().expires_s, crate::NO_EXPIRY);
+        assert_eq!(mem.get(&pk, "p#a").unwrap().unwrap().ttl, crate::NO_EXPIRY);
+        b.ack("b1", "a", &ok()).unwrap();
+        for key in [HEADER, "r#a", FINAL] {
+            assert_eq!(mem.get(&pk, key).unwrap().unwrap().ttl, crate::NO_EXPIRY);
+        }
+    }
+
+    #[test]
+    fn resume_refuses_unknown_expired_and_unready_barriers() {
+        let (b, mem, _) = setup();
+        assert!(b.resume("missing").is_err());
+        b.create(spec("b1", &["a"])).unwrap();
+        let pk = b.db.barrier_pk("b1").unwrap();
+        let mut h = b.header(&pk).unwrap();
+        h.ready = false;
+        mem.put(
+            &pk,
+            item(HEADER, serde_json::to_string(&h).unwrap(), u64::MAX),
+        )
+        .unwrap();
+        assert!(b.resume("b1").unwrap_err().contains("being created"));
+        h.ready = true;
+        h.expires_s = now_secs() - 1;
+        mem.put(
+            &pk,
+            item(HEADER, serde_json::to_string(&h).unwrap(), u64::MAX),
+        )
+        .unwrap();
+        assert!(b.resume("b1").unwrap_err().contains("expired"));
     }
 
     #[test]

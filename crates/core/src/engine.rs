@@ -2607,6 +2607,77 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn durable_handoff_survives_script_failure_and_the_minute_tick_delivers_it() {
+        let src = r#"return { handle = function(ctx, ev)
+            local created = native.queue.handoff("order-7", { script = "work", version = "v1", event = { order = ev.order } })
+            if ev.fail then error("crash after persisting") end
+            return created
+        end }"#;
+        let backend = Arc::new(MemItems::default());
+        let queue = Arc::new(MemQueue::default());
+        let e = engine_cfg(src, Limits::default(), r#"{"queue":true}"#)
+            .with_db(backend.clone())
+            .with_queue(queue.clone());
+        assert!(e
+            .invoke(inv(Trigger::Queue, json!({"order":7,"fail":true})))
+            .await
+            .is_err());
+        assert!(queue.0.lock().unwrap().is_empty());
+        assert_eq!(
+            e.invoke(inv(Trigger::Queue, json!({"order":7})))
+                .await
+                .unwrap(),
+            json!(false)
+        );
+        assert!(e
+            .invoke(inv(Trigger::Queue, json!({"order":8})))
+            .await
+            .is_err());
+        let tick = crate::Tick {
+            every: crate::Every::Minute,
+            at: "2026-10-26T12:00:00Z".into(),
+        };
+        assert_eq!(
+            e.tick(&tick, &crate::Spread::default())
+                .await
+                .unwrap()
+                .outbox
+                .unwrap()
+                .fired,
+            1
+        );
+        assert_eq!(
+            e.tick(&tick, &crate::Spread::default())
+                .await
+                .unwrap()
+                .outbox
+                .unwrap()
+                .fired,
+            0
+        );
+        assert_eq!(
+            *queue.0.lock().unwrap(),
+            vec![(
+                json!({"tenant":"acme","script":"work","version":"v1","event":{"order":7}}),
+                0
+            )]
+        );
+        assert_eq!(
+            e.invoke(inv(Trigger::Queue, json!({"order":7})))
+                .await
+                .unwrap(),
+            json!(false)
+        );
+        let disabled = engine_cfg(src, Limits::default(), "{}")
+            .with_db(backend)
+            .with_queue(queue);
+        assert!(disabled
+            .invoke(inv(Trigger::Queue, json!({"order":7})))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn queue_send_stays_in_the_tenant_and_needs_opt_in() {
         let src = r#"return { handle = function(ctx, ev)
             local one = native.queue.send({ script = "work", event = { n = 1 }, delay_s = 30 })

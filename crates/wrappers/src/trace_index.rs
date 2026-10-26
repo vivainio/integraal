@@ -6,7 +6,7 @@
 //! pk "SYS#trace#<trace id>"   sk "<tenant>\u{1}<kind>\u{1}<id>"   value {"created_s": ...}
 //! ```
 //!
-//! The row expires with the work it points to and is never deleted early; `pending` checks that the
+//! The row persists until explicitly removed; `pending` checks that the
 //! work itself is still there. Writing the row is best effort: the flow must not fail because its
 //! index could not be written, so a flow can have pending work that is not listed.
 
@@ -28,14 +28,14 @@ pub fn trace_id(trace: &TraceContext) -> Option<String> {
 }
 
 /// Records that `tenant`'s `kind` (`barrier`, `callback` or `batch`) `id` was created in this trace.
-/// `ttl` is when the work's own row expires, in Unix seconds.
+/// Index entries persist; the work's own expiry is applied when describing it.
 pub fn record(
     backend: &dyn ItemBackend,
     tenant: &str,
     trace: &TraceContext,
     kind: &str,
     id: &str,
-    ttl: u64,
+    _ttl: u64,
     now: u64,
 ) {
     let Some(trace_id) = trace_id(trace) else {
@@ -44,7 +44,7 @@ pub fn record(
     let item = Item {
         sk: format!("{tenant}{SEP}{kind}{SEP}{id}"),
         value: json!({ "created_s": now }).to_string(),
-        ttl,
+        ttl: crate::NO_EXPIRY,
     };
     if let Err(e) = backend.put(&pk(&trace_id), item) {
         tracing::warn!(%tenant, %kind, %id, error = %e, "trace index row not written");
