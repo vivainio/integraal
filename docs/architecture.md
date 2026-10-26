@@ -36,11 +36,11 @@ script's `--!runtime` version, and share its tenant scope, deadline, and call bu
 
 | Pattern | Responsibility |
 | --- | --- |
-| [Retry](retry.md) (`igp.retry`) | Explicit delayed retries with capped exponential backoff, jitter, attempt limits, and a retry-after floor. Persists intents and registers timers for the existing Fargate sweep; delivery is at least once. |
+| [Retry](retry.md) (`igp.retry`) | Explicit delayed retries with capped exponential backoff, jitter, attempt limits, and a retry-after floor. Persists intents and registers timers for the shared minute sweep; delivery is at least once. |
 | [Consumer claims](claims.md) (`igp.claim`) | Recoverable ownership leases and durable completion results. |
 | [Locks](locks.md) (`igp.lock`) | Mutual exclusion with local or database-backed leases. |
 | [Callbacks](callbacks.md) (`igp.callback`) | Single-use signed callback URLs with saved state. |
-| [Barriers](barrier.md) (`igp.barrier`) | Gather member acknowledgements and dispatch a continuation, with indexed recovery on the Fargate minute tick. |
+| [Barriers](barrier.md) (`igp.barrier`) | Gather member acknowledgements and dispatch a continuation, with indexed recovery on the shared minute tick. |
 | [Batch jobs](batch.md) (`igp.batch`) | Submit partner jobs and resume when results arrive. |
 
 Retries schedule new work explicitly; they do not change engine return-value or queue

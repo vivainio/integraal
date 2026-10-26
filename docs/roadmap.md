@@ -15,7 +15,7 @@ deletes are implemented; the rest of the pipeline is not.
 
 ## Barriers
 [Automatic continuation recovery](barrier.md#recovery-sweep) is implemented: interrupted indexed
-acks and dispatches are recovered by the bounded Fargate minute sweep. Remaining work:
+acks and dispatches are recovered by the bounded minute sweep. Remaining work:
 
 - Growing a barrier after `create` (`add` and a `seal`), for work lists larger than one invocation's
   `max_data_ops`.
@@ -26,7 +26,6 @@ acks and dispatches are recovered by the bounded Fargate minute sweep. Remaining
 ## Schedules and timers
 - `ig.timer` for scripts: `at`/`after` and `cancel`, on the [timers](schedules.md#timers) the
   barrier deadline already uses.
-- Ticks and the timer sweep on Lambda (today only the Fargate server handles `system.tick`).
 - Creating a tenant's own EventBridge schedules from its config (cron, time zones).
 - Splitting a tick's fan-out into chunks for very large tenant lists.
 - `type` on callback and batch `done.json` events.

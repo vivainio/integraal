@@ -3,8 +3,8 @@
 Import `local igp = require("@native/patterns@1")` and call `igp.retry.schedule` after a
 retryable failure. This pattern persists a delayed continuation using the existing timer
 infrastructure; it does not change engine acknowledgements or catch script errors.
-It needs a database, a tenant-enabled queue, and a running timer sweep (currently Fargate's
-`system.tick`; Lambda alone does not sweep timers).
+It needs a database, a tenant-enabled queue, and a running timer sweep (`system.tick`
+on Fargate or a direct scheduled invocation of the runtime Lambda).
 
 ```lua
 local igp = require("@native/patterns@1")

@@ -171,7 +171,7 @@ from a durable retry source, and let errors propagate so failed deliveries are r
   atomic with its acknowledgement. The first recorded outcome wins.
 - **Retry interrupted acks.** A repeated `ack` finishes retiring the member and, when appropriate,
   dispatching the continuation, even if the outcome was already recorded. Before retiring a member,
-  `ack` persists a recovery entry. If the worker stops after this point, the Fargate minute sweep
+  `ack` persists a recovery entry. If the worker stops after this point, the minute sweep
   finishes the acknowledgement and continuation dispatch without requiring ack redelivery. A crash
   before indexing still requires ack redelivery; the member remains pending.
 - **Recover dispatch automatically.** Queue-send failures, exhausted invocation budgets, and crashes
@@ -192,9 +192,9 @@ or complete the barrier.
 
 ## Recovery sweep
 
-The existing shared `system.tick` minute message drives the sweep on Fargate. There is no polling
-loop per worker. Automatic recovery needs the deployment database, queue, and minute tick; Lambda
-alone does not process ticks. A failed sweep is logged and the next minute can retry it.
+The shared `system.tick` minute message drives the sweep on Fargate or via a direct runtime Lambda
+invocation. There is no polling loop per worker. Automatic recovery needs the deployment database,
+queue, and minute tick. A failed sweep is logged and the next minute can retry it.
 
 The index contains one temporary entry per in-flight acknowledgement or explicit complete-barrier
 resume. Successful operations delete their entries. Each ack registers **before** deleting its
@@ -247,8 +247,8 @@ leases still expire after 60 seconds. Existing barriers retain their stored expi
 
 Needs the `db` section of the [global config](deployment.md#configuration), and for `continue_with`
 the tenant's `"queue": true` and a `queue.url`. Automatic recovery additionally needs the shared
-[minute tick](schedules.md#operator-ticks) handled by Fargate. No other IAM: the same table actions as
-[`ig.db`](dynamodb.md), including `Query`.
+[minute tick](schedules.md#operator-ticks) handled by Fargate or the runtime Lambda. The sweep uses
+the same table actions as [`ig.db`](dynamodb.md), including `Query`.
 
 Without a queue, a barrier still works as a plain work list: `ack` tells you when `complete`, and
 you act on it yourself. More than one caller can see `complete = true`, so make the resulting

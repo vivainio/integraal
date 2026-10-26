@@ -47,7 +47,13 @@ The target is the queue itself (an SQS universal target), so the schedule's role
 `sqs:SendMessage` on it. Leave the flexible time window off. `at` is Scheduler's context attribute for
 the time the schedule was due; the engine passes it on untouched.
 
-A tick belongs to no tenant. The server that receives it:
+Alternatively, target the runtime Lambda directly with the same JSON input and grant the
+schedule role `lambda:InvokeFunction` on that function. The Lambda uses the same deployment
+`schedule.spread_s`, database, and queue configuration. It sweeps and enqueues work; the queue
+still needs a consumer. Configure a minute schedule even when no tenant opts in, so recovery runs.
+Use one tick delivery path per deployment to avoid duplicate fan-out.
+
+A tick belongs to no tenant. The runtime that receives it:
 
 1. on the **minute** tick, sends up to 100 due [timers](#timers), recovers up to 100 pending
    [durable handoffs](queue.md#durable-handoff), and examines up to 100 interrupted
@@ -101,6 +107,12 @@ The minute tick is acknowledged whatever happens, because the next one is a minu
 hour or day tick fails (the queue is unreachable, `tenants.json` is malformed), the message is left on
 the queue and retried, so tenants that already got their message get it again.
 
+For direct Lambda ticks, invalid input, fan-out errors, and deadline timeouts fail the invocation
+so the configured Lambda/EventBridge retry policy can retry it. Sweep errors are logged and
+retried by later minute ticks, as on Fargate. Repeated ticks can duplicate tenant messages.
+The tick respects the Lambda invocation deadline with a 500 ms return margin; size the function's
+timeout for the tenant fan-out and sweeps.
+
 ### Recurring work with another rhythm
 
 A tenant that wants "every 15 minutes" or "06:00 Helsinki time" needs a schedule of its own. Create
@@ -128,4 +140,4 @@ time, so the sweep finds what is due with a single ordered query and the table n
   earlier. The sweep drops expired or malformed rows. Dispatch leases still expire after 60 seconds.
 - **At most six days ahead.** This remains the scheduling horizon.
 - Timers need the `db` section and a `queue` in the [deployment config](deployment.md#configuration).
-  They run only on the Fargate server.
+  Sweeps run on Fargate or on direct Lambda `system.tick` invocations.

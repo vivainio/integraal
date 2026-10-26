@@ -41,7 +41,7 @@ For split work, see [scatter and gather](patterns.md#scatter-and-gather).
 ## Durable handoff
 
 Use `ig.queue.handoff(id, message)` when a queued follow-up must survive a crash after the
-intent is recorded. It persists the message; the Fargate minute tick delivers it later. It needs
+intent is recorded. It persists the message; the shared minute tick delivers it later. It needs
 the deployment's `db`, a queue, tenant `"queue": true`, and the minute operator schedule.
 
 ```lua
