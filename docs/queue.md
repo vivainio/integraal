@@ -53,21 +53,31 @@ The id is tenant-scoped, 1–200 bytes, with no control characters. Repeating th
 returns `false`; a new intent returns `true`. Reusing an id with different script, version or event
 raises. Keep ids and inputs stable across retries. `version` can pin the receiving script.
 `delay_s` and `group` are not supported. The usual 200 KB message limit applies; each call reserves
-two data ops, including the duplicate check.
+four data ops, including the receipt and pending-row checks.
 
-Intent and dispatch receipt share one durable system row, with no DynamoDB TTL. The sweep claims
-pending rows with a 60-second lease, sends, then marks them sent. A crash before sending leaves
-work for a later sweep; a crash after sending can cause a duplicate. Receivers must make their
-effects safe to repeat. Persisting an intent does not roll back if the originating script later
-fails, and is not atomic with a separate database write or external effect. A crash before the
-handoff call still requires the originating request to be retried.
+Each pending row contains the full message, with no DynamoDB TTL. The sweep claims it with a
+60-second lease, sends, saves a durable sent receipt, then removes the pending row. Creating
+recoverable work requires one conditional insert, so there is no separate index-write gap. A
+crash before sending leaves work for a later sweep; a crash after sending but before saving the
+receipt can cause a duplicate. A crash after saving the receipt leaves a pending row that the
+sweep removes without resending. Receivers must make their effects safe to repeat.
 
-Each minute tick examines at most 100 records, with a persisted cursor that wraps after reaching
-the end. Completed receipts are retained for deduplication and also count toward this scan budget,
-so delivery latency grows with retained history. Several sweepers may overlap safely, but leases
-are not an exactly-once guarantee. Monitor sweep failures; this is a bounded recovery scan, not a
-high-throughput outbox index. A handoff id cannot be reused unless its receipt is explicitly removed
-by an operator. Existing messages sent with `queue.send` are unaffected.
+Persisting an intent does not roll back if the originating script later fails, and is not atomic
+with a separate database write or external effect. A crash before the handoff call still requires
+the originating request to be retried.
+
+Each minute tick examines at most 100 pending rows, with a persisted cursor that wraps after
+reaching the end. Completed receipts are retained for deduplication and do not count toward this
+budget. Failed sends and busy leases leave their pending rows for later passes. Several sweepers
+may overlap safely, but leases are not an exactly-once guarantee. Monitor sweep failures. A
+handoff id cannot be reused unless its receipt is explicitly removed by an operator. Existing
+messages sent with `queue.send` are unaffected.
+
+On upgrade, a restartable migration examines at most 100 legacy rows per minute tick and indexes
+unsent handoffs before advancing its cursor. Pending work is dispatched during migration too.
+After migration completes, the sweep no longer scans receipt history. Stop all old-version
+writers before running the new sweep: the completed migration will not discover legacy-format
+intents created later. Existing receipts remain compatible and retain their deduplication ids.
 
 ## Limits
 
