@@ -36,6 +36,7 @@ mod v1;
 mod vault;
 mod xml;
 mod xml_dom;
+mod xml_extract;
 mod xml_writer;
 mod zip;
 mod zip_writer;

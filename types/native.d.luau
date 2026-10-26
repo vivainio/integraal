@@ -231,6 +231,7 @@ declare native: {
     },
     xml: {
         events: (source: string | ByteStream, opts: { trim: boolean? }?) -> () -> XmlEvent?,
+        extract: (source: string | ByteStream, rules: string) -> () -> { [string]: any }?,
         parse: (source: string | ByteStream, opts: { trim: boolean? }?) -> XmlNode,
         writer: ((sink: Sink?, opts: { declaration: boolean?, indent: number? }?) -> XmlWriter)
             & ((opts: { declaration: boolean?, indent: number? }) -> XmlWriter),

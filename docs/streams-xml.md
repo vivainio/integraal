@@ -34,6 +34,33 @@ the event types listed above, so check `ev.type` first.
 
 For a full example see [Writing scripts](writing-scripts.md#example-parse-a-large-xml-feed).
 
+## `native.xml.extract(source, rules)`
+Pulls **records** out of a string or stream in constant memory, without a state machine. `rules`
+is a small DSL: a rule says which elements are records, and its fields say what to take from each.
+Returns an iterator of tables, one per matched element.
+
+```lua
+for r in native.xml.extract(stream, [[
+  open = //order[@status='open'] {
+    id    = @id
+    total = total/text() as number    # text (default), int, number, bool
+    skus  = sku/text() *              # * zero or more, + one or more, ? optional
+    kind  = "order"                   # a quoted value is a constant
+  }
+  refund = //refund { id = @id; amount = amount/text() as number }
+]]) do
+  native.log("info", r._rule .. " " .. r.id)
+end
+```
+
+- A rule name (`open`, `refund`) shows up as `_rule` on the record; unnamed rules have none.
+- `*` and `+` fields are arrays, `?` fields are `nil` when absent, and a field can be a nested
+  block that yields an array of child records.
+- Paths are an XPath subset (`//a/b`, `@attr`, `text()`, predicates, `./` relative paths),
+  evaluated in one forward pass, so records arrive as the document streams past.
+- A bad rule text, malformed XML or DTD raises an error; stream and time limits apply as for
+  `events`. The full rule syntax is in the [xmlstream](https://github.com/vivainio/xmlstream) README.
+
 ## `native.xml.parse(source, opts?)`
 Builds an in-memory tree from a string or stream and returns the **document node**. Use it for
 documents that fit in memory (partner messages, small feeds), where the pull parser is too low

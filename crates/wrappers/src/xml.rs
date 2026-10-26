@@ -120,6 +120,7 @@ pub fn api(
             lua.create_function(move |lua, ()| next_event(lua, &mut state.lock().unwrap()))
         })?,
     )?;
+    crate::xml_extract::api(lua, &xml, max_stream_bytes, deadline.clone())?;
     crate::xml_dom::api(lua, &xml, max_object_bytes, deadline.clone())?;
     crate::xml_writer::api(lua, &xml, max_object_bytes, deadline)?;
     Ok(xml)
