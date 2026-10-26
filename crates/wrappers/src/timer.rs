@@ -133,6 +133,80 @@ pub fn cancel(backend: &dyn ItemBackend, tenant: &str, id: &str, due_s: u64) -> 
     backend.delete(TIMERS, &sk(due_s, tenant, id))
 }
 
+/// Script timers use a separate namespace from coordination-pattern timers.
+pub(crate) fn api(
+    lua: &mlua::Lua,
+    host: &crate::HostContext,
+    budget: std::sync::Arc<crate::Budget>,
+) -> mlua::Result<mlua::Table> {
+    use mlua::{LuaSerdeExt, Table, Value};
+    let api = lua.create_table()?;
+    for (name, relative) in [("at", false), ("after", true)] {
+        let db = host.db.clone();
+        let enabled = host.queue.is_some();
+        let tenant = host.tenant.clone();
+        let budget = budget.clone();
+        api.set(
+            name,
+            lua.create_function(move |lua, (id, time, message): (String, u64, Table)| {
+                let err = mlua::Error::runtime;
+                check_id(&id).map_err(mlua::Error::runtime)?;
+                let now = crate::db::now_secs();
+                let due = if relative {
+                    now.checked_add(time)
+                        .ok_or_else(|| err("timer delay overflow"))?
+                } else {
+                    time
+                };
+                if !enabled {
+                    return Err(err("timer needs a queue"));
+                }
+                let db = db.as_ref().ok_or_else(|| err("timer needs ig.db"))?;
+                for field in ["delay_s", "group"] {
+                    if message.contains_key(field)? {
+                        return Err(err("timer does not support delay_s or group"));
+                    }
+                }
+                let event = match message.get::<Value>("event")? {
+                    Value::Nil => Json::Null,
+                    value => lua.from_value(value)?,
+                };
+                let payload = Payload {
+                    script: message.get("script")?,
+                    version: message.get("version")?,
+                    event,
+                    trace: Some(crate::trace::inject_current()),
+                };
+                budget.take_data().map_err(mlua::Error::runtime)?;
+                register(
+                    db.raw().as_ref(),
+                    &tenant,
+                    &format!("script/{id}"),
+                    due,
+                    &payload,
+                    now,
+                )
+                .map_err(mlua::Error::runtime)?;
+                Ok(due)
+            })?,
+        )?;
+    }
+    let db = host.db.clone();
+    let tenant = host.tenant.clone();
+    api.set(
+        "cancel",
+        lua.create_function(move |_, (id, due): (String, u64)| {
+            let err = mlua::Error::runtime;
+            check_id(&id).map_err(mlua::Error::runtime)?;
+            let db = db.as_ref().ok_or_else(|| err("timer needs ig.db"))?;
+            budget.take_data().map_err(mlua::Error::runtime)?;
+            cancel(db.raw().as_ref(), &tenant, &format!("script/{id}"), due)
+                .map_err(mlua::Error::runtime)
+        })?,
+    )?;
+    Ok(api)
+}
+
 /// A pending timer, as `list` reports it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Pending {

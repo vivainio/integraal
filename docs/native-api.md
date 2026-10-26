@@ -15,6 +15,7 @@ deployment settings behind it:
 | `igp.claim` | [Consumer claims](claims.md) |
 | `igp.lock` | [Locks](locks.md) |
 | `ig.queue` | [Queue](queue.md) |
+| `ig.timer` | [Durable timers](timer.md) |
 | `igp.callback` | [Callbacks](callbacks.md) |
 | `igp.batch`, `ig.ndjson` | [Batch jobs](batch.md) |
 | `igp.barrier` | [Barriers](barrier.md) |

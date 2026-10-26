@@ -202,6 +202,12 @@ declare ig: {
         delete: (pk: string, sk: string?) -> (),
         query: (pk: string, opts: { sk_prefix: string?, limit: number? }?) -> { DbRow },
     },
+    timer: {
+        -- Unix seconds. Returns due_s; cancel needs the same id and due_s.
+        at: (id: string, due_s: number, message: { script: string?, version: string?, event: any }) -> number,
+        after: (id: string, delay_s: number, message: { script: string?, version: string?, event: any }) -> number,
+        cancel: (id: string, due_s: number) -> (),
+    }
     queue: {
         -- Persist a stable-id handoff for the minute sweep; false for an identical existing intent.
         handoff: (id: string, message: { script: string?, version: string?, event: any }) -> boolean,

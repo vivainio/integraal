@@ -81,6 +81,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     let queue = crate::queue::api(lua, &host.tenant, host.queue.clone(), budget.clone())?;
     crate::outbox::install(lua, &queue, host, budget.clone())?;
     ig.set("queue", queue)?;
+    ig.set("timer", crate::timer::api(lua, host, budget.clone())?)?;
     igp.set("callback", callback_api(lua, host, budget.clone())?)?;
     igp.set("barrier", crate::barrier::api(lua, host, budget.clone())?)?;
     igp.set(

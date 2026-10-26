@@ -2833,6 +2833,96 @@ end }"#;
     }
 
     #[tokio::test]
+    async fn script_timers_schedule_replace_cancel_and_deliver() {
+        let src = r#"return { handle = function(ctx, ev)
+            if ev.cancel then ig.timer.cancel("check", ev.due); return end
+            if ev.relative then
+                return ig.timer.after("later", ev.delay, { event = { type = "reconcile" } })
+            end
+            return ig.timer.at("check", ev.due, {
+                script = "work", version = "v1", event = { value = ev.value },
+            })
+        end }"#;
+        let backend = Arc::new(MemItems::default());
+        let queue = Arc::new(MemQueue::default());
+        let e = engine_cfg(src, Limits::default(), r#"{"queue":true}"#)
+            .with_db(backend.clone())
+            .with_queue(queue.clone());
+        let due = now_ms() / 1000 + 60;
+        for value in [1, 2] {
+            assert_eq!(
+                e.invoke(inv(Trigger::Queue, json!({"due":due,"value":value})))
+                    .await
+                    .unwrap(),
+                json!(due)
+            );
+        }
+        let rows = integraal_wrappers::list_timers(&*backend, "acme", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].payload.trace.is_some());
+        assert_eq!(
+            integraal_wrappers::sweep_timers(&*backend, &*queue, due - 1, 10)
+                .unwrap()
+                .fired,
+            0
+        );
+        assert_eq!(
+            integraal_wrappers::sweep_timers(&*backend, &*queue, due, 10)
+                .unwrap()
+                .fired,
+            1
+        );
+        assert_eq!(
+            queue.0.lock().unwrap()[0].0,
+            json!({"tenant":"acme","script":"work","version":"v1","event":{"value":2}})
+        );
+        let later = e
+            .invoke(inv(Trigger::Queue, json!({"relative":true,"delay":120})))
+            .await
+            .unwrap()
+            .as_u64()
+            .unwrap();
+        assert!(later >= due + 60);
+        e.invoke(inv(Trigger::Queue, json!({"due":due,"value":3})))
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            e.invoke(inv(Trigger::Queue, json!({"cancel":true,"due":due})))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            integraal_wrappers::sweep_timers(&*backend, &*queue, due, 10)
+                .unwrap()
+                .fired,
+            0
+        );
+        assert!(e
+            .invoke(inv(Trigger::Queue, json!({"relative":true,"delay":518401})))
+            .await
+            .is_err());
+        assert!(engine(src, Limits::default())
+            .invoke(inv(Trigger::Queue, json!({"due":due})))
+            .await
+            .is_err());
+        let capped_db = Arc::new(MemItems::default());
+        let capped = engine_cfg(
+            src,
+            Limits::default(),
+            r#"{"queue":true,"limits":{"max_data_ops":0}}"#,
+        )
+        .with_db(capped_db.clone())
+        .with_queue(queue);
+        assert!(capped
+            .invoke(inv(Trigger::Queue, json!({"due":due})))
+            .await
+            .is_err());
+        assert!(integraal_wrappers::list_timers(&*capped_db, "acme", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn retry_pattern_schedules_versioned_work_and_exhausts_without_sending() {
         let src = r#"local igp = require("@native/patterns@1")
 return { handle = function(ctx, ev)

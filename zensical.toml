@@ -32,6 +32,7 @@ nav = [
     { "Consumer claims" = "claims.md" },
     { "Retry policy" = "retry.md" },
     { "Queue" = "queue.md" },
+    { "Timers" = "timer.md" },
     { "Callbacks" = "callbacks.md" },
     { "Batch jobs" = "batch.md" },
     { "Barriers" = "barrier.md" },
