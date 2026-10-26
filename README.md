@@ -25,7 +25,5 @@ return { handle = handle }
 - **Typed:** `--!strict` scripts checked against `types/native.d.luau`.
 
 ## Documentation
-Start at [`docs/index.md`](docs/index.md):
-[architecture](docs/architecture.md), [writing scripts](docs/writing-scripts.md),
-[native API](docs/native-api.md), [tenant config](docs/tenant-config.md),
-[deployment](docs/deployment.md), [local development](docs/local-development.md).
+Read the book: **<https://vivainio.github.io/integraal/>**
+(sources in [`docs/`](docs/index.md)).
