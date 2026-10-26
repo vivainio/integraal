@@ -27,19 +27,16 @@ end
 ```
 
 `put_if_absent` and `add` are the building blocks for idempotency and for counting work across
-invocations: claim a key to run something once, or count finished pieces and act on the one that
+invocations: record a deduplication marker, or count finished pieces and act on the one that
 completes the set. For [scatter and gather](patterns.md#scatter-and-gather), use a
 [barrier](barrier.md) to avoid a crash between claiming a member and incrementing its counter.
 Use keys that only
 `add` writes: `get` reads a counter back as a number, and a later `put` replaces it. Both calls count
 against `max_data_ops`.
 
-```lua
-if native.db.put_if_absent("seen", ev.id, true) then   -- true only for the first delivery
-  process(ev)
-end
-local n = native.db.add("progress", job)               -- 1, 2, 3, ...
-```
+For work that must recover after a crash, use [consumer claims](claims.md) instead of a
+`put_if_absent` marker followed by processing. A permanent marker cannot distinguish finished
+work from a process that died immediately after claiming it.
 
 Isolation is enforced by the host: your `pk` is stored as `TEN#<tenant>#<pk>`, so a script cannot
 address another tenant's rows.

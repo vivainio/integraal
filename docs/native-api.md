@@ -10,6 +10,7 @@ deployment settings behind it:
 | --- | --- |
 | `native.store.<name>` | [Stores](stores.md), also whitelisted host directories: [File system](filesystem.md) |
 | `native.db` | [DynamoDB](dynamodb.md) |
+| `native.claim` | [Consumer claims](claims.md) |
 | `native.lock` | [Locks](locks.md) |
 | `native.queue` | [Queue](queue.md) |
 | `native.callback` | [Callbacks](callbacks.md) |

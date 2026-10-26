@@ -146,6 +146,11 @@ flowchart LR
     L -->|one at a time| C[critical section]
 ```
 
+### Recoverable consumers
+Use [`native.claim`](claims.md) for work that may be redelivered: acquire a lease, renew it while
+working, then store the completed result. A crashed worker's lease expires so a retry can take
+over. A completed request returns its saved result. External effects must still be safe to repeat.
+
 ### Small state (DynamoDB)
 Small items per tenant with a one-week TTL, atomic counters and claim-once keys; also backs callbacks and cross-process locks. [DynamoDB](dynamodb.md)
 
@@ -266,4 +271,4 @@ Many parts at once can flood the queue for everyone else; per-tenant concurrency
 | Avoid concurrent runs | Locks |
 | Split work and join the results | Scatter and gather (`queue.handoff` plus `barrier`), or one batch job with several queries |
 | Do something when every document has been acked | Barrier |
-| Run something once despite redelivery | `db.put_if_absent` |
+| Recover work across crashes and redelivery | Consumer claim (lease plus durable result) |

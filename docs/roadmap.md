@@ -37,9 +37,9 @@ remaining work:
 - Operator inspection and explicit receipt cleanup.
 
 ## Reliable consumers and retries
-- Recoverable consumer claims: an owner token, expiring lease, completion state and stored result,
-  so a crash after claiming work does not permanently skip it. External effects still need
-  destination idempotency or a transactional mechanism.
+[Recoverable consumer claims](claims.md) are implemented: leases, ownership tokens, renewal and
+durable completion results. Remaining work:
+
 - Retry policies with exponential backoff, jitter, retry budgets and partner rate-limit handling,
   building on the message dispositions above.
 - Scheduled reconciliation of expected work against durable results, with safe replay of missing

@@ -293,6 +293,28 @@ pub(crate) mod tests {
             }
             Ok(free)
         }
+        fn replace_if_current(
+            &self,
+            pk: &str,
+            expected: &Item,
+            replacement: Item,
+            now: u64,
+        ) -> Result<bool, String> {
+            if expected.sk != replacement.sk {
+                return Err("sort key changed".into());
+            }
+            let mut rows = self.0.lock().unwrap();
+            let key = (pk.to_string(), expected.sk.clone());
+            if rows
+                .get(&key)
+                .is_some_and(|row| row == expected && row.ttl > now)
+            {
+                rows.insert(key, replacement);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
         fn delete_if_value(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
             unimplemented!()
         }

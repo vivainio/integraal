@@ -36,6 +36,17 @@ pub trait ItemBackend: Send + Sync {
     /// Writes the item if none exists at `(pk, item.sk)` or the existing one's `ttl` is at or before
     /// `now` (expired but not yet swept by DynamoDB); returns whether it wrote.
     fn put_if_free(&self, pk: &str, item: Item, now: u64) -> Result<bool, String>;
+    /// Atomically replaces the exact current value and expiry, only while its lease is live.
+    /// The replacement must have the same sort key. Never emulate this with a read then write.
+    fn replace_if_current(
+        &self,
+        _pk: &str,
+        _expected: &Item,
+        _replacement: Item,
+        _now: u64,
+    ) -> Result<bool, String> {
+        Err("backend does not support atomic conditional replacement".into())
+    }
     /// Deletes the item only if its value is `value`; returns whether it deleted.
     fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String>;
     /// Atomically adds `delta` to the counter at `(pk, sk)` and returns the new value, creating it at
@@ -177,6 +188,15 @@ impl DbScope {
 }
 
 impl DbScope {
+    /// Consumer claims cannot be addressed through the script-facing database API.
+    pub(crate) fn claim_pk(&self, id: &str) -> Result<String, String> {
+        check("claim id", id, false)?;
+        if id.len() > 200 {
+            return Err("claim id exceeds 200 bytes".into());
+        }
+        Ok(format!("TEN#{}#\u{1}claim#{}", self.tenant, id))
+    }
+
     /// The partition holding a barrier. Like locks, it contains a control character, so scripts cannot
     /// read or forge barrier rows through `native.db`.
     pub(crate) fn barrier_pk(&self, id: &str) -> Result<String, String> {

@@ -202,6 +202,14 @@ declare native: {
         delete: (pk: string, sk: string?) -> (),
         query: (pk: string, opts: { sk_prefix: string?, limit: number? }?) -> { DbRow },
     },
+    claim: {
+        -- Acquires expired/absent work, reports busy ownership, or returns its durable result.
+        acquire: (id: string, opts: { lease_s: number? }?) -> { state: "acquired", token: string, expires_s: number } | { state: "busy", expires_s: number } | { state: "complete", result: any },
+        -- True for a successful completion or an identical retry by the same owner.
+        complete: (id: string, token: string, result: any) -> boolean,
+        -- New expiry, or nil when ownership was lost or a concurrent transition won.
+        renew: (id: string, token: string, opts: { lease_s: number? }?) -> number?,
+    },
     queue: {
         -- Persist a stable-id handoff for the minute sweep; false for an identical existing intent.
         handoff: (id: string, message: { script: string?, version: string?, event: any }) -> boolean,

@@ -28,6 +28,7 @@ nav = [
     { "FTP and SFTP" = "remote.md" },
     { "DynamoDB" = "dynamodb.md" },
     { "Locks" = "locks.md" },
+    { "Consumer claims" = "claims.md" },
     { "Queue" = "queue.md" },
     { "Callbacks" = "callbacks.md" },
     { "Batch jobs" = "batch.md" },

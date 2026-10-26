@@ -12,6 +12,7 @@
 //! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from stores), and `native.queue` (send new work to the job queue), and `native.barrier` (wait for a known set of acknowledgements, then continue once), and `native.task` (attach a title, metrics, attributes and details to the task's execution summary).
 
 mod barrier;
+mod claim;
 mod outbox;
 pub use db::NO_EXPIRY;
 pub use outbox::sweep as sweep_outbox;

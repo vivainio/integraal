@@ -30,7 +30,8 @@ your own**: a script can only queue work for itself.
 Delivery is at least once, so a handler may run again for the same message. `ctx.attempt` tells a
 handler which delivery this is (`1` the first). Make effects safe to repeat with stable output
 keys or a destination idempotency key. A [`native.db.put_if_absent`](dynamodb.md) claim before
-an effect can strand the work if the process crashes after claiming it. A handler that wants to
+an effect can strand the work if the process crashes after claiming it. Use
+[consumer claims](claims.md) for recoverable ownership and stored completion results. A handler that wants to
 give up cleanly on its last attempt can test `ctx.attempt` and report the failure instead of raising.
 
 Sending is **not atomic**: if a call fails halfway, some messages are already queued. Make the

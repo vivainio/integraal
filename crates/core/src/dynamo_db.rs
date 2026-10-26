@@ -174,6 +174,42 @@ impl ItemBackend for DynamoBackend {
         })
     }
 
+    #[tracing::instrument(name = "dynamodb.replace_if_current", skip_all, fields(table = %self.table))]
+    fn replace_if_current(
+        &self,
+        pk: &str,
+        expected: &Item,
+        replacement: Item,
+        now: u64,
+    ) -> Result<bool, String> {
+        if expected.sk != replacement.sk {
+            return Err("conditional replacement must retain the sort key".into());
+        }
+        self.handle.block_on(async {
+            let result = self
+                .client
+                .put_item()
+                .table_name(&self.table)
+                .set_item(Some(item_attributes(pk, &replacement)))
+                .condition_expression("v = :v AND #t = :expiry AND #t > :now")
+                .expression_attribute_names("#t", "ttl")
+                .expression_attribute_values(":v", s(&expected.value))
+                .expression_attribute_values(":expiry", AttributeValue::N(expected.ttl.to_string()))
+                .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                .send()
+                .await;
+            match result {
+                Ok(_) => Ok(true),
+                Err(SdkError::ServiceError(e))
+                    if e.err().is_conditional_check_failed_exception() =>
+                {
+                    Ok(false)
+                }
+                Err(e) => Err(sdk_err(&e)),
+            }
+        })
+    }
+
     #[tracing::instrument(name = "dynamodb.delete_if_value", skip_all, fields(table = %self.table))]
     fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String> {
         self.handle.block_on(async {

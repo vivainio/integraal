@@ -2214,6 +2214,28 @@ pub(crate) mod tests {
             }
             Ok(free)
         }
+        fn replace_if_current(
+            &self,
+            pk: &str,
+            expected: &integraal_wrappers::Item,
+            replacement: integraal_wrappers::Item,
+            now: u64,
+        ) -> Result<bool, String> {
+            if expected.sk != replacement.sk {
+                return Err("sort key changed".into());
+            }
+            let mut rows = self.0.lock().unwrap();
+            let key = (pk.to_string(), expected.sk.clone());
+            if rows
+                .get(&key)
+                .is_some_and(|row| row == expected && row.ttl > now)
+            {
+                rows.insert(key, replacement);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
         fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String> {
             let mut m = self.0.lock().unwrap();
             let key = (pk.to_string(), sk.to_string());
@@ -2604,6 +2626,72 @@ pub(crate) mod tests {
             call(json!({"step":"done"})).await.unwrap(),
             json!({"total":2,"batch":7,"seen":["a.xml=true:nil","b.xml=false:schema"],"failed":1,"unknown":false})
         );
+    }
+
+    #[tokio::test]
+    async fn consumer_claims_recover_and_store_results_through_the_luau_api() {
+        let src = r#"return { handle = function(ctx, ev)
+            if ev.op == "complete" then return native.claim.complete("job", ev.token, ev.result)
+            elseif ev.op == "renew" then return native.claim.renew("job", ev.token, { lease_s = 120 })
+            else return native.claim.acquire("job", { lease_s = 60 }) end
+        end }"#;
+        let backend = Arc::new(MemItems::default());
+        // Claims need the database, but neither a queue nor a tenant queue grant.
+        let e = engine_cfg(src, Limits::default(), "{}").with_db(backend.clone());
+        let call = |ev| e.invoke(inv(Trigger::Queue, ev));
+        let first = call(json!({})).await.unwrap();
+        assert_eq!(first["state"], "acquired");
+        assert_eq!(call(json!({})).await.unwrap()["state"], "busy");
+        assert!(
+            call(json!({"op":"renew","token":first["token"]}))
+                .await
+                .unwrap()
+                .as_u64()
+                .unwrap()
+                >= first["expires_s"].as_u64().unwrap()
+        );
+        let pk = "TEN#acme#\u{1}claim#job";
+        let mut row = backend.get(pk, "").unwrap().unwrap();
+        row.ttl = 1;
+        backend.put(pk, row).unwrap();
+        assert_eq!(
+            call(json!({"op":"complete","token":first["token"],"result":false}))
+                .await
+                .unwrap(),
+            json!(false)
+        );
+        let second = call(json!({})).await.unwrap();
+        assert_eq!(second["state"], "acquired");
+        assert_ne!(first["token"], second["token"]);
+        assert_eq!(
+            call(json!({"op":"complete","token":first["token"]}))
+                .await
+                .unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            call(json!({"op":"complete","token":second["token"],"result":false}))
+                .await
+                .unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            call(json!({})).await.unwrap(),
+            json!({"state":"complete","result":false})
+        );
+        assert_eq!(
+            call(json!({"op":"renew","token":second["token"]}))
+                .await
+                .unwrap(),
+            json!(null)
+        );
+        assert!(engine(src, Limits::default())
+            .invoke(inv(Trigger::Queue, json!({})))
+            .await
+            .is_err());
+        let capped = engine_cfg(src, Limits::default(), r#"{"limits":{"max_data_ops":1}}"#)
+            .with_db(Arc::new(MemItems::default()));
+        assert!(capped.invoke(inv(Trigger::Queue, json!({}))).await.is_err());
     }
 
     #[tokio::test]
