@@ -9,8 +9,8 @@ deletes are implemented; the rest of the pipeline is not.
 
 - In-process chaining: a script returns `{ next = "...", event = ... }` and the engine continues
   within one invocation, sharing the deadline and call budgets.
-- Message dispositions from the return value: success acks; `native.retry(delay, reason)`,
-  `native.dead(reason)`, `native.drop()`; `ctx.attempt` for backoff.
+- Message dispositions from the return value: success acks; `ig.retry(delay, reason)`,
+  `ig.dead(reason)`, `ig.drop()`; `ctx.attempt` for backoff.
 - Idempotency keyed on `(key, etag, script)`; per-tenant event-rate and concurrency caps.
 
 ## Barriers
@@ -23,7 +23,7 @@ deletes are implemented; the rest of the pipeline is not.
   handling of late results and remaining work.
 
 ## Schedules and timers
-- `native.timer` for scripts: `at`/`after` and `cancel`, on the [timers](schedules.md#timers) the
+- `ig.timer` for scripts: `at`/`after` and `cancel`, on the [timers](schedules.md#timers) the
   barrier deadline already uses.
 - Ticks and the timer sweep on Lambda (today only the Fargate server handles `system.tick`).
 - Creating a tenant's own EventBridge schedules from its config (cron, time zones).
@@ -31,7 +31,7 @@ deletes are implemented; the rest of the pipeline is not.
 - `type` on callback and batch `done.json` events.
 
 ## Durable handoff
-`native.queue.handoff`, the pending-work index and the minute recovery sweep are implemented;
+`ig.queue.handoff`, the pending-work index and the minute recovery sweep are implemented;
 remaining work:
 
 - Operator inspection and explicit receipt cleanup.
@@ -67,8 +67,8 @@ durable completion results. Remaining work:
 - Cache compiled Luau bytecode per `(script hash, runtime)`.
 - Per-script limit overrides; per-tenant concurrency caps on Fargate.
 - Hard deadline for S3 operations in flight.
-- DNS-aware SSRF protection for `native.http` (hostnames resolving to private addresses).
+- DNS-aware SSRF protection for `ig.http` (hostnames resolving to private addresses).
 
 ## Native API
-- Streaming writers (`native.store.writer`) for large outputs.
-- `native.secrets` backed by Secrets Manager / SSM.
+- Streaming writers (`ig.store.writer`) for large outputs.
+- `ig.secrets` backed by Secrets Manager / SSM.

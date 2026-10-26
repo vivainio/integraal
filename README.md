@@ -7,7 +7,7 @@ in a sandboxed Luau VM with a versioned native API.
 --!strict
 --!runtime 1
 local function handle(ctx: Context, event: any)
-  native.log("info", "hello from " .. ctx.tenant)
+  ig.log("info", "hello from " .. ctx.tenant)
   return { trigger = ctx.trigger, echo = event }
 end
 
@@ -22,7 +22,7 @@ return { handle = handle }
   - coordination: locks, deadlines, barriers, queue sends, signed callback URLs
   - batch jobs through a partner bucket
   - allow-listed HTTP, streaming XML / zip / gzip, crypto
-- **Typed:** `--!strict` scripts checked against `types/native.d.luau`.
+- **Typed:** `--!strict` scripts checked against `types/ig.d.luau`.
 
 ## Documentation
 Read the book: **<https://vivainio.github.io/integraal/>**

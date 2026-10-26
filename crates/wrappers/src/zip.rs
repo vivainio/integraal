@@ -1,4 +1,4 @@
-//! `native.zip.entries(source)`: iterates the entries of a zip archive in a single forward pass.
+//! `ig.zip.entries(source)`: iterates the entries of a zip archive in a single forward pass.
 //! Nothing is buffered beyond one entry's read chunk, so archives larger than memory work.
 //!
 //! The archive is read from its local headers, never its central directory (a stream cannot
@@ -332,7 +332,7 @@ impl UserData for Entry {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // A stream of the entry's uncompressed bytes, e.g. for `native.xml.events`.
+        // A stream of the entry's uncompressed bytes, e.g. for `ig.xml.events`.
         methods.add_method("open", |lua, this, ()| {
             let r = this.take()?;
             lua.create_userdata(ByteStream::new(Box::new(r)))
@@ -374,7 +374,7 @@ pub fn api(
                 Value::UserData(ud) => take_stream(&ud)?,
                 _ => {
                     return Err(mlua::Error::runtime(
-                        "native.zip.entries expects a string or a stream",
+                        "ig.zip.entries expects a string or a stream",
                     ))
                 }
             };

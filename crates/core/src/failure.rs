@@ -177,7 +177,7 @@ impl CaptureSlot {
         match handled {
             Some(h) => Failure {
                 // A runtime error whose innermost frame is a native function other than `error`
-                // came from the host API (a refused `native.db` call, say), not from script logic.
+                // came from the host API (a refused `ig.db` call, say), not from script logic.
                 kind: match (kind, h.frames.first()) {
                     (Kind::Runtime, Some(f))
                         if f.native && f.function.as_deref() != Some("error") =>

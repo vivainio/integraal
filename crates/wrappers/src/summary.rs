@@ -1,10 +1,10 @@
 //! The summary of one task execution: what the engine knows about it (outcome, duration, counts of
-//! outbound calls and log lines) and what the script attached with `native.task`.
+//! outbound calls and log lines) and what the script attached with `ig.task`.
 //!
 //! The script's part is built up incrementally, not returned, so whatever it set before a timeout
 //! or a memory failure still reaches the record. Nothing here can fail the task: a value over a
 //! limit is dropped and `truncated` says so. (A value that is not JSON at all is a script bug and
-//! raises in the script, like `native.json.encode` would.)
+//! raises in the script, like `ig.json.encode` would.)
 
 use std::{
     collections::BTreeMap,
@@ -123,14 +123,14 @@ impl Summary {
         }
     }
 
-    /// An outbound `native.http` request; `failed` when it got no response or one outside 2xx/3xx.
+    /// An outbound `ig.http` request; `failed` when it got no response or one outside 2xx/3xx.
     pub fn http(&self, failed: bool) {
         let mut s = self.0.lock().unwrap();
         s.http_requests += 1;
         s.http_failed += u64::from(failed);
     }
 
-    /// A `native.log` line.
+    /// A `ig.log` line.
     pub fn log(&self, level: &str) {
         let mut s = self.0.lock().unwrap();
         s.log_lines += 1;
@@ -192,7 +192,7 @@ impl Summary {
     }
 }
 
-/// `native.task`: `title(text)`, `metric(name, number)`, `add(name, delta?)`, `attr(name, text)`
+/// `ig.task`: `title(text)`, `metric(name, number)`, `add(name, delta?)`, `attr(name, text)`
 /// and `detail(value)`. Each can be called any number of times; the last `title` and `detail`, and
 /// the last value of each name, win.
 pub(crate) fn api(lua: &Lua, summary: Summary) -> mlua::Result<Table> {

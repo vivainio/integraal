@@ -1,4 +1,4 @@
-//! `native.xml.events(source, opts)`: a pull parser over a string or a byte stream.
+//! `ig.xml.events(source, opts)`: a pull parser over a string or a byte stream.
 //! Memory use is bounded by a single event, not by the document.
 
 use std::{
@@ -14,7 +14,7 @@ use xmlstream::EventRef;
 pub const MAX_STREAM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_DEPTH: usize = 256;
 
-/// A readable byte source handed to scripts (`native.store.open`, streaming HTTP).
+/// A readable byte source handed to scripts (`ig.store.open`, streaming HTTP).
 /// Consumed by the first parser that takes it.
 pub struct ByteStream(Mutex<Option<Box<dyn Read + Send>>>);
 
@@ -105,7 +105,7 @@ pub fn api(
     xml.set(
         "events",
         lua.create_function(move |lua, (source, opts): (Value, Option<Table>)| {
-            let reader = source_reader(source, "native.xml.events")?;
+            let reader = source_reader(source, "ig.xml.events")?;
             let trim = opts
                 .map(|o| o.get::<Option<bool>>("trim"))
                 .transpose()?

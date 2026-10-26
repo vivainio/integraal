@@ -1,8 +1,8 @@
 -- The peer reads requests and inputs, then commits its answer with done.json last.
 local get, put = __peer_get, __peer_put
-local json = native.json
+local json = ig.json
 local function digest(body)
-    return native.crypto.hex_encode(native.crypto.sha256(body))
+    return ig.crypto.hex_encode(ig.crypto.sha256(body))
 end
 local function request(job)
     local body = get(job, "request.json")

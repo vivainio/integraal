@@ -1,20 +1,20 @@
 # Outbound HTTP
 
-## Script API: `native.http`
+## Script API: `ig.http`
 Outbound HTTP, restricted to the tenant's [`http.allow`](#tenant-config-httpallow) list.
 Redirects are **not** followed (a redirect could leave the allowlist); follow them explicitly.
 
 ```lua
-local r = native.http.request({
+local r = ig.http.request({
   method = "POST",                       -- default "GET"
-  url = native.config.api_base .. "orders",
+  url = ig.config.api_base .. "orders",
   headers = { ["content-type"] = "application/json" },
-  body = native.json.encode({ id = 1 }),
+  body = ig.json.encode({ id = 1 }),
   stream = false,                        -- true: r.body is a stream
 })
 -- r.status, r.headers (table), r.body (string, capped at max_http_response_mb)
 
-local g = native.http.get("https://api.example.com/v1/ping", { accept = "application/json" })
+local g = ig.http.get("https://api.example.com/v1/ping", { accept = "application/json" })
 ```
 
 With `stream = true`, `r.body` is a [stream](streams-xml.md#streams).
@@ -34,24 +34,24 @@ those parts. `NAME` is the secret and the rest walks into its JSON (object keys,
 result must be a string, number or boolean. A secret that is itself a plain string is `{{vault:NAME}}`.
 
 ```lua
-native.http.request({
+ig.http.request({
   method = "POST",
   url = "https://api.stripe.com/v1/charges",
   headers = { authorization = "Bearer {{vault:stripe.live.key}}" },   -- {"live": {"key": "sk_..."}}
   body = "amount=100",
   vault = { "header" },
 })
--- native.http.get(url, headers, { "header" }) takes the same list as its third argument
+-- ig.http.get(url, headers, { "header" }) takes the same list as its third argument
 ```
 
 ### Basic auth
-`basic_auth = { username, password }` on `native.http.request` (and `job:http`) sends an HTTP Basic
+`basic_auth = { username, password }` on `ig.http.request` (and `job:http`) sends an HTTP Basic
 `Authorization` header, replacing any `authorization` header you set. The two values are expanded
 like any other part, so list `"basic_auth"` in `vault` to take them from the vault; the base64 token is
 redacted from the response too. A username cannot contain `:`.
 
 ```lua
-native.http.request({
+ig.http.request({
   url = "https://api.example.com/v1/items",
   basic_auth = { username = "{{vault:acme.user}}", password = "{{vault:acme.pass}}" },
   vault = { "basic_auth" },
@@ -101,7 +101,7 @@ An empty or missing list denies all outbound HTTP.
 
 ## Deployment: throttling {#throttling}
 Add a `throttle` array to the server's [config](deployment.md#configuration) to limit outbound
-`native.http` calls to chosen URLs, for all tenants together:
+`ig.http` calls to chosen URLs, for all tenants together:
 
 ```json
 [{ "url": "https://api.partner.com/v1/", "max_concurrent": 2, "per_second": 5 }]

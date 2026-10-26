@@ -31,7 +31,7 @@
       }
     },
     "stores": {
-      "description": "Store name (letters, digits, '_') to the store behind native.store.<name>.",
+      "description": "Store name (letters, digits, '_') to the store behind ig.store.<name>.",
       "type": "object",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_]+$"
@@ -42,7 +42,7 @@
     },
     "batch": {
       "$ref": "#/$defs/s3Place",
-      "description": "Dedicated bucket behind native.batch; must not also be an s3 store."
+      "description": "Dedicated bucket behind igp.batch; must not also be an s3 store."
     },
     "flow_logs": {
       "$ref": "#/$defs/s3Place",

@@ -7,13 +7,15 @@ use crate::{Budget, HostContext};
 pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     mlua_decimal::install(lua)?;
     let budget = Arc::new(Budget::new(&host.limits));
-    let native = lua.create_table()?;
-    native.set("version", 1)?;
+    let ig = lua.create_table()?;
+    ig.set("version", 1)?;
+    let igp = lua.create_table()?;
+    igp.set("version", 1)?;
 
     let (tenant, script_name) = (host.tenant.clone(), host.script.clone());
     let flow_log = host.flow_log.clone();
     let summary = host.summary.clone();
-    native.set(
+    ig.set(
         "log",
         lua.create_function(move |_, (level, msg): (String, String)| {
             let script = script_name.lock().unwrap().clone();
@@ -48,7 +50,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             lua.to_value(&v)
         })?,
     )?;
-    native.set("json", json)?;
+    ig.set("json", json)?;
 
     let time = lua.create_table()?;
     time.set(
@@ -60,11 +62,11 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             Ok(d.as_millis() as u64)
         })?,
     )?;
-    native.set("time", time)?;
+    ig.set("time", time)?;
 
-    native.set("store", stores_api(lua, host, budget.clone())?)?;
-    native.set("batch", crate::batch::api(lua, host, budget.clone())?)?;
-    native.set(
+    ig.set("store", stores_api(lua, host, budget.clone())?)?;
+    igp.set("batch", crate::batch::api(lua, host, budget.clone())?)?;
+    ig.set(
         "ndjson",
         crate::ndjson::api(
             lua,
@@ -73,14 +75,14 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             host.limits.deadline.clone(),
         )?,
     )?;
-    native.set("db", db_api(lua, host, budget.clone())?)?;
-    native.set("claim", crate::claim::api(lua, host, budget.clone())?)?;
+    ig.set("db", db_api(lua, host, budget.clone())?)?;
+    igp.set("claim", crate::claim::api(lua, host, budget.clone())?)?;
     let queue = crate::queue::api(lua, &host.tenant, host.queue.clone(), budget.clone())?;
     crate::outbox::install(lua, &queue, host, budget.clone())?;
-    native.set("queue", queue)?;
-    native.set("callback", callback_api(lua, host, budget.clone())?)?;
-    native.set("barrier", crate::barrier::api(lua, host, budget.clone())?)?;
-    native.set(
+    ig.set("queue", queue)?;
+    igp.set("callback", callback_api(lua, host, budget.clone())?)?;
+    igp.set("barrier", crate::barrier::api(lua, host, budget.clone())?)?;
+    igp.set(
         "lock",
         crate::lock::api(
             lua,
@@ -90,16 +92,16 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             host.limits.deadline.clone(),
         )?,
     )?;
-    native.set("http", http_api(lua, host, budget)?)?;
-    native.set(
+    ig.set("http", http_api(lua, host, budget)?)?;
+    ig.set(
         "task",
         crate::summary::api(lua, host.summary.clone().unwrap_or_default())?,
     )?;
-    native.set(
+    ig.set(
         "deadline",
         crate::deadline::api(lua, host.limits.deadline.clone())?,
     )?;
-    native.set(
+    ig.set(
         "xml",
         crate::xml::api(
             lua,
@@ -108,7 +110,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             host.limits.deadline.clone(),
         )?,
     )?;
-    native.set(
+    ig.set(
         "zip",
         crate::zip::api(
             lua,
@@ -117,7 +119,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             host.limits.deadline.clone(),
         )?,
     )?;
-    native.set(
+    ig.set(
         "gzip",
         crate::gzip::api(
             lua,
@@ -126,7 +128,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             host.limits.deadline.clone(),
         )?,
     )?;
-    native.set(
+    ig.set(
         "sql",
         crate::sql::api(
             lua,
@@ -135,7 +137,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             host.limits.deadline.clone(),
         )?,
     )?;
-    native.set(
+    ig.set(
         "crypto",
         crate::crypto::api(
             lua,
@@ -144,13 +146,17 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
             host.limits.max_object_bytes,
         )?,
     )?;
-    native.set("config", lua.to_value(&host.vars)?)?;
+    ig.set("config", lua.to_value(&host.vars)?)?;
 
-    let native: Table = native;
-    lua.globals().set("native", native)
+    lua.globals().set("ig", ig)?;
+    lua.set_named_registry_value("integraal.patterns.1", igp)?;
+    lua.globals().set(
+        "require",
+        lua.create_function(|lua, spec: String| super::require_native(lua, &spec))?,
+    )
 }
 
-/// One table of object functions per store the tenant was granted: `native.store.In.get(key)`.
+/// One table of object functions per store the tenant was granted: `ig.store.In.get(key)`.
 /// Naming any other store raises a clear error instead of indexing nil.
 fn stores_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     let data = lua.create_table()?;
@@ -268,7 +274,7 @@ fn db_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Ta
         budget.take_data().map_err(mlua::Error::runtime)?;
         scope
             .clone()
-            .ok_or_else(|| mlua::Error::runtime("native.db is not configured for this runtime"))
+            .ok_or_else(|| mlua::Error::runtime("ig.db is not configured for this runtime"))
     };
     let err = |e: String| mlua::Error::runtime(e);
 
@@ -377,11 +383,11 @@ fn callback_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Res
         lua.create_function(move |lua, opts: Option<Table>| {
             budget.take_data().map_err(mlua::Error::runtime)?;
             let scope = scope.clone().ok_or_else(|| {
-                mlua::Error::runtime("native.callback needs native.db (the config's db section)")
+                mlua::Error::runtime("igp.callback needs ig.db (the config's db section)")
             })?;
             let base = base.clone().ok_or_else(|| {
                 mlua::Error::runtime(
-                    "native.callback is not configured (the config's callbacks section)",
+                    "igp.callback is not configured (the config's callbacks section)",
                 )
             })?;
             let (script, state, ttl_s) = match &opts {

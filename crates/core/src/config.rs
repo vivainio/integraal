@@ -43,10 +43,10 @@ pub struct GlobalConfig {
     /// Where scripts and each tenant's `config.json` live.
     pub scripts: ScriptsConfig,
     /// Logical name (letters, digits, `_`; by convention `In`, `Out`, `Backup`, `Temp`) to the store
-    /// behind `native.store.<name>`. Tenant data is `<prefix><tenant>/` in each store.
+    /// behind `ig.store.<name>`. Tenant data is `<prefix><tenant>/` in each store.
     #[serde(default)]
     pub stores: BTreeMap<String, StoreConfig>,
-    /// Dedicated bucket for `native.batch` jobs, kept apart from the data stores.
+    /// Dedicated bucket for `igp.batch` jobs, kept apart from the data stores.
     #[serde(default)]
     pub batch: Option<BatchConfig>,
     /// Bucket for the invocation logs of tenants with `"flow_logs": true`, kept apart from the
@@ -57,13 +57,13 @@ pub struct GlobalConfig {
     /// Kept apart from every other bucket, because captures may hold tenant data.
     #[serde(default)]
     pub debug: Option<DebugSinkConfig>,
-    /// DynamoDB table behind `native.db` and `native.callback`.
+    /// DynamoDB table behind `ig.db` and `igp.callback`.
     #[serde(default)]
     pub db: Option<DbConfig>,
-    /// Public base URL of the webhook Lambda, for `native.callback.create`.
+    /// Public base URL of the webhook Lambda, for `igp.callback.create`.
     #[serde(default)]
     pub callbacks: Option<CallbacksConfig>,
-    /// Master key for `native.crypto`.
+    /// Master key for `ig.crypto`.
     #[serde(default)]
     pub crypto: Option<CryptoConfig>,
     /// Operator API on its own port (server only); see the server crate.
@@ -104,7 +104,7 @@ pub struct ScriptsConfig {
 }
 
 /// One data store. `type` picks the kind and with it the fields allowed; the grants and the
-/// `native.store.<name>` API are the same for all of them.
+/// `ig.store.<name>` API are the same for all of them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum StoreConfig {

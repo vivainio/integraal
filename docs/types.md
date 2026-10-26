@@ -1,6 +1,6 @@
 # Types
 
-Luau is gradually typed, and integraal's `native` API ships with type definitions. Write scripts
+Luau is gradually typed, and integraal's `ig` / `igp` API ships with type definitions. Write scripts
 with `--!strict` and annotate your handlers: wrong argument types, misspelled functions and
 unhandled `nil`s are caught **before** you upload.
 
@@ -8,8 +8,8 @@ unhandled `nil`s are caught **before** you upload.
 --!strict
 --!runtime 1
 local function handle(ctx: Context, event: { key: string })
-  local body = native.store.In.get(event.key)   -- string?
-  native.log("info", body)                  -- error: string? is not string
+  local body = ig.store.In.get(event.key)   -- string?
+  ig.log("info", body)                  -- error: string? is not string
   return {}
 end
 return { handle = handle }
@@ -17,19 +17,20 @@ return { handle = handle }
 
 ## What is defined
 
-[`types/native.d.luau`](https://github.com/vivainio/integraal/blob/main/types/native.d.luau)
+[`types/ig.d.luau`](https://github.com/vivainio/integraal/blob/main/types/ig.d.luau)
 declares:
 
 | Name | Kind | Notes |
 | --- | --- | --- |
-| `native` | global | every function in the [Native API](native-api.md) with exact signatures |
+| `ig` | global | core capabilities in the [Native API](native-api.md) with exact signatures |
+| `PatternsV1`, `require` | type, global | `require("@native/patterns@1")` returns the typed pattern API |
 | `Context` | type | `tenant`, `script`, `trigger`, `runtime` – the first handler argument |
-| `Decimal`, `D` | type, global | exact base-10 numbers from [mlua-decimal](https://github.com/vivainio/mlua-decimal): `D"12.50"`; bind one to `native.sql` as a parameter (stored as text) |
-| `ByteStream` | type | what `native.store.<name>.open` and streaming HTTP return |
-| `XmlEvent` | type | `native.xml.events` items |
-| `HttpResponse`, `HttpStreamResponse` | type | `native.http` results; `request{stream=true}` is typed as the stream variant |
+| `Decimal`, `D` | type, global | exact base-10 numbers from [mlua-decimal](https://github.com/vivainio/mlua-decimal): `D"12.50"`; bind one to `ig.sql` as a parameter (stored as text) |
+| `ByteStream` | type | what `ig.store.<name>.open` and streaming HTTP return |
+| `XmlEvent` | type | `ig.xml.events` items |
+| `HttpResponse`, `HttpStreamResponse` | type | `ig.http` results; `request{stream=true}` is typed as the stream variant |
 
-`native.http.request` is overloaded: with `stream = true` the `body` is a `ByteStream`, otherwise a
+`ig.http.request` is overloaded: with `stream = true` the `body` is a `ByteStream`, otherwise a
 `string`.
 
 ## Checking scripts
@@ -44,7 +45,7 @@ dev/typecheck.sh path/to/script.luau   # specific files
 which runs:
 
 ```bash
-luau-lsp analyze --defs=types/native.d.luau --base-luaurc .luaurc script.luau
+luau-lsp analyze --defs=types/ig.d.luau --base-luaurc .luaurc script.luau
 ```
 
 Put a `.luaurc` next to your scripts so the editor and CI agree:
@@ -58,7 +59,7 @@ Put a `.luaurc` next to your scripts so the editor and CI agree:
 For editor support, point luau-lsp at the definitions file, e.g. in VS Code:
 
 ```json
-{ "luau-lsp.types.definitionFiles": { "integraal": "types/native.d.luau" } }
+{ "luau-lsp.types.definitionFiles": { "integraal": "types/ig.d.luau" } }
 ```
 
 ## At runtime

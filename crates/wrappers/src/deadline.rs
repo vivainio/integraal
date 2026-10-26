@@ -10,7 +10,7 @@ use std::{
 /// Raised when the invocation's own deadline passes. Not catchable by the script in any useful
 /// way: the interrupt keeps firing.
 pub const TIMEOUT: &str = "__timeout__";
-/// Raised inside a `native.deadline.with` block whose time is up (or an enclosing block's).
+/// Raised inside a `ig.deadline.with` block whose time is up (or an enclosing block's).
 pub const BLOCK_EXPIRED: &str = "__deadline__";
 
 struct Block {
@@ -30,7 +30,7 @@ struct Inner {
     next_id: AtomicU64,
 }
 
-/// The invocation deadline plus a stack of tighter, nested ones opened by `native.deadline.with`.
+/// The invocation deadline plus a stack of tighter, nested ones opened by `ig.deadline.with`.
 /// Shared by every native function and the VM interrupt; a block can only shorten the budget.
 #[derive(Clone)]
 pub struct Deadline(Arc<Inner>);
@@ -72,7 +72,7 @@ impl Deadline {
     }
 
     /// `Err` with the marker native functions and the interrupt raise once time is up.
-    /// Records which block ran out, so `native.deadline.with` knows the error is its own.
+    /// Records which block ran out, so `ig.deadline.with` knows the error is its own.
     pub fn check(&self) -> Result<(), &'static str> {
         if !self.expired() {
             return Ok(());
@@ -158,7 +158,7 @@ pub(crate) fn run_block(
     }
 }
 
-/// `native.deadline.with(ms, fn)`: runs `fn()` and returns its results. If `fn` is still running
+/// `ig.deadline.with(ms, fn)`: runs `fn()` and returns its results. If `fn` is still running
 /// after `ms` (or the invocation's own time is shorter), it is interrupted and `with` raises
 /// "deadline exceeded", which the caller can `pcall`. Blocks nest; the earliest deadline wins.
 pub fn api(lua: &Lua, deadline: Deadline) -> mlua::Result<Table> {

@@ -9,7 +9,7 @@
                  ┌───────────── crates/core ──────────────────────────────┐
                  │ 1. load <tenant>/config.json   (policy, vars, limits)  │
                  │ 2. load <tenant>/<script>/<version>.luau  (cached)     │
-                 │ 3. fresh Luau VM + `native` API for the pinned runtime │
+                 │ 3. fresh Luau VM + `ig` / `igp` API for the pinned runtime │
                  │ 4. sandbox, set limits, call the handler               │
                  └─────────────────────────────────────────────────────────┘
 ```
@@ -19,7 +19,7 @@
 | Crate | Responsibility |
 | --- | --- |
 | `integraal-loader` | `ScriptStore` trait, S3 implementation, in-memory cache with ETag revalidation. |
-| `integraal-wrappers` | The versioned `native` API (`v1`): data, HTTP, XML, JSON, config. |
+| `integraal-wrappers` | The versioned `ig` / `igp` API (`v1`): data, HTTP, XML, JSON, config. |
 | `integraal-core` | The engine: limits, tenant config, VM setup, handler dispatch. |
 | `integraal-lambda` | Lambda entrypoint (binary `bootstrap`). |
 | `integraal-webhook` | Webhook ingress Lambda: verifies callback tokens and enqueues to SQS. |

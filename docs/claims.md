@@ -1,19 +1,20 @@
 # Consumer claims
 
-`native.claim` gives a consumer recoverable ownership of a request and a durable completion
+`igp.claim` gives a consumer recoverable ownership of a request and a durable completion
 result. Use it with a stable business request id when work can be redelivered. A lease can expire
 and be acquired by a new worker; completed work returns its saved result instead of being acquired
 again. Claims need the deployment's `db` section; they do not need a queue or a timer sweep.
 
 ```lua
+local igp = require("@native/patterns@1")
 local id = "price/" .. ev.order_id
-local c = native.claim.acquire(id, { lease_s = 60 })
+local c = igp.claim.acquire(id, { lease_s = 60 })
 if c.state == "complete" then return c.result end
 if c.state == "busy" then error("request is owned; retry later") end
 
 -- Must be safe to repeat, e.g. pass id as the partner's idempotency key.
 local result = process(ev)
-if not native.claim.complete(id, c.token, result) then
+if not igp.claim.complete(id, c.token, result) then
   error("claim ownership changed; retry")
 end
 return result
@@ -37,7 +38,7 @@ claims do not compare request payloads. Results are JSON, at most 8 KB serialize
 results in an object store and complete with their key. Omitted results are JSON null.
 
 Each API call reserves two `max_data_ops` before making any database changes. Claims use private
-rows that scripts cannot access through `native.db`. Running rows use the lease expiry as their
+rows that scripts cannot access through `ig.db`. Running rows use the lease expiry as their
 DynamoDB TTL; acquisition can replace an expired row immediately, without waiting for DynamoDB's
 TTL cleanup. Completed results have no TTL and prevent reuse of the id until explicitly removed
 by an operator.
@@ -47,7 +48,8 @@ by an operator.
 Renew between chunks of work, before the current expiry:
 
 ```lua
-local expires_s = native.claim.renew(id, c.token, { lease_s = 60 })
+local igp = require("@native/patterns@1")
+local expires_s = igp.claim.renew(id, c.token, { lease_s = 60 })
 if not expires_s then error("claim ownership changed; stop and retry") end
 ```
 

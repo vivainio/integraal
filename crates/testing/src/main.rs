@@ -246,7 +246,7 @@ mod tests {
 
     fn framework() -> Lua {
         let lua = Lua::new();
-        lua.load("function __install_native() native = { http = {} } end")
+        lua.load("function __install_native() ig = { http = {} }; local patterns = { claim = {} }; require = function(spec) assert(spec == \"@native/patterns@1\"); return patterns end end")
             .exec()
             .unwrap();
         lua.load(include_str!("framework.luau")).exec().unwrap();
@@ -260,11 +260,27 @@ mod tests {
                 assert(req.body == "payload")
                 return { status = 201, body = "ok", headers = {} }
             end)
-            assert(native.http.request({method="POST", url="https://partner/x", body="payload"}).status == 201)
+            assert(ig.http.request({method="POST", url="https://partner/x", body="payload"}).status == 201)
             test.equal(test.http_calls, {{method="POST", url="https://partner/x", body="payload", headers={}}})
-            test.throws(function() native.http.get("https://partner/x") end, "unmocked HTTP")
+            test.throws(function() ig.http.get("https://partner/x") end, "unmocked HTTP")
             test.equal(#test.http_calls, 2)
         "#).exec().unwrap();
+    }
+
+    #[test]
+    fn mocks_support_patterns_and_reject_old_namespace() {
+        framework()
+            .load(
+                r#"local igp = require("@native/patterns@1")
+
+            local spy = test.mock("igp.claim.acquire", function(id) return {token=id} end)
+            assert(igp.claim.acquire("work").token == "work")
+            assert(spy.calls[1][1] == "work")
+            test.throws(function() test.mock("native.http.get", function() end) end, "mock path")
+        "#,
+            )
+            .exec()
+            .unwrap();
     }
 
     #[test]
@@ -272,11 +288,11 @@ mod tests {
         framework()
             .load(
                 r#"
-            local spy = test.mock("native.http.get", function(a, b, c)
+            local spy = test.mock("ig.http.get", function(a, b, c)
                 assert(a == "url" and b == nil and c == 3)
                 return nil, "second"
             end)
-            local a, b = native.http.get("url", nil, 3)
+            local a, b = ig.http.get("url", nil, 3)
             assert(a == nil and b == "second")
             assert(spy.calls[1].n == 3 and spy.calls[1][3] == 3)
             test.throws(function() test.equal({x=1}, {x=2}) end)

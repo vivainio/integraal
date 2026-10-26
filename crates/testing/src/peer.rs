@@ -134,8 +134,9 @@ mod tests {
         let f = fixture();
         f.lua
             .load(
-                r#"
-            local job = native.batch.new({ id = "document" })
+                r#"local igp = require("@native/patterns@1")
+
+            local job = igp.batch.new({ id = "document" })
             job:input("invoice", "<invoice id='42'/>", { ext = ".xml" })
             job:query("receipt", "accept_invoice", { input = "invoice" })
             job:state({ invoice = "42" })
@@ -148,9 +149,9 @@ mod tests {
             document.request.queries = {}
             local event = test.peer.ack(document, { results = { receipt = {{ accepted = true }} } })
             assert(event.type == "s3.object" and event.store == "$batch")
-            local route = native.batch.route(event)
+            local route = igp.batch.route(event)
             assert(route.script == "received" and route.event.job == id)
-            local result = native.batch.hydrate(route.event)
+            local result = igp.batch.hydrate(route.event)
             assert(result.ok and result.state.invoice == "42")
             local rows = {}
             for row in result:rows("receipt") do table.insert(rows, row) end
@@ -179,25 +180,26 @@ mod tests {
         fixture()
             .lua
             .load(
-                r#"
+                r#"local igp = require("@native/patterns@1")
+
             for _, id in ipairs({"empty", "failure", "raw"}) do
-                local job = native.batch.new({id=id})
+                local job = igp.batch.new({id=id})
                 job:query("receipt", "upload")
                 job:continue_with("received")
                 job:submit()
             end
             local empty = test.peer.receive("empty")
-            assert(native.json.decode(empty.body).job == "empty")
+            assert(ig.json.decode(empty.body).job == "empty")
             local event = test.peer.ack(empty)
-            local result = native.batch.hydrate(event)
+            local result = igp.batch.hydrate(event)
             for _ in result:rows("receipt") do error("expected empty rows") end
             event = test.peer.ack(test.peer.receive("failure"), {ok=false, error="rejected"})
-            test.throws(function() native.batch.hydrate(event) end, "rejected")
-            result = native.batch.hydrate(event, {allow_failure=true})
+            test.throws(function() igp.batch.hydrate(event) end, "rejected")
+            result = igp.batch.hydrate(event, {allow_failure=true})
             assert(not result.ok and result.error == "rejected")
             event = test.peer.ack(test.peer.receive("raw"), {results={receipt={body="<receipt/>"}}})
-            local stream = native.batch.hydrate(event):open("receipt")
-            assert(native.xml.parse(stream):first("/receipt") ~= nil)
+            local stream = igp.batch.hydrate(event):open("receipt")
+            assert(ig.xml.parse(stream):first("/receipt") ~= nil)
             stream:close()
         "#,
             )
@@ -208,8 +210,9 @@ mod tests {
     #[test]
     fn invalid_ack_does_not_commit_and_input_integrity_is_checked() {
         let f = fixture();
-        f.lua.load(r#"
-            local job = native.batch.new({id="validation"})
+        f.lua.load(r#"local igp = require("@native/patterns@1")
+
+            local job = igp.batch.new({id="validation"})
             job:input("invoice", "original")
             job:query("receipt", "upload")
             job:submit()
@@ -245,7 +248,7 @@ mod tests {
             "jobs/ok/inputs/doc.0000.xml"
         );
         let lua = Lua::new();
-        lua.load("test = {}; native = {json = {}} ").exec().unwrap();
+        lua.load("test = {}; ig = {json = {}} ").exec().unwrap();
         install(&lua, None).unwrap();
         let error = lua.load(r#"test.peer.receive("job")"#).exec().unwrap_err();
         assert!(error.to_string().contains("requires batch configuration"));

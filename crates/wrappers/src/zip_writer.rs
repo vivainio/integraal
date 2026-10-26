@@ -1,4 +1,4 @@
-//! `native.zip.writer(sink?)`: writes a zip archive in a single forward pass, so the archive can
+//! `ig.zip.writer(sink?)`: writes a zip archive in a single forward pass, so the archive can
 //! be larger than memory and go straight into a store sink.
 //!
 //! Entries are deflated and carry their sizes in trailing data descriptors (zip64 sized), so
@@ -369,7 +369,7 @@ pub fn api(
             let target = match sink {
                 Some(ud) => Target::Sink(
                     Sink::from_userdata(&ud)
-                        .ok_or_else(|| mlua::Error::runtime("native.zip.writer expects a sink"))?,
+                        .ok_or_else(|| mlua::Error::runtime("ig.zip.writer expects a sink"))?,
                 ),
                 None => Target::Mem {
                     buf: Vec::new(),

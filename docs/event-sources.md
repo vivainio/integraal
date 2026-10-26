@@ -178,7 +178,7 @@ able to run twice on the same event:
 
 ```lua
 local function on_queue(ctx: Context, event: { id: string, detail: any })
-  if not native.db.put_if_absent("seen", event.id, true) then
+  if not ig.db.put_if_absent("seen", event.id, true) then
     return { skipped = true }     -- already handled
   end
   -- ... the work ...

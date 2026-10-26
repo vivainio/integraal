@@ -1,4 +1,4 @@
--- Type definitions for the integraal `native` API, runtime version 1.
+-- Type definitions for integraal core (`ig`) and imported patterns, version 1.
 -- Load with:  dev/typecheck.sh   or point luau-lsp at this file (see docs/types.md).
 -- Note: definition files can only expose `declare extern type`, not plain aliases.
 
@@ -27,59 +27,59 @@ declare extern type XmlEvent with
 end
 
 declare extern type XmlNode with
-    kind: (self) -> "document" | "element" | "text" | "comment" | "processing-instruction" | "attribute"
-    name: (self) -> string
-    local_name: (self) -> string
-    namespace: (self) -> string
-    text: (self) -> string
-    attr: (self, name: string) -> string?
-    attrs: (self) -> { [string]: string }
-    children: (self, name: string?) -> { XmlNode }
-    child: (self, name: string) -> XmlNode?
-    root: (self) -> XmlNode?
-    parent: (self) -> XmlNode?
+    kind: (XmlNode) -> "document" | "element" | "text" | "comment" | "processing-instruction" | "attribute"
+    name: (XmlNode) -> string
+    local_name: (XmlNode) -> string
+    namespace: (XmlNode) -> string
+    text: (XmlNode) -> string
+    attr: (XmlNode, name: string) -> string?
+    attrs: (XmlNode) -> { [string]: string }
+    children: (XmlNode, name: string?) -> { XmlNode }
+    child: (XmlNode, name: string) -> XmlNode?
+    root: (XmlNode) -> XmlNode?
+    parent: (XmlNode) -> XmlNode?
     -- Node-sets come back as arrays in document order; other results as string, number or boolean.
-    xpath: (self, expr: string, ns: { [string]: string }?) -> any
-    first: (self, expr: string, ns: { [string]: string }?) -> any
-    xml: (self) -> string
+    xpath: (XmlNode, expr: string, ns: { [string]: string }?) -> any
+    first: (XmlNode, expr: string, ns: { [string]: string }?) -> any
+    xml: (XmlNode) -> string
 end
 
 declare extern type XmlWriter with
-    start: (self, tag: string, attrs: { [string]: string | number | boolean }?) -> ()
-    close: (self) -> ()
-    text: (self, text: string) -> ()
-    cdata: (self, text: string) -> ()
-    comment: (self, text: string) -> ()
-    element: (self, tag: string, attrs: { [string]: string | number | boolean }?, text: (string | number)?) -> ()
-    finish: (self) -> string?
+    start: (XmlWriter, tag: string, attrs: { [string]: string | number | boolean }?) -> ()
+    close: (XmlWriter) -> ()
+    text: (XmlWriter, text: string) -> ()
+    cdata: (XmlWriter, text: string) -> ()
+    comment: (XmlWriter, text: string) -> ()
+    element: (XmlWriter, tag: string, attrs: { [string]: string | number | boolean }?, text: (string | number)?) -> ()
+    finish: (XmlWriter) -> string?
 end
 
 -- Streaming upload from `Store.create`; the object appears on `close`.
 declare extern type Sink with
-    write: (self, data: string) -> ()
-    close: (self) -> number
-    abort: (self) -> ()
+    write: (Sink, data: string) -> ()
+    close: (Sink) -> number
+    abort: (Sink) -> ()
 end
 
 declare extern type ZipWriter with
-    add: (self, name: string, content: (string | ByteStream)?) -> ()
-    write: (self, data: string) -> ()
-    finish: (self) -> string?
+    add: (ZipWriter, name: string, content: (string | ByteStream)?) -> ()
+    write: (ZipWriter, data: string) -> ()
+    finish: (ZipWriter) -> string?
 end
 
 declare extern type SqlDatabase with
-    exec: (self, sql: string, params: { any }?) -> number
-    query: (self, sql: string, params: { any }?) -> { { [string]: any } }
-    get: (self, sql: string, params: { any }?) -> { [string]: any }?
-    last_insert_id: (self) -> number
-    save: (self, sink: Sink) -> number
-    dump: (self) -> string
-    close: (self) -> ()
+    exec: (SqlDatabase, sql: string, params: { any }?) -> number
+    query: (SqlDatabase, sql: string, params: { any }?) -> { { [string]: any } }
+    get: (SqlDatabase, sql: string, params: { any }?) -> { [string]: any }?
+    last_insert_id: (SqlDatabase) -> number
+    save: (SqlDatabase, sink: Sink) -> number
+    dump: (SqlDatabase) -> string
+    close: (SqlDatabase) -> ()
 end
 
 declare extern type GzipWriter with
-    write: (self, data: string) -> ()
-    finish: (self) -> string?
+    write: (GzipWriter, data: string) -> ()
+    finish: (GzipWriter) -> string?
 end
 
 -- One entry of a zip archive; valid only until the iterator advances.
@@ -87,27 +87,27 @@ declare extern type ZipEntry with
     name: string
     size: number?
     is_dir: boolean
-    open: (self) -> ByteStream
-    read: (self) -> string
+    open: (ZipEntry) -> ByteStream
+    read: (ZipEntry) -> string
 end
 
--- A `native.batch` job being put together. Nothing the partner sees exists until `submit`.
+-- A `igp.batch` job being put together. Nothing the partner sees exists until `submit`.
 declare extern type BatchJob with
     -- Adds a named query for the partner; returns the name, which `rows`/`open` take later.
-    query: (self, name: string, query: string, params: any?) -> string
+    query: (BatchJob, name: string, query: string, params: any?) -> string
     -- A request the host performs itself after `submit`, however long it takes (Fargate only). The
     -- result is read with `results[name]` (status, headers) and `body(name)`.
-    http: (self, name: string, opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, basic_auth: { username: string, password: string }?, vault: { string }? }) -> string
+    http: (BatchJob, name: string, opts: { method: string?, url: string, headers: { [string]: string }?, body: string?, basic_auth: { username: string, password: string }?, vault: { string }? }) -> string
     -- Attaches a file (or one more part of the same input) to the request: a string or a stream.
-    input: (self, name: string, content: string | ByteStream, opts: { ext: string? }?) -> string
+    input: (BatchJob, name: string, content: string | ByteStream, opts: { ext: string? }?) -> string
     -- Attaches rows, as NDJSON cut into parts: an array or an iterator function.
-    input_rows: (self, name: string, rows: { any } | () -> any?, opts: { ext: string? }?) -> string
+    input_rows: (BatchJob, name: string, rows: { any } | () -> any?, opts: { ext: string? }?) -> string
     -- Saved for the continuation; the partner never sees it.
-    state: (self, value: any) -> ()
-    -- Script that `native.batch.route` picks when the partner's done.json arrives.
-    continue_with: (self, script: string) -> ()
-    id: (self) -> string
-    submit: (self) -> string
+    state: (BatchJob, value: any) -> ()
+    -- Script that `igp.batch.route` picks when the partner's done.json arrives.
+    continue_with: (BatchJob, script: string) -> ()
+    id: (BatchJob) -> string
+    submit: (BatchJob) -> string
 end
 
 declare extern type BatchResult with
@@ -117,14 +117,14 @@ declare extern type BatchResult with
     state: any
     results: { [string]: { rows: number?, parts: number, status: number?, headers: { [string]: string }? } }
     -- Body of a `job:http` response, as a string (capped at max_object_mb).
-    body: (self, name: string) -> string
-    parts: (self, name: string) -> number
+    body: (BatchResult, name: string) -> string
+    parts: (BatchResult, name: string) -> number
     -- Stream of one part (1-based), gunzipped if needed, checked against the manifest at its end.
-    open: (self, name: string, part: number?) -> ByteStream
+    open: (BatchResult, name: string, part: number?) -> ByteStream
     -- Rows of every part in order; raises if a part is missing, corrupt or the row count is off.
-    rows: (self, name: string) -> () -> any?
+    rows: (BatchResult, name: string) -> () -> any?
     -- Every object of the job, for a queue handler's `delete =` result (at most 100).
-    keys: (self) -> { { store: string, key: string } }
+    keys: (BatchResult) -> { { store: string, key: string } }
 end
 
 -- What an ack records for a member. `ok = false` still resolves the member.
@@ -135,9 +135,9 @@ declare extern type BarrierResult with
     total: number
     state: any
     -- Every member and its recorded outcome, in member order.
-    results: (self) -> () -> (string, BarrierOutcome)?
+    results: (BarrierResult) -> () -> (string, BarrierOutcome)?
     -- The members whose outcome is `ok = false`.
-    failures: (self) -> { { member: string, error: string?, result: any } }
+    failures: (BarrierResult) -> { { member: string, error: string?, result: any } }
 end
 
 declare extern type HttpResponse with
@@ -173,7 +173,7 @@ declare extern type Store with
     presign_put: (key: string, ttl_s: number?) -> string
 end
 
-declare native: {
+declare ig: {
     version: number,
     log: (level: "error" | "warn" | "info" | "debug", message: string) -> (),
     config: { [string]: any },
@@ -202,22 +202,11 @@ declare native: {
         delete: (pk: string, sk: string?) -> (),
         query: (pk: string, opts: { sk_prefix: string?, limit: number? }?) -> { DbRow },
     },
-    claim: {
-        -- Acquires expired/absent work, reports busy ownership, or returns its durable result.
-        acquire: (id: string, opts: { lease_s: number? }?) -> { state: "acquired", token: string, expires_s: number } | { state: "busy", expires_s: number } | { state: "complete", result: any },
-        -- True for a successful completion or an identical retry by the same owner.
-        complete: (id: string, token: string, result: any) -> boolean,
-        -- New expiry, or nil when ownership was lost or a concurrent transition won.
-        renew: (id: string, token: string, opts: { lease_s: number? }?) -> number?,
-    },
     queue: {
         -- Persist a stable-id handoff for the minute sweep; false for an identical existing intent.
         handoff: (id: string, message: { script: string?, version: string?, event: any }) -> boolean,
         -- One message or an array; returns how many were sent.
         send: (messages: { script: string?, version: string?, event: any, delay_s: number? } | { { script: string?, version: string?, event: any, delay_s: number? } }) -> number,
-    },
-    callback: {
-        create: (opts: { script: string?, state: any, ttl_s: number? }?) -> string,
     },
     crypto: {
         encrypt: (key: string, plaintext: string, aad: string?) -> string,
@@ -257,32 +246,8 @@ declare native: {
         compress: (data: string) -> string,
         decompress: (data: string) -> string,
     },
-    batch: {
-        new: (opts: { id: string? }?) -> BatchJob,
-        -- nil when the job is not complete or was already cleaned up.
-        hydrate: (event: { [string]: any }, opts: { allow_failure: boolean? }?) -> BatchResult?,
-        -- For a router: nil unless `event` is a done.json from the batch bucket.
-        route: (event: { [string]: any }) -> { job: string, script: string?, event: { [string]: any } }?,
-    },
-    barrier: {
-        -- Registers the members to wait for (at most 10 000); returns the id (generated unless given).
-        create: (opts: { id: string?, members: { string }, continue_with: string?, state: any, deadline_s: number?, overdue_with: string? }) -> string,
-        -- Records a member's outcome (the first ack wins). `complete` once every member is resolved;
-        -- `dispatched` when this call sent the continuation.
-        ack: (id: string, member: string, outcome: { ok: boolean?, error: string?, result: any }?) -> { duplicate: boolean, complete: boolean, dispatched: boolean },
-        -- Retries dispatch for a complete barrier; true only if this call sent. Active lease raises.
-        resume: (id: string) -> boolean,
-        -- Up to `limit` (default and maximum 100) members still waiting, in name order.
-        pending: (id: string, limit: number?) -> { string },
-        status: (id: string) -> { id: string, total: number, ready: boolean, complete: boolean, dispatched: boolean, overdue: boolean, due_s: number? },
-        -- In the continuation: nil if the barrier is not complete or has expired.
-        hydrate: (event: { [string]: any }) -> BarrierResult?,
-    },
     ndjson: {
         rows: (source: string | ByteStream) -> () -> any?,
-    },
-    lock: {
-        with: <T...>(name: string, opts: { scope: ("local" | "db")?, wait_ms: number?, lease_ms: number? }?, fn: () -> T...) -> (boolean, T...),
     },
     deadline: {
         with: <T...>(ms: number, fn: () -> T...) -> T...,
@@ -342,3 +307,46 @@ declare D: ((v: any) -> Decimal) & {
 	-- the explicit way to turn a float into a decimal: D.from_float(0.1) is exactly 0.1
 	from_float: (f: number) -> Decimal,
 }
+
+-- Opinionated coordination patterns. Versioned independently from the core API.
+declare extern type PatternsV1 with
+    version: number
+    claim: {
+        -- Acquires expired/absent work, reports busy ownership, or returns its durable result.
+        acquire: (id: string, opts: { lease_s: number? }?) -> { state: "acquired", token: string, expires_s: number } | { state: "busy", expires_s: number } | { state: "complete", result: any },
+        -- True for a successful completion or an identical retry by the same owner.
+        complete: (id: string, token: string, result: any) -> boolean,
+        -- New expiry, or nil when ownership was lost or a concurrent transition won.
+        renew: (id: string, token: string, opts: { lease_s: number? }?) -> number?,
+    }
+    callback: {
+        create: (opts: { script: string?, state: any, ttl_s: number? }?) -> string,
+    }
+    batch: {
+        new: (opts: { id: string? }?) -> BatchJob,
+        -- nil when the job is not complete or was already cleaned up.
+        hydrate: (event: { [string]: any }, opts: { allow_failure: boolean? }?) -> BatchResult?,
+        -- For a router: nil unless `event` is a done.json from the batch bucket.
+        route: (event: { [string]: any }) -> { job: string, script: string?, event: { [string]: any } }?,
+    }
+    barrier: {
+        -- Registers the members to wait for (at most 10 000); returns the id (generated unless given).
+        create: (opts: { id: string?, members: { string }, continue_with: string?, state: any, deadline_s: number?, overdue_with: string? }) -> string,
+        -- Records a member's outcome (the first ack wins). `complete` once every member is resolved;
+        -- `dispatched` when this call sent the continuation.
+        ack: (id: string, member: string, outcome: { ok: boolean?, error: string?, result: any }?) -> { duplicate: boolean, complete: boolean, dispatched: boolean },
+        -- Retries dispatch for a complete barrier; true only if this call sent. Active lease raises.
+        resume: (id: string) -> boolean,
+        -- Up to `limit` (default and maximum 100) members still waiting, in name order.
+        pending: (id: string, limit: number?) -> { string },
+        status: (id: string) -> { id: string, total: number, ready: boolean, complete: boolean, dispatched: boolean, overdue: boolean, due_s: number? },
+        -- In the continuation: nil if the barrier is not complete or has expired.
+        hydrate: (event: { [string]: any }) -> BarrierResult?,
+    }
+    lock: {
+        with: <T...>(name: string, opts: { scope: ("local" | "db")?, wait_ms: number?, lease_ms: number? }?, fn: () -> T...) -> (boolean, T...),
+    }
+end
+
+-- Built-in imports are version-pinned; tenant/shared modules retain their own shapes.
+declare require: ((spec: "@native/patterns@1") -> PatternsV1) & ((spec: string) -> any)

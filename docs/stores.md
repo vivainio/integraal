@@ -1,14 +1,14 @@
 # Stores
 
 Tenant data lives in **stores**, separate from the script bucket. Scripts reach them through
-`native.store.<name>`; the operator defines the stores (S3, a host directory, or an FTP or SFTP server)
+`ig.store.<name>`; the operator defines the stores (S3, a host directory, or an FTP or SFTP server)
 and the tenant's config grants access.
 
-## Script API: `native.store.<name>`
+## Script API: `ig.store.<name>`
 Object storage, one table per store the tenant's [grants](#grants) allow.
 Everything is confined to `<prefix><tenant>/` in that store and keys are **relative** to it.
 Store names are case-sensitive and operator-defined; the conventional ones are `In`, `Out`, `Backup` and `Temp`.
-(Avoid lowercase `in`: it is a Luau keyword, so `native.store.in` does not parse.)
+(Avoid lowercase `in`: it is a Luau keyword, so `ig.store.in` does not parse.)
 Using a store you were not granted raises an error.
 
 | Function | Needs | Result |
@@ -65,7 +65,7 @@ to read anything back.
 In the [global config](deployment.md#configuration):
 
 `stores` names the stores (letters, digits and `_`) and says what each one is. This enables
-`native.store.<name>`. Every store is an object with a `type`, and each type allows only its own fields:
+`ig.store.<name>`. Every store is an object with a `type`, and each type allows only its own fields:
 
 ```json
 { "stores": {
@@ -122,10 +122,10 @@ the script ending (or failing) without `close`, discards the upload. Total size 
 `max_stream_mb`, and each `create` counts as one data operation.
 
 ```lua
-local out = native.store.Out.create("export.zip")
-local z = native.zip.writer(out)
-for _, key in native.store.In.list("batch/") do
-  z:add(key, native.store.In.open(key))   -- streamed, never held in memory
+local out = ig.store.Out.create("export.zip")
+local z = ig.zip.writer(out)
+for _, key in ig.store.In.list("batch/") do
+  z:add(key, ig.store.In.open(key))   -- streamed, never held in memory
 end
 z:finish()
 out:close()

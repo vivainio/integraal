@@ -131,21 +131,21 @@ pub struct TenantLimits {
 pub struct TenantConfig {
     #[serde(default)]
     pub http: HttpPolicy,
-    /// Arbitrary JSON available to scripts as `native.config`; string values can
+    /// Arbitrary JSON available to scripts as `ig.config`; string values can
     /// be interpolated into `http.allow` as `${name}`. Not a place for secrets.
     #[serde(default)]
     pub vars: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub limits: TenantLimits,
-    /// Stores this tenant may use as `native.store.<name>`, and how: a grant or list of grants from
+    /// Stores this tenant may use as `ig.store.<name>`, and how: a grant or list of grants from
     /// `read`, `write` (put), `delete`, `readwrite` (all three), `upload` (presigned PUT) and `download` (presigned GET).
     /// Absent = no access. Names must match the deployment's `stores`.
     #[serde(default)]
     pub stores: HashMap<String, Access>,
-    /// Allows `native.queue.send` (new work for this tenant on the deployment's job queue).
+    /// Allows `ig.queue.send` (new work for this tenant on the deployment's job queue).
     #[serde(default)]
     pub queue: bool,
-    /// Allows `native.batch` (jobs handed to a partner through the deployment's batch bucket).
+    /// Allows `igp.batch` (jobs handed to a partner through the deployment's batch bucket).
     #[serde(default)]
     pub batch: bool,
     /// Keeps this tenant's invocation logs in the deployment's flow log bucket (`flow_logs` in
@@ -202,7 +202,7 @@ pub struct Engine {
     stores: HashMap<String, (Arc<dyn ObjectBackend>, String)>,
     /// Per-invocation byte limits of stores that are metered (host directories).
     store_io: HashMap<String, integraal_wrappers::IoLimits>,
-    /// The one bucket behind `native.batch`, kept apart from the data stores.
+    /// The one bucket behind `igp.batch`, kept apart from the data stores.
     batch: Option<(Arc<dyn ObjectBackend>, String)>,
     db: Option<(
         Arc<dyn ItemBackend>,
@@ -281,7 +281,7 @@ impl Engine {
         self
     }
 
-    /// Registers a named store for `native.store.<name>`. Each tenant is confined to
+    /// Registers a named store for `ig.store.<name>`. Each tenant is confined to
     /// `<base_prefix><tenant>/` in it, and only reaches it if its config grants access.
     pub fn with_store(
         mut self,
@@ -304,7 +304,7 @@ impl Engine {
         self
     }
 
-    /// Registers the dedicated bucket behind `native.batch`. Each tenant is confined to
+    /// Registers the dedicated bucket behind `igp.batch`. Each tenant is confined to
     /// `<base_prefix><tenant>/` in it, and only reaches it if its config sets `batch`.
     pub fn with_batch_bucket(
         mut self,
@@ -315,20 +315,20 @@ impl Engine {
         self
     }
 
-    /// Enables `native.db`. Each tenant is confined to partition keys starting `TEN#<tenant>#`.
+    /// Enables `ig.db`. Each tenant is confined to partition keys starting `TEN#<tenant>#`.
     pub fn with_db(mut self, backend: Arc<dyn ItemBackend>) -> Self {
         let signer = Arc::new(integraal_wrappers::CallbackSigner::new(backend.clone()));
         self.db = Some((backend, signer));
         self
     }
 
-    /// Enables `native.callback` (requires `with_db`): callback URLs are `<base_url>/cb/<tenant>/<id>`.
+    /// Enables `igp.callback` (requires `with_db`): callback URLs are `<base_url>/cb/<tenant>/<id>`.
     pub fn with_callback_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.callback_base_url = Some(base_url.into());
         self
     }
 
-    /// Enables `native.queue` for tenants whose config sets `"queue": true`: `send` delivers to this queue.
+    /// Enables `ig.queue` for tenants whose config sets `"queue": true`: `send` delivers to this queue.
     pub fn with_queue(mut self, backend: Arc<dyn QueueBackend>) -> Self {
         self.queue = Some(backend);
         self
@@ -470,14 +470,14 @@ impl Engine {
         self.flow_logs.as_ref()
     }
 
-    /// Enables `native.crypto`. Each tenant's keys are derived from these and the tenant name.
+    /// Enables `ig.crypto`. Each tenant's keys are derived from these and the tenant name.
     pub fn with_master_keys(mut self, keys: MasterKeys) -> Self {
         self.master_keys = Some(keys);
         self
     }
 
     /// The credential vault, once both `with_db` and `with_master_keys` are set. Operators write to it
-    /// (the server's admin API); scripts can only reference secrets from `native.http` requests.
+    /// (the server's admin API); scripts can only reference secrets from `ig.http` requests.
     pub fn vault(&self) -> Option<Vault> {
         let (backend, _) = self.db.as_ref()?;
         Some(Vault::new(backend.clone(), self.master_keys.clone()?))
@@ -489,7 +489,7 @@ impl Engine {
         self
     }
 
-    /// Lets `native.batch` jobs carry `job:http` requests that the process performs after the
+    /// Lets `igp.batch` jobs carry `job:http` requests that the process performs after the
     /// invocation ends (Fargate; not used on Lambda, whose sandbox freezes between invocations).
     pub fn with_background_http(mut self) -> Self {
         self.background_http = true;
@@ -1223,7 +1223,7 @@ fn run(
 
 /// Runs the router, then the script it picked, in one VM: one native-API install, one heap,
 /// one deadline and one set of call budgets. If the target pins a different runtime version
-/// (which fixes the `native` API at VM creation) it gets a fresh VM with the remaining time.
+/// (which fixes the `ig` / `igp` API at VM creation) it gets a fresh VM with the remaining time.
 #[allow(clippy::too_many_arguments)]
 fn run_routed(
     router_src: &str,
@@ -1360,7 +1360,7 @@ pub(crate) mod tests {
             r#"--!runtime 1
             return {
               on_queue = function(ctx, ev) return { via = "queue", n = ev.n } end,
-              handle = function(ctx, ev) return { via = ctx.trigger, v = native.json.encode({a = 1}) } end,
+              handle = function(ctx, ev) return { via = ctx.trigger, v = ig.json.encode({a = 1}) } end,
             }"#,
             Limits::default(),
         );
@@ -1384,6 +1384,7 @@ pub(crate) mod tests {
             ScriptKey::new("acme", "s", None).unwrap(),
             r#"
             local util = require("@lib/util/math")
+            assert(require("@lib/patterns") == require("@native/patterns@1"))
             local again = require("@lib/util/math")
             local csv = require("@shared/csv@2.0.0")
             return { handle = function()
@@ -1394,6 +1395,10 @@ pub(crate) mod tests {
         put(
             ScriptKey::lib("acme", "util/math").unwrap(),
             "local runs = 0; runs += 1; return { add = function(a, b) return a + b end, runs = function() return runs end }",
+        );
+        put(
+            ScriptKey::lib("acme", "patterns").unwrap(),
+            r#"return require("@native/patterns@1")"#,
         );
         put(
             ScriptKey::lib("acme", "needs_shared").unwrap(),
@@ -1712,7 +1717,7 @@ pub(crate) mod tests {
         let logs = Arc::new(MemBackend::default());
         let e = engine_cfg(
             r#"return { handle = function(ctx, ev)
-                 native.log("info", "step " .. ev.n)
+                 ig.log("info", "step " .. ev.n)
                  if ev.fail then error("boom") end
                  return ev.n
                end }"#,
@@ -1843,7 +1848,7 @@ pub(crate) mod tests {
             .expect("no other test installs a global subscriber");
 
         let e = engine(
-            r#"return { handle = function() native.log("info", "hello-otel") return 1 end }"#,
+            r#"return { handle = function() ig.log("info", "hello-otel") return 1 end }"#,
             Limits::default(),
         );
         e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap();
@@ -1875,12 +1880,12 @@ pub(crate) mod tests {
         let bucket = Arc::new(MemBackend::default());
         let e = engine(
             r#"return { handle = function(ctx, ev)
-                 native.task.title("import " .. ev.n)
-                 native.task.metric("rows", 10)
-                 native.task.add("rows", 5)
-                 native.task.attr("region", "eu")
-                 native.task.detail({ skipped = { 1, 2 } })
-                 native.log("error", "noisy")
+                 ig.task.title("import " .. ev.n)
+                 ig.task.metric("rows", 10)
+                 ig.task.add("rows", 5)
+                 ig.task.attr("region", "eu")
+                 ig.task.detail({ skipped = { 1, 2 } })
+                 ig.log("error", "noisy")
                  if ev.fail then error("boom") end
                  return ev.n
                end }"#,
@@ -2018,14 +2023,14 @@ pub(crate) mod tests {
         inbox.put("data/acme/drop.csv", b"a,b".to_vec()).unwrap();
         let e = engine_cfg(
             r#"return { handle = function()
-                local out, inn = native.store.Out, native.store.In
+                local out, inn = ig.store.Out, ig.store.In
                 out.put("notes/a", "hello")
                 return {
                     got = out.get("notes/a"), keys = out.list("notes/"), missing = out.get("nope") == nil,
                     escaped = pcall(out.get, "../other/secret"),
                     read_in = inn.get("drop.csv"), listed_in = inn.list(),
                     put_in = pcall(inn.put, "x", "y"), delete_in = pcall(inn.delete, "drop.csv"), gone = inn.get("drop.csv") == nil,
-                    ungranted = pcall(function() return native.store.Backup.get("x") end),
+                    ungranted = pcall(function() return ig.store.Backup.get("x") end),
                     put_url = inn.presign_put("up/new.csv", 60), get_url = out.presign_get("res.csv"),
                     get_url_in = pcall(inn.presign_get, "drop.csv"), put_url_out = pcall(out.presign_put, "res.csv"),
                 }
@@ -2310,13 +2315,13 @@ pub(crate) mod tests {
             .unwrap();
         let e = engine(
             r#"return { handle = function()
-                native.db.put("cart", "a", { n = 1 })
-                native.db.put("cart", "b", "x")
-                native.db.put("solo", nil, true)
-                return { a = native.db.get("cart", "a"), solo = native.db.get("solo"), miss = native.db.get("cart", "zz") == nil,
-                         expired = native.db.get("cart", "old") == nil, other = native.db.get("other") == nil,
-                         rows = native.db.query("cart", { sk_prefix = "a" }), all = #native.db.query("cart"),
-                         bad = pcall(native.db.get, "") }
+                ig.db.put("cart", "a", { n = 1 })
+                ig.db.put("cart", "b", "x")
+                ig.db.put("solo", nil, true)
+                return { a = ig.db.get("cart", "a"), solo = ig.db.get("solo"), miss = ig.db.get("cart", "zz") == nil,
+                         expired = ig.db.get("cart", "old") == nil, other = ig.db.get("other") == nil,
+                         rows = ig.db.query("cart", { sk_prefix = "a" }), all = #ig.db.query("cart"),
+                         bad = pcall(ig.db.get, "") }
             end }"#,
             Limits::default(),
         )
@@ -2352,11 +2357,11 @@ pub(crate) mod tests {
         }
         let e = engine(
             r#"return { handle = function()
-                local first = native.db.put_if_absent("claim", nil, "mine")
-                local second = native.db.put_if_absent("claim", nil, "yours")
-                return { first = first, second = second, held = native.db.get("claim"),
-                         a = native.db.add("hits"), b = native.db.add("hits", nil, 4), c = native.db.add("hits", nil, -2),
-                         read = native.db.get("hits"), sub = native.db.add("hits", "other") }
+                local first = ig.db.put_if_absent("claim", nil, "mine")
+                local second = ig.db.put_if_absent("claim", nil, "yours")
+                return { first = first, second = second, held = ig.db.get("claim"),
+                         a = ig.db.add("hits"), b = ig.db.add("hits", nil, 4), c = ig.db.add("hits", nil, -2),
+                         read = ig.db.get("hits"), sub = ig.db.add("hits", "other") }
             end }"#,
             Limits::default(),
         )
@@ -2570,24 +2575,25 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn barrier_collects_acks_and_continues_once() {
-        let src = r#"return { handle = function(ctx, ev)
+        let src = r#"local igp = require("@native/patterns@1")
+return { handle = function(ctx, ev)
             if ev.step == "create" then
-                return native.barrier.create({ id = "b1", members = { "a.xml", "b.xml" },
+                return igp.barrier.create({ id = "b1", members = { "a.xml", "b.xml" },
                     continue_with = "finalize", state = { batch = 7 } })
             elseif ev.step == "ack" then
-                local r = native.barrier.ack("b1", ev.member, ev.outcome)
+                local r = igp.barrier.ack("b1", ev.member, ev.outcome)
                 return { duplicate = r.duplicate, complete = r.complete, dispatched = r.dispatched }
             elseif ev.step == "pending" then
-                return native.barrier.pending("b1")
+                return igp.barrier.pending("b1")
             else
-                local b = native.barrier.hydrate({ barrier = "b1" })
+                local b = igp.barrier.hydrate({ barrier = "b1" })
                 if not b then return "not complete" end
                 local seen = {}
                 for member, outcome in b:results() do
                     table.insert(seen, member .. "=" .. tostring(outcome.ok) .. ":" .. tostring(outcome.error))
                 end
                 return { total = b.total, batch = b.state.batch, seen = seen, failed = #b:failures(),
-                         unknown = pcall(native.barrier.ack, "b1", "zzz") }
+                         unknown = pcall(igp.barrier.ack, "b1", "zzz") }
             end
         end }"#;
         let backend = Arc::new(MemItems::default());
@@ -2630,10 +2636,11 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn consumer_claims_recover_and_store_results_through_the_luau_api() {
-        let src = r#"return { handle = function(ctx, ev)
-            if ev.op == "complete" then return native.claim.complete("job", ev.token, ev.result)
-            elseif ev.op == "renew" then return native.claim.renew("job", ev.token, { lease_s = 120 })
-            else return native.claim.acquire("job", { lease_s = 60 }) end
+        let src = r#"local igp = require("@native/patterns@1")
+return { handle = function(ctx, ev)
+            if ev.op == "complete" then return igp.claim.complete("job", ev.token, ev.result)
+            elseif ev.op == "renew" then return igp.claim.renew("job", ev.token, { lease_s = 120 })
+            else return igp.claim.acquire("job", { lease_s = 60 }) end
         end }"#;
         let backend = Arc::new(MemItems::default());
         // Claims need the database, but neither a queue nor a tenant queue grant.
@@ -2697,7 +2704,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn durable_handoff_survives_script_failure_and_the_minute_tick_delivers_it() {
         let src = r#"return { handle = function(ctx, ev)
-            local created = native.queue.handoff("order-7", { script = "work", version = "v1", event = { order = ev.order } })
+            local created = ig.queue.handoff("order-7", { script = "work", version = "v1", event = { order = ev.order } })
             if ev.fail then error("crash after persisting") end
             return created
         end }"#;
@@ -2768,10 +2775,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn queue_send_stays_in_the_tenant_and_needs_opt_in() {
         let src = r#"return { handle = function(ctx, ev)
-            local one = native.queue.send({ script = "work", event = { n = 1 }, delay_s = 30 })
-            local many = native.queue.send({ { script = "work", version = "v2", event = { n = 2 } }, { event = "routed" } })
-            local bad_name = pcall(native.queue.send, { script = "../x" })
-            local bad_delay = pcall(native.queue.send, { script = "x", delay_s = 901 })
+            local one = ig.queue.send({ script = "work", event = { n = 1 }, delay_s = 30 })
+            local many = ig.queue.send({ { script = "work", version = "v2", event = { n = 2 } }, { event = "routed" } })
+            local bad_name = pcall(ig.queue.send, { script = "../x" })
+            local bad_delay = pcall(ig.queue.send, { script = "x", delay_s = 901 })
             return { one = one, many = many, bad_name = bad_name, bad_delay = bad_delay, attempt = ctx.attempt }
         end }"#;
         let queue = Arc::new(MemQueue::default());
@@ -2801,7 +2808,7 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("native.queue is not available"),
+            err.to_string().contains("ig.queue is not available"),
             "{err}"
         );
         // opted in but the deployment has no queue
@@ -2817,9 +2824,10 @@ pub(crate) mod tests {
         use integraal_wrappers::Take;
         let backend = Arc::new(MemItems::default());
         let e = engine(
-            r#"return { handle = function()
-                local ok = pcall(native.callback.create, { script = "../x" })
-                return { url = native.callback.create({ script = "on-pay", state = { order = 7 }, ttl_s = 60 }), bad_script = ok }
+            r#"local igp = require("@native/patterns@1")
+return { handle = function()
+                local ok = pcall(igp.callback.create, { script = "../x" })
+                return { url = igp.callback.create({ script = "on-pay", state = { order = 7 }, ttl_s = 60 }), bad_script = ok }
             end }"#,
             Limits::default(),
         )
@@ -2914,7 +2922,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn callback_requires_configuration() {
         let e = engine(
-            r#"return { handle = function() return (pcall(native.callback.create)) end }"#,
+            r#"local igp = require("@native/patterns@1")
+return { handle = function() return (pcall(igp.callback.create)) end }"#,
             Limits::default(),
         )
         .with_db(Arc::new(MemItems::default()));
@@ -2928,7 +2937,7 @@ pub(crate) mod tests {
     async fn http_requires_allowlist_from_tenant_config() {
         let store = Arc::new(MemoryStore::default());
         let script = r#"return { handle = function()
-            local ok, err = pcall(native.http.get, "https://evil.example.org/x")
+            local ok, err = pcall(ig.http.get, "https://evil.example.org/x")
             return { ok = ok, err = tostring(err) }
         end }"#;
         store.put(&ScriptKey::new("acme", "s", None).unwrap(), script);
@@ -2950,7 +2959,7 @@ pub(crate) mod tests {
     async fn vault_secrets_are_injected_only_where_allowed_and_never_readable() {
         let script = r#"return { handle = function()
             local try = function(url, headers, vault)
-                local ok, err = pcall(native.http.get, url, headers, vault)
+                local ok, err = pcall(ig.http.get, url, headers, vault)
                 return tostring(err)
             end
             local on = { "header" }
@@ -2963,7 +2972,7 @@ pub(crate) mod tests {
                 url_elsewhere = try("https://other.invalid/{{vault:key.api.token}}", {}, { "url" }),
                 off = try("https://api.invalid/x", { a = "{{vault:nope}}" }),
                 bad_target = try("https://api.invalid/x", h, { "cookie" }),
-                has_read = native.vault ~= nil,
+                has_read = ig.vault ~= nil,
             }
         end }"#;
         let config = r#"{"http":{"allow":["https://api.invalid/","https://other.invalid/"]}}"#;
@@ -3044,7 +3053,7 @@ pub(crate) mod tests {
         let script = r#"return { handle = function()
             local errs = {}
             for i = 1, 2 do
-                local ok, err = pcall(native.http.get, "https://api.partner.invalid/v1/x")
+                local ok, err = pcall(ig.http.get, "https://api.partner.invalid/v1/x")
                 errs[i] = tostring(err)
             end
             return errs
@@ -3081,13 +3090,13 @@ pub(crate) mod tests {
         let e = engine_cfg(
             r#"return { handle = function()
                 local n, last, text = 0, nil, nil
-                for ev in native.xml.events(native.store.In.open("big.xml")) do
+                for ev in ig.xml.events(ig.store.In.open("big.xml")) do
                     if ev.type == "start" and ev.tag == "entry" then n += 1; last = ev.attrs.id end
                     if ev.type == "text" then text = ev.text end
                 end
                 local depths = {}
-                for ev in native.xml.events("<a><b/></a>") do table.insert(depths, ev.type .. ev.depth) end
-                local dtd = pcall(function() for _ in native.xml.events("<!DOCTYPE a []><a/>") do end end)
+                for ev in ig.xml.events("<a><b/></a>") do table.insert(depths, ev.type .. ev.depth) end
+                local dtd = pcall(function() for _ in ig.xml.events("<!DOCTYPE a []><a/>") do end end)
                 return { n = n, last = last, text = text, depths = depths, dtd = dtd }
             end }"#,
             Limits { timeout: Duration::from_secs(60), ..Limits::default() },
@@ -3162,13 +3171,13 @@ pub(crate) mod tests {
         let script = r#"return { handle = function()
             local seen, a, n, stale = {}, nil, 0, nil
             local first
-            for entry in native.zip.entries(native.store.In.open("z.zip")) do
+            for entry in ig.zip.entries(ig.store.In.open("z.zip")) do
                 table.insert(seen, entry.name)
                 if entry.name == "a.txt" then
                     a = entry:read()
                     first = entry
                 elseif entry.name == "dir/b.xml" then
-                    for ev in native.xml.events(entry:open()) do
+                    for ev in ig.xml.events(entry:open()) do
                         if ev.type == "start" and ev.tag == "i" then n += 1 end
                     end
                 elseif entry.name == "stored.txt" then
@@ -3190,7 +3199,7 @@ pub(crate) mod tests {
         ]);
         let script = r#"return { handle = function()
             local seen = {}
-            for entry in native.zip.entries(native.store.In.open("z.zip")) do
+            for entry in ig.zip.entries(ig.store.In.open("z.zip")) do
                 table.insert(seen, entry.name .. ":" .. (entry.size or "?"))
                 if entry.name ~= "two" then seen[#seen] ..= ":" .. entry:read() end
             end
@@ -3206,7 +3215,7 @@ pub(crate) mod tests {
         let at = bad.windows(5).position(|w| w == b"plain").unwrap();
         bad[at] = b'X';
         let script = r#"return { handle = function()
-            for entry in native.zip.entries(native.store.In.open("z.zip")) do entry:read() end
+            for entry in ig.zip.entries(ig.store.In.open("z.zip")) do entry:read() end
         end }"#;
         let err = run_zip(script, bad).await.unwrap_err().to_string();
         assert!(err.contains("checksum"), "{err}");
@@ -3229,29 +3238,29 @@ pub(crate) mod tests {
         let output = Arc::new(MemBackend::default());
         let e = engine_cfg(
             r#"return { handle = function()
-                local out = native.store.Out.create("pack.zip")
-                local z = native.zip.writer(out)
+                local out = ig.store.Out.create("pack.zip")
+                local z = ig.zip.writer(out)
                 z:add("hello.txt", "hello")
-                z:add("dir/copy.xml", native.store.In.open("src.xml"))
+                z:add("dir/copy.xml", ig.store.In.open("src.xml"))
                 z:add("parts.txt"); z:write("a"); z:write("b")
                 z:add("empty/")
                 z:finish()
                 local bytes = out:close()
                 local closed = pcall(function() out:write("x") end)
 
-                local aborted = native.store.Out.create("aborted.zip")
+                local aborted = ig.store.Out.create("aborted.zip")
                 aborted:write("junk"); aborted:abort()
 
                 local seen = {}
-                for e in native.zip.entries(native.store.Out.open("pack.zip")) do
+                for e in ig.zip.entries(ig.store.Out.open("pack.zip")) do
                     seen[#seen + 1] = e.name .. "=" .. #e:read()
                 end
-                local mem = native.zip.writer(); mem:add("m.txt", "mem")
+                local mem = ig.zip.writer(); mem:add("m.txt", "mem")
                 local s = mem:finish()
                 local n = 0
-                for e in native.zip.entries(s) do n += #e:read() end
+                for e in ig.zip.entries(s) do n += #e:read() end
                 return { seen = seen, wrote = bytes > 0, closed = closed, mem_n = n,
-                         gone = native.store.Out.get("aborted.zip") == nil }
+                         gone = ig.store.Out.get("aborted.zip") == nil }
             end }"#,
             Limits::default(),
             r#"{"stores":{"In":"read","Out":"readwrite"}}"#,
@@ -3305,21 +3314,21 @@ pub(crate) mod tests {
         let e = engine_cfg(
             r#"return { handle = function()
                 local n = 0
-                for ev in native.xml.events(native.gzip.open(native.store.In.open("f.xml.gz"))) do
+                for ev in ig.xml.events(ig.gzip.open(ig.store.In.open("f.xml.gz"))) do
                     if ev.type == "start" and ev.tag == "i" then n += 1 end
                 end
-                local s = native.gzip.compress(string.rep("abc", 1000))
-                local back = native.gzip.decompress(s)
-                local out = native.store.Out.create("o.gz")
-                local w = native.gzip.writer(out)
+                local s = ig.gzip.compress(string.rep("abc", 1000))
+                local back = ig.gzip.decompress(s)
+                local out = ig.store.Out.create("o.gz")
+                local w = ig.gzip.writer(out)
                 for i = 1, 200 do w:write(string.rep("line " .. i .. "\n", 100)) end
                 w:finish(); out:close()
-                local mem = native.gzip.writer(); mem:write("hi"); 
+                local mem = ig.gzip.writer(); mem:write("hi");
                 local bad = pcall(function()
-                    local st = native.gzip.open(native.store.In.open("bad.gz"))
-                    for _ in native.xml.events(st) do end
+                    local st = ig.gzip.open(ig.store.In.open("bad.gz"))
+                    for _ in ig.xml.events(st) do end
                 end)
-                return { n = n, small = #s < 100, back = #back, mem = native.gzip.decompress(mem:finish()), bad = bad }
+                return { n = n, small = #s < 100, back = #back, mem = ig.gzip.decompress(mem:finish()), bad = bad }
             end }"#,
             Limits::default(),
             r#"{"stores":{"In":"read","Out":"readwrite"}}"#,
@@ -3343,18 +3352,18 @@ pub(crate) mod tests {
         let store = Arc::new(MemBackend::default());
         let script = r#"return {
             on_queue = function(ctx, ev)
-                local db = native.sql.open()
+                local db = ig.sql.open()
                 db:exec("create table seen (id text primary key, amount real, note text)")
                 for i = 1, 1000 do
-                    db:exec("insert into seen values (?, ?, ?)", { "id" .. i, i * 1.5, native.sql.null })
+                    db:exec("insert into seen values (?, ?, ?)", { "id" .. i, i * 1.5, ig.sql.null })
                 end
-                local out = native.store.Temp.create("job.db")
+                local out = ig.store.Temp.create("job.db")
                 local bytes = db:save(out)
                 out:close()
                 return { bytes = bytes > 0 }
             end,
             handle = function()
-                local db = native.sql.load(native.store.Temp.open("job.db"))
+                local db = ig.sql.load(ig.store.Temp.open("job.db"))
                 local top = db:query("select id, amount, note from seen order by amount desc limit 2")
                 db:exec("insert into seen values ('new', 1, 'x')")  -- a loaded db is writable
                 local c = db:get("select count(*) as n, sum(amount) as total from seen")
@@ -3363,13 +3372,13 @@ pub(crate) mod tests {
                     return not ok
                 end
                 local dup = pcall(function() db:exec("insert into seen values ('id1', 1, 'x')") end)
-                local d2 = native.sql.load(db:dump())
+                local d2 = ig.sql.load(db:dump())
                 return {
                     top = top, n = c.n, total = c.total, dup_rejected = not dup,
                     attach = fails("attach database ':memory:' as x"),
                     pragma = fails("pragma journal_mode = off"),
                     redump = d2:get("select count(*) as n from seen").n,
-                    bad = not pcall(native.sql.load, "not a database"),
+                    bad = not pcall(ig.sql.load, "not a database"),
                 }
             end }"#;
         let mk = |store: Arc<MemBackend>| {
@@ -3406,7 +3415,7 @@ pub(crate) mod tests {
     async fn sql_scratch_db_respects_size_and_time_limits() {
         let e = engine_cfg(
             r#"return { handle = function()
-                local db = native.sql.open()
+                local db = ig.sql.open()
                 db:exec("create table t (b blob)")
                 local full = pcall(function()
                     for i = 1, 100 do db:exec("insert into t values (zeroblob(100000))") end
@@ -3425,7 +3434,7 @@ pub(crate) mod tests {
         );
         let e = engine(
             r#"return { handle = function()
-                local db = native.sql.open()
+                local db = ig.sql.open()
                 db:exec("with recursive r(n) as (select 1 union all select n + 1 from r) select count(*) from r")
             end }"#,
             Limits {
@@ -3445,37 +3454,37 @@ pub(crate) mod tests {
             r#"return { handle = function()
                 local out = {}
                 -- passes results and errors through when the time is not up
-                out.value = { native.deadline.with(1000, function() return 1, "two" end) }
-                local ok, err = pcall(native.deadline.with, 1000, function() error("boom") end)
+                out.value = { ig.deadline.with(1000, function() return 1, "two" end) }
+                local ok, err = pcall(ig.deadline.with, 1000, function() error("boom") end)
                 out.plain_err = tostring(err):find("boom") ~= nil
 
                 -- a loop that outlives its block is interrupted; the caller can catch it
-                local ok1, err1 = pcall(native.deadline.with, 50, function() while true do end end)
+                local ok1, err1 = pcall(ig.deadline.with, 50, function() while true do end end)
                 out.expired = not ok1 and tostring(err1):find("deadline exceeded") ~= nil
 
                 -- a pcall inside the block cannot swallow the interrupt
-                local ok2, err2 = pcall(native.deadline.with, 50, function()
+                local ok2, err2 = pcall(ig.deadline.with, 50, function()
                     while true do pcall(function() while true do end end) end
                 end)
                 out.swallow = not ok2 and tostring(err2):find("deadline exceeded") ~= nil
 
                 -- nested: the inner block ends first and only it is reported
                 local inner
-                local ok3 = pcall(native.deadline.with, 5000, function()
-                    inner = select(2, pcall(native.deadline.with, 50, function() while true do end end))
+                local ok3 = pcall(ig.deadline.with, 5000, function()
+                    inner = select(2, pcall(ig.deadline.with, 50, function() while true do end end))
                     return "outer finished"
                 end)
                 out.inner = ok3 and tostring(inner):find("deadline exceeded") ~= nil
 
                 -- nested the other way: the outer block ends first and unwinds past the inner
-                local ok4, err4 = pcall(native.deadline.with, 50, function()
-                    native.deadline.with(5000, function() while true do end end)
+                local ok4, err4 = pcall(ig.deadline.with, 50, function()
+                    ig.deadline.with(5000, function() while true do end end)
                     return "unreachable"
                 end)
                 out.outer = not ok4 and tostring(err4):find("deadline exceeded") ~= nil
 
                 -- the limit is gone after the block
-                out.after = native.deadline.with(5000, function() return "ok" end)
+                out.after = ig.deadline.with(5000, function() return "ok" end)
                 local t = 0
                 for i = 1, 200000 do t = t + 1 end
                 out.free = t
@@ -3496,7 +3505,7 @@ pub(crate) mod tests {
     async fn deadline_blocks_cannot_outlast_the_invocation() {
         let e = engine(
             "return { handle = function()
-                pcall(native.deadline.with, 60000, function() while true do end end)
+                pcall(ig.deadline.with, 60000, function() while true do end end)
                 return 1
             end }",
             Limits {
@@ -3514,8 +3523,8 @@ pub(crate) mod tests {
     async fn deadline_block_interrupts_native_calls() {
         let e = engine(
             r#"return { handle = function()
-                local db = native.sql.open()
-                local ok, err = pcall(native.deadline.with, 100, function()
+                local db = ig.sql.open()
+                local ok, err = pcall(ig.deadline.with, 100, function()
                     db:exec("with recursive r(n) as (select 1 union all select n + 1 from r) select count(*) from r")
                 end)
                 return { ok = ok, err = tostring(err):find("deadline exceeded") ~= nil }
@@ -3532,10 +3541,11 @@ pub(crate) mod tests {
     async fn local_locks_exclude_across_invocations_and_release_on_every_path() {
         // The table is process-wide, so two engines (two invocations) contend.
         let holder = engine(
-            r#"return { handle = function()
-                return { native.lock.with("tl-a", nil, function()
-                    local t = native.time.now_ms()
-                    while native.time.now_ms() - t < 400 do end
+            r#"local igp = require("@native/patterns@1")
+return { handle = function()
+                return { igp.lock.with("tl-a", nil, function()
+                    local t = ig.time.now_ms()
+                    while ig.time.now_ms() - t < 400 do end
                     return "held"
                 end) }
             end }"#,
@@ -3544,8 +3554,9 @@ pub(crate) mod tests {
         let rival = |wait: u32| {
             engine(
                 &format!(
-                    r#"return {{ handle = function()
-                        return {{ native.lock.with("tl-a", {{ wait_ms = {wait} }}, function() return "got" end) }}
+                    r#"local igp = require("@native/patterns@1")
+return {{ handle = function()
+                        return {{ igp.lock.with("tl-a", {{ wait_ms = {wait} }}, function() return "got" end) }}
                     end }}"#
                 ),
                 Limits::default(),
@@ -3568,19 +3579,20 @@ pub(crate) mod tests {
 
         // Other tenants' names do not collide, and a lease kills the holder and frees the lock.
         let e = engine(
-            r#"return { handle = function()
-                local ok, err = pcall(native.lock.with, "tl-b", { lease_ms = 50 }, function() while true do end end)
-                local again = { native.lock.with("tl-b", nil, function() return 1 end) }
-                local boom = pcall(native.lock.with, "tl-b", nil, function() error("x") end)
-                local after_error = { native.lock.with("tl-b", nil, function() return 2 end) }
-                local nested = { native.lock.with("tl-c", nil, function()
-                    return native.lock.with("tl-c", nil, function() return "inner" end)
+            r#"local igp = require("@native/patterns@1")
+return { handle = function()
+                local ok, err = pcall(igp.lock.with, "tl-b", { lease_ms = 50 }, function() while true do end end)
+                local again = { igp.lock.with("tl-b", nil, function() return 1 end) }
+                local boom = pcall(igp.lock.with, "tl-b", nil, function() error("x") end)
+                local after_error = { igp.lock.with("tl-b", nil, function() return 2 end) }
+                local nested = { igp.lock.with("tl-c", nil, function()
+                    return igp.lock.with("tl-c", nil, function() return "inner" end)
                 end) }
                 return { killed = not ok and tostring(err):find("deadline exceeded") ~= nil,
                          again = again, boom = boom, after_error = after_error, nested = nested,
-                         bad_scope = pcall(native.lock.with, "x", { scope = "nope" }, function() end),
-                         bad_lease = pcall(native.lock.with, "x", { lease_ms = 0 }, function() end),
-                         no_db = pcall(native.lock.with, "x", { scope = "db" }, function() end) }
+                         bad_scope = pcall(igp.lock.with, "x", { scope = "nope" }, function() end),
+                         bad_lease = pcall(igp.lock.with, "x", { lease_ms = 0 }, function() end),
+                         no_db = pcall(igp.lock.with, "x", { scope = "db" }, function() end) }
             end }"#,
             Limits::default(),
         );
@@ -3611,22 +3623,23 @@ pub(crate) mod tests {
             .put("TEN#acme#\u{1}lock#stale", lock_item("other", now - 5))
             .unwrap();
         let e = engine(
-            r#"return { handle = function()
+            r#"local igp = require("@native/patterns@1")
+return { handle = function()
                 local o = {}
-                o.busy = { native.lock.with("busy", { scope = "db" }, function() return "no" end) }
-                local t = native.time.now_ms()
-                o.waited = { native.lock.with("busy", { scope = "db", wait_ms = 300 }, function() return "no" end) }
-                o.waited_ms = native.time.now_ms() - t
-                o.stale = { native.lock.with("stale", { scope = "db" }, function() return "took over" end) }
-                o.free = { native.lock.with("free", { scope = "db", lease_ms = 5000 }, function()
+                o.busy = { igp.lock.with("busy", { scope = "db" }, function() return "no" end) }
+                local t = ig.time.now_ms()
+                o.waited = { igp.lock.with("busy", { scope = "db", wait_ms = 300 }, function() return "no" end) }
+                o.waited_ms = ig.time.now_ms() - t
+                o.stale = { igp.lock.with("stale", { scope = "db" }, function() return "took over" end) }
+                o.free = { igp.lock.with("free", { scope = "db", lease_ms = 5000 }, function()
                     -- same tenant, but a different holder: the lock is taken
-                    local again = { native.lock.with("free", { scope = "db" }, function() return "no" end) }
+                    local again = { igp.lock.with("free", { scope = "db" }, function() return "no" end) }
                     return again[1]
                 end) }
-                local ok, err = pcall(native.lock.with, "slow", { scope = "db", lease_ms = 100 }, function() while true do end end)
+                local ok, err = pcall(igp.lock.with, "slow", { scope = "db", lease_ms = 100 }, function() while true do end end)
                 o.killed = not ok and tostring(err):find("deadline exceeded") ~= nil
-                o.reusable = { native.lock.with("slow", { scope = "db" }, function() return 1 end) }
-                o.invisible = not pcall(native.db.query, "\u{1}lock#free") and #native.db.query("lock#free") == 0
+                o.reusable = { igp.lock.with("slow", { scope = "db" }, function() return 1 end) }
+                o.invisible = not pcall(ig.db.query, "\u{1}lock#free") and #ig.db.query("lock#free") == 0
                 return o
             end }"#,
             Limits::default(),
@@ -3663,13 +3676,52 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn core_and_patterns_have_separate_versioned_namespaces() {
+        let store = Arc::new(MemoryStore::default());
+        store.put(
+            &ScriptKey::new("acme", "s", None).unwrap(),
+            r#"local igp = require("@native/patterns@1")
+return { handle = function()
+                assert(native == nil and getfenv().igp == nil)
+                assert(rawequal(igp, require("@native/patterns@1")))
+                for _, spec in ipairs({"@native/patterns", "@native/patterns@2", "@native/patterns@latest", "@native/unknown@1"}) do
+                    local ok, err = pcall(require, spec)
+                    assert(not ok and string.find(tostring(err), "native") ~= nil, spec)
+                end
+                assert(ig.version == 1 and igp.version == 1)
+                assert(igp.invocation_marker == nil)
+                igp.invocation_marker = true
+                for _, name in ipairs({"claim", "lock", "callback", "barrier", "batch"}) do
+                    assert(type(igp[name]) == "table", name)
+                    assert(ig[name] == nil, name)
+                end
+                for _, name in ipairs({"store", "db", "queue", "http", "task", "ndjson"}) do
+                    assert(type(ig[name]) == "table", name)
+                    assert(igp[name] == nil, name)
+                end
+                return ig.json.decode(ig.json.encode({ok = true}))
+            end }"#,
+        );
+        let e = Engine::new(
+            Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)),
+            Limits::default(),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
+                json!({"ok": true})
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn config_vars_reach_script_and_allowlist() {
         let store = Arc::new(MemoryStore::default());
         store.put(
             &ScriptKey::new("acme", "s", None).unwrap(),
             r#"return { handle = function()
-                local ok, err = pcall(native.http.get, native.config.api_base .. "ping")
-                return { base = native.config.api_base, region = native.config.opts.region,
+                local ok, err = pcall(ig.http.get, ig.config.api_base .. "ping")
+                return { base = ig.config.api_base, region = ig.config.opts.region,
                          blocked = not ok and string.find(tostring(err), "allowlist") ~= nil }
             end }"#,
         );
@@ -3711,7 +3763,7 @@ pub(crate) mod tests {
             &ScriptKey::new("acme", "s", None).unwrap(),
             r#"return { handle = function()
                 local n = 0
-                for i = 1, 10 do if pcall(native.store.Out.get, "k") then n += 1 end end
+                for i = 1, 10 do if pcall(ig.store.Out.get, "k") then n += 1 end end
                 return n
             end }"#,
         );
@@ -3842,14 +3894,14 @@ pub(crate) mod tests {
         put(
             &store,
             "router",
-            r#"return { on_route = function() native.store.Out.get("a"); native.store.Out.get("b"); return "t" end }"#,
+            r#"return { on_route = function() ig.store.Out.get("a"); ig.store.Out.get("b"); return "t" end }"#,
         );
         put(
             &store,
             "t",
             r#"return { on_queue = function()
                 local ok = 0
-                for _ = 1, 5 do if pcall(native.store.Out.get, "k") then ok += 1 end end
+                for _ = 1, 5 do if pcall(ig.store.Out.get, "k") then ok += 1 end end
                 return ok
             end }"#,
         );
@@ -3894,8 +3946,9 @@ pub(crate) mod tests {
         put(
             &store,
             "orders",
-            r#"return { on_invoke = function(ctx, ev)
-                local job = native.batch.new({ id = "j1" })
+            r#"local igp = require("@native/patterns@1")
+return { on_invoke = function(ctx, ev)
+                local job = igp.batch.new({ id = "j1" })
                 job:input_rows("seed", { { id = 1 }, { id = 2 } })
                 local customers = job:query("customers", "customers_by_id", { ids = ev.ids })
                 job:query("orders", "open_orders")
@@ -3907,8 +3960,9 @@ pub(crate) mod tests {
         put(
             &store,
             "router",
-            r#"return { on_route = function(ctx, ev)
-                local r = native.batch.route(ev)
+            r#"local igp = require("@native/patterns@1")
+return { on_route = function(ctx, ev)
+                local r = igp.batch.route(ev)
                 if r then return r.script and { script = r.script, event = r.event } or "gone" end
                 return "orders"
             end }"#,
@@ -3921,8 +3975,9 @@ pub(crate) mod tests {
         put(
             &store,
             "settle",
-            r#"return { on_queue = function(ctx, ev)
-                local job = native.batch.hydrate(ev)
+            r#"local igp = require("@native/patterns@1")
+return { on_queue = function(ctx, ev)
+                local job = igp.batch.hydrate(ev)
                 if not job then return { gone = true } end
                 local ids, orders = {}, 0
                 for row in job:rows("customers") do table.insert(ids, row.id) end
@@ -3934,9 +3989,10 @@ pub(crate) mod tests {
         put(
             &store,
             "probe",
-            r#"return { on_queue = function(ctx, ev)
+            r#"local igp = require("@native/patterns@1")
+return { on_queue = function(ctx, ev)
                 local ok, err = pcall(function()
-                    local job = native.batch.hydrate(ev, { allow_failure = ev.allow })
+                    local job = igp.batch.hydrate(ev, { allow_failure = ev.allow })
                     if not job.ok then return "failed: " .. job.error end
                     local n = 0
                     for _ in job:rows("customers") do n += 1 end
@@ -4134,10 +4190,10 @@ pub(crate) mod tests {
         let e = engine_cfg(
             r#"return { handle = function()
                 local out = {}
-                for v in native.ndjson.rows(native.store.In.open("a.ndjson")) do table.insert(out, v) end
+                for v in ig.ndjson.rows(ig.store.In.open("a.ndjson")) do table.insert(out, v) end
                 local n = 0
-                for _ in native.ndjson.rows('{"x":1}\n{"x":2}\n') do n += 1 end
-                local ok = pcall(function() for _ in native.ndjson.rows("{oops}\n") do end end)
+                for _ in ig.ndjson.rows('{"x":1}\n{"x":2}\n') do n += 1 end
+                local ok = pcall(function() for _ in ig.ndjson.rows("{oops}\n") do end end)
                 return { first = out[1].a, second = out[2][1], third = out[3], n = n, bad = ok }
             end }"#,
             Limits::default(),
@@ -4156,8 +4212,9 @@ pub(crate) mod tests {
         put(
             &store,
             "feeder",
-            r#"return { on_invoke = function(ctx, ev)
-                local job = native.batch.new({ id = "j2" })
+            r#"local igp = require("@native/patterns@1")
+return { on_invoke = function(ctx, ev)
+                local job = igp.batch.new({ id = "j2" })
                 job:input_rows("ids", { { id = 1 }, { id = 2 }, { id = 3 } })
                 job:input("blob", "raw bytes", { ext = ".bin" })
                 job:input("blob", "second", { ext = ".bin" })
@@ -4213,7 +4270,8 @@ pub(crate) mod tests {
         put(
             &store,
             "s",
-            r#"return { on_invoke = function() return native.batch.new({ id = "x" }):submit() end }"#,
+            r#"local igp = require("@native/patterns@1")
+return { on_invoke = function() return igp.batch.new({ id = "x" }):submit() end }"#,
         );
         let call = || {
             let mut i = msg(json!(null));
@@ -4268,8 +4326,9 @@ pub(crate) mod tests {
         put(
             &store,
             "start",
-            r#"return { on_invoke = function(ctx, ev)
-                local job = native.batch.new({ id = "h1" })
+            r#"local igp = require("@native/patterns@1")
+return { on_invoke = function(ctx, ev)
+                local job = igp.batch.new({ id = "h1" })
                 job:http("resp", { url = ev.url, headers = { accept = "text/plain" } })
                 job:state({ ref = 9 })
                 job:continue_with("after")
@@ -4279,8 +4338,9 @@ pub(crate) mod tests {
         put(
             &store,
             "after",
-            r#"return { on_queue = function(ctx, ev)
-                local job = native.batch.hydrate(ev, { allow_failure = true })
+            r#"local igp = require("@native/patterns@1")
+return { on_queue = function(ctx, ev)
+                local job = igp.batch.hydrate(ev, { allow_failure = true })
                 if not job.ok then return { failed = job.error } end
                 local r = job.results.resp
                 return { status = r.status, ctype = r.headers["content-type"],

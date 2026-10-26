@@ -32,16 +32,16 @@ A JSON Schema for the file is in [`types/integraal.schema.json`](https://github.
 | --- | --- | --- |
 | `scripts.bucket` | all (required) | bucket holding scripts and tenant `config.json` files |
 | `scripts.prefix` | all | key prefix, concatenated as-is (end it with `/`) |
-| `stores` | server, Lambda | named stores (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`), each `{ "type": ... }` of `s3`, `dir` ([File system](filesystem.md)), `ftp` or `sftp` ([FTP and SFTP](remote.md)). Enables `native.store.<name>`; see [Stores](stores.md#deployment) |
-| `batch.bucket`, `batch.prefix` | server, Lambda | the dedicated bucket behind `native.batch`, kept apart from the `s3` stores; its [S3 notifications](batch.md#wiring-the-continuation) go to the same queue. See [Batch jobs](batch.md#tenant-config-and-deployment) |
-| `db.table` | all | DynamoDB table behind `native.db` and `native.callback`; see [DynamoDB](dynamodb.md#deployment) |
-| `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `native.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
-| `crypto.keys`, `crypto.active` | server, Lambda | enables `native.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
+| `stores` | server, Lambda | named stores (case-sensitive letters, digits and `_`; by convention `In`, `Out`, `Backup`, `Temp`), each `{ "type": ... }` of `s3`, `dir` ([File system](filesystem.md)), `ftp` or `sftp` ([FTP and SFTP](remote.md)). Enables `ig.store.<name>`; see [Stores](stores.md#deployment) |
+| `batch.bucket`, `batch.prefix` | server, Lambda | the dedicated bucket behind `igp.batch`, kept apart from the `s3` stores; its [S3 notifications](batch.md#wiring-the-continuation) go to the same queue. See [Batch jobs](batch.md#tenant-config-and-deployment) |
+| `db.table` | all | DynamoDB table behind `ig.db` and `igp.callback`; see [DynamoDB](dynamodb.md#deployment) |
+| `callbacks.base_url` | server, Lambda | public base URL of the webhook Lambda; enables `igp.callback`. Requires `db`; see [Callbacks](callbacks.md#deployment-webhook-lambda) |
+| `crypto.keys`, `crypto.active` | server, Lambda | enables `ig.crypto`; see [Crypto](crypto.md#deployment-master-keys) |
 | `debug.dir`, `debug.bucket`, `debug.prefix`, `debug.retention_hours` | server (`dir`, `bucket`), Lambda (`bucket`) | where [debug captures](observability.md#debug-captures) of watched scripts go: a directory, a bucket, or both. The bucket must not be any other bucket; scripts cannot reach it. `dir` is refused on Lambda. The process needs `s3:PutObject`, and `s3:ListBucket` and `s3:GetObject` to read captures back |
 | `local_api.port` | server | read-only [flow log queries](observability.md#local-query-api) on `127.0.0.1` only, no token. Requires `flow_logs` |
 | `admin.port`, `admin.token_env` | server | operator API for the [credential vault](#vault) on its own port. Requires `db` and `crypto` |
 | `flow_logs.bucket`, `flow_logs.prefix`, `flow_logs.task_flush_secs` | server, Lambda | the dedicated bucket for [flow logs](observability.md#flow-logs) of tenants that enable them, and for the [task records](observability.md#task-records) of every tenant; not a data bucket, and scripts cannot reach it. A server writes task records every `task_flush_secs` (default 60); a Lambda after every invocation. The process needs `s3:PutObject` (and `s3:ListBucket`, `s3:GetObject` to read flows back) |
-| `queue.url` | server, webhook, Lambda | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `s3` stores' buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it, and so does [`native.queue.send`](queue.md) for tenants that enable it |
+| `queue.url` | server, webhook, Lambda | the server polls it (and splits [S3 event notifications](triggers.md#s3-notifications) from the `s3` stores' buckets, so it also needs `sqs:SendMessage` to re-send failed records); the webhook Lambda sends to it, and so does [`ig.queue.send`](queue.md) for tenants that enable it |
 | `schedule.spread_s` | server | seconds over which each [tick](schedules.md#spreading-the-load) spreads its per-tenant messages: `{ "minute": 20, "hour": 300, "day": 900 }` are the defaults |
 | `server.port` | server | HTTP port (default `8080`) |
 | `throttle` | server | outbound HTTP limits, see [Throttling](http.md#throttling) |
@@ -55,7 +55,7 @@ simulator such as roto), the only environment variables are the standard `OTEL_*
 ## Credential vault {#vault}
 
 Secrets (API keys, client secrets) that scripts may send in outbound HTTP but never read; see
-[`native.http`](http.md#credential-vault). They are stored one row each in the `db.table`
+[`ig.http`](http.md#credential-vault). They are stored one row each in the `db.table`
 under a partition scripts cannot address (`VAULT#<tenant>`), sealed with a key derived from the
 [master keys](#crypto) and bound to the tenant and name. Needs `db` and `crypto`.
 

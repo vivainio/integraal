@@ -216,7 +216,7 @@ pub(crate) fn install(
             }
             let db = db
                 .as_ref()
-                .ok_or_else(|| mlua::Error::runtime("handoff needs native.db"))?;
+                .ok_or_else(|| mlua::Error::runtime("handoff needs ig.db"))?;
             for field in ["delay_s", "group"] {
                 if message.contains_key(field)? {
                     return Err(mlua::Error::runtime(

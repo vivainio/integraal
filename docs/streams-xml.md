@@ -1,15 +1,15 @@
 # Streams and XML
 
 ## Streams
-`native.store.<name>.open` and `native.http.request{stream=true}` return a byte stream. A stream is
+`ig.store.<name>.open` and `ig.http.request{stream=true}` return a byte stream. A stream is
 consumed by the first parser that takes it; `stream:close()` releases it early. Streams are read
 in chunks, so a multi-gigabyte object never sits in memory (limited by `max_stream_mb`, see
 [Limits](limits.md)).
 
-Read XML by streaming: use `native.xml.extract` for records and `native.xml.events` when you need
-full control. `native.xml.parse` (a DOM) exists but should be avoided.
+Read XML by streaming: use `ig.xml.extract` for records and `ig.xml.events` when you need
+full control. `ig.xml.parse` (a DOM) exists but should be avoided.
 
-## `native.xml.events(source, opts?)`
+## `ig.xml.events(source, opts?)`
 A **pull parser** over a string or a stream. Returns an iterator of events:
 
 | `type` | fields |
@@ -21,7 +21,7 @@ A **pull parser** over a string or a stream. Returns an iterator of events:
 | `comment` | `text`, `depth` |
 
 ```lua
-for ev in native.xml.events(stream, { trim = true }) do
+for ev in ig.xml.events(stream, { trim = true }) do
   if ev.type == "start" and ev.tag == "item" then ... end
 end
 ```
@@ -37,13 +37,13 @@ the event types listed above, so check `ev.type` first.
 
 For a full example see [Writing scripts](writing-scripts.md#example-parse-a-large-xml-feed).
 
-## `native.xml.extract(source, rules)`
+## `ig.xml.extract(source, rules)`
 Pulls **records** out of a string or stream in constant memory, without a state machine. `rules`
 is a small DSL: a rule says which elements are records, and its fields say what to take from each.
 Returns an iterator of tables, one per matched element.
 
 ```lua
-for r in native.xml.extract(stream, [[
+for r in ig.xml.extract(stream, [[
   open = //order[@status='open'] {
     id    = @id
     total = total/text() as number    # text (default), int, number, bool
@@ -52,7 +52,7 @@ for r in native.xml.extract(stream, [[
   }
   refund = //refund { id = @id; amount = amount/text() as number }
 ]]) do
-  native.log("info", r._rule .. " " .. r.id)
+  ig.log("info", r._rule .. " " .. r.id)
 end
 ```
 
@@ -64,10 +64,10 @@ end
 - A bad rule text, malformed XML or DTD raises an error; stream and time limits apply as for
   `events`. The full rule syntax is in the [xmlstream](https://github.com/vivainio/xmlstream) README.
 
-## `native.xml.writer(sink?, opts?)`
+## `ig.xml.writer(sink?, opts?)`
 Generates XML. Text and attribute values are escaped, names and characters are validated and the
 writer refuses to produce anything but a well-formed document (balanced tags, one root). With a
-sink from `native.store.<name>.create(key)` it streams straight into a store; with no sink the
+sink from `ig.store.<name>.create(key)` it streams straight into a store; with no sink the
 document is built in memory, capped at the object size limit, and `finish()` returns it.
 
 | method | |
@@ -82,7 +82,7 @@ Options: `declaration = false` omits the `<?xml version="1.0" encoding="UTF-8"?>
 `indent = 2` pretty-prints (elements with text content are kept inline).
 
 ```lua
-local w = native.xml.writer({ indent = 2 })
+local w = ig.xml.writer({ indent = 2 })
 w:start("orders", { xmlns = "urn:acme:orders" })
 for _, o in ipairs(orders) do
   w:start("order", { id = o.id })
@@ -93,26 +93,26 @@ w:close()
 local xml = w:finish()
 
 -- or stream a large export into a bucket
-local out = native.store.Out.create("orders.xml")
-local w2 = native.xml.writer(out)
+local out = ig.store.Out.create("orders.xml")
+local w2 = ig.xml.writer(out)
 ... w2:finish()
 out:close()
 ```
 Namespaces are not tracked: declare them with `xmlns` / `xmlns:p` attributes and write prefixed names
 yourself. Characters XML forbids (most control characters) raise an error rather than being dropped.
 
-## `native.zip.entries(source)`
+## `ig.zip.entries(source)`
 Iterates a zip archive (a string or a stream) in one forward pass, so an archive larger than memory
 is fine. Each step yields an entry with `name`, `size` (uncompressed; `nil` when the archive only
 records it after the data), `is_dir`, and two ways to get its content:
 
-- `entry:open()` returns a stream of the uncompressed bytes, ready for `native.xml.events`.
+- `entry:open()` returns a stream of the uncompressed bytes, ready for `ig.xml.events`.
 - `entry:read()` returns the whole entry as a string, capped by the object size limit.
 
 ```lua
-for entry in native.zip.entries(native.store.In.open("batch.zip")) do
+for entry in ig.zip.entries(ig.store.In.open("batch.zip")) do
   if not entry.is_dir and entry.name:match("%.xml$") then
-    for ev in native.xml.events(entry:open()) do ... end
+    for ev in ig.xml.events(entry:open()) do ... end
   end
 end
 ```
@@ -125,8 +125,8 @@ end
 - CRC and size are verified when an entry is read to its end. A truncated archive errors.
 - Total uncompressed output is capped by `max_stream_mb`, which also guards against zip bombs.
 
-## `native.zip.writer(sink?)`
-Writes a zip archive in one forward pass. Pass a sink from `native.store.<name>.create(key)` to
+## `ig.zip.writer(sink?)`
+Writes a zip archive in one forward pass. Pass a sink from `ig.store.<name>.create(key)` to
 stream straight into a store (see [Stores](stores.md#streaming-uploads)); with no sink the archive
 is built in memory, capped at the object size limit, and `finish()` returns it as a string.
 
@@ -139,20 +139,20 @@ is built in memory, capped at the object size limit, and `finish()` returns it a
 With a sink, `sink:close()` after `finish()` commits the upload. Entries are deflated, with sizes in
 trailing data descriptors (zip64), so any size works and nothing needs to be known up front.
 
-## `native.gzip`
+## `ig.gzip`
 | function | |
 | --- | --- |
-| `native.gzip.open(source)` | stream of the decompressed bytes of a gzip string or stream; multi-member files work |
-| `native.gzip.writer(sink?)` | `w:write(data)`, `w:finish()`; compresses into a store sink, or into memory when there is none (`finish()` then returns the data) |
-| `native.gzip.compress(s)` / `decompress(s)` | whole strings, capped at the object size limit |
+| `ig.gzip.open(source)` | stream of the decompressed bytes of a gzip string or stream; multi-member files work |
+| `ig.gzip.writer(sink?)` | `w:write(data)`, `w:finish()`; compresses into a store sink, or into memory when there is none (`finish()` then returns the data) |
+| `ig.gzip.compress(s)` / `decompress(s)` | whole strings, capped at the object size limit |
 
 ```lua
 -- .xml.gz in a store, parsed without ever holding it in memory
-for ev in native.xml.events(native.gzip.open(native.store.In.open("feed.xml.gz"))) do ... end
+for ev in ig.xml.events(ig.gzip.open(ig.store.In.open("feed.xml.gz"))) do ... end
 
 -- compressed export
-local out = native.store.Out.create("export.csv.gz")
-local gz = native.gzip.writer(out)
+local out = ig.store.Out.create("export.csv.gz")
+local gz = ig.gzip.writer(out)
 gz:write("a,b\n1,2\n")
 gz:finish()
 out:close()
@@ -160,10 +160,10 @@ out:close()
 Decompressed output counts against `max_stream_mb`, which guards against decompression bombs. Corrupt
 data or a bad checksum raises an error.
 
-## `native.xml.parse(source, opts?)`
+## `ig.xml.parse(source, opts?)`
 !!! warning "Avoid in new scripts"
-    Prefer [`native.xml.extract`](#nativexmlextractsource-rules) or
-    [`native.xml.events`](#nativexmleventssource-opts): they run in constant memory and take streams
+    Prefer [`ig.xml.extract`](#nativexmlextractsource-rules) or
+    [`ig.xml.events`](#nativexmleventssource-opts): they run in constant memory and take streams
     of any size. `parse` reads the whole document into memory and is only for small, fixed-shape
     messages where streaming is clearly overkill.
 
@@ -174,9 +174,9 @@ rejected and nesting is limited to 256 levels. The tree and XPath engine are the
 [`uppsala`](https://crates.io/crates/uppsala) crate.
 
 ```lua
-local doc = native.xml.parse(body, { trim = true })
+local doc = ig.xml.parse(body, { trim = true })
 for _, item in ipairs(doc:xpath("/feed/item[@kind='a']")) do
-  native.log("info", item:attr("id") .. " " .. item:child("name"):text())
+  ig.log("info", item:attr("id") .. " " .. item:child("name"):text())
 end
 local total = doc:xpath("sum(//price)")
 ```

@@ -1,7 +1,7 @@
-//! `native.sql`: scratch SQLite databases for working data and bookkeeping within a run.
+//! `ig.sql`: scratch SQLite databases for working data and bookkeeping within a run.
 //!
 //! Databases live in memory and vanish with the invocation. They can be written to a store
-//! (`db:save(sink)`) and opened again later (`native.sql.load(stream)`), which is how work is
+//! (`db:save(sink)`) and opened again later (`ig.sql.load(stream)`), which is how work is
 //! handed from one invocation to the next.
 
 use std::{
@@ -284,7 +284,7 @@ pub fn api(
                 Value::UserData(ud) => take_stream(&ud)?,
                 _ => {
                     return Err(mlua::Error::runtime(
-                        "native.sql.load expects a string or a stream",
+                        "ig.sql.load expects a string or a stream",
                     ))
                 }
             };

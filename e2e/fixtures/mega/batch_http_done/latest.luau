@@ -1,12 +1,13 @@
 --!nonstrict
 --!runtime 1
 -- Continuation for background HTTP: reports statuses and bodies.
+local igp = require("@native/patterns@1")
 local function handle(_ctx, event)
-	local job = native.batch.hydrate(event, { allow_failure = true })
+	local job = igp.batch.hydrate(event, { allow_failure = true })
 	if not job then
 		return nil
 	end
-	native.store.Out.put("bhttp/" .. job.id, native.json.encode({
+	ig.store.Out.put("bhttp/" .. job.id, ig.json.encode({
 		ok = job.ok,
 		state = job.state,
 		a = { status = job.results.a.status, body = job:body("a") },

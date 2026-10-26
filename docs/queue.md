@@ -1,18 +1,18 @@
-# Queue (`native.queue`)
+# Queue (`ig.queue`)
 
 A script can hand new work to the deployment's job queue: a follow-up step, a piece of a larger
 job, or the same message again after a delay. Nothing waits: the messages are delivered later, each
 as a `queue` [trigger](triggers.md#sqs-fargate) with the usual retries and dead-letter handling.
 
 ```lua
-local sent = native.queue.send({
+local sent = ig.queue.send({
   { script = "work", event = { shard = 1, rows = chunk1 } },
   { script = "work", event = { shard = 2, rows = chunk2 } },
   { event = { kind = "refresh" }, delay_s = 300 },    -- no script: the tenant's router picks one
 })
 ```
 
-`native.queue.send(messages) -> number` takes one message or an array and returns how many it sent.
+`ig.queue.send(messages) -> number` takes one message or an array and returns how many it sent.
 
 | Field | Meaning |
 | --- | --- |
@@ -29,7 +29,7 @@ your own**: a script can only queue work for itself.
 
 Delivery is at least once, so a handler may run again for the same message. `ctx.attempt` tells a
 handler which delivery this is (`1` the first). Make effects safe to repeat with stable output
-keys or a destination idempotency key. A [`native.db.put_if_absent`](dynamodb.md) claim before
+keys or a destination idempotency key. A [`ig.db.put_if_absent`](dynamodb.md) claim before
 an effect can strand the work if the process crashes after claiming it. Use
 [consumer claims](claims.md) for recoverable ownership and stored completion results. A handler that wants to
 give up cleanly on its last attempt can test `ctx.attempt` and report the failure instead of raising.
@@ -40,12 +40,12 @@ For split work, see [scatter and gather](patterns.md#scatter-and-gather).
 
 ## Durable handoff
 
-Use `native.queue.handoff(id, message)` when a queued follow-up must survive a crash after the
+Use `ig.queue.handoff(id, message)` when a queued follow-up must survive a crash after the
 intent is recorded. It persists the message; the Fargate minute tick delivers it later. It needs
 the deployment's `db`, a queue, tenant `"queue": true`, and the minute operator schedule.
 
 ```lua
-native.queue.handoff("order/" .. ev.order_id .. "/price", {
+ig.queue.handoff("order/" .. ev.order_id .. "/price", {
   script = "price", version = "v1", event = { order_id = ev.order_id },
 })
 ```

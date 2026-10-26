@@ -10,7 +10,7 @@ local function outer(event)
 end
 
 local function handle(_ctx, event)
-	native.log("info", "about to fail: " .. tostring(event.what))
+	ig.log("info", "about to fail: " .. tostring(event.what))
 	outer(event)
 end
 

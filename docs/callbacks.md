@@ -3,16 +3,17 @@
 Single-use callback URLs: hand one to a third party, and when they call it, a script runs with the
 state you saved.
 
-## Script API: `native.callback`
+## Script API: `igp.callback`
 Needs the `db` and `callbacks` sections of the [global config](deployment.md#configuration).
 
 ```lua
-local url = native.callback.create({ script = "on-payment", state = { order = 7 }, ttl_s = 3600 })
+local igp = require("@native/patterns@1")
+local url = igp.callback.create({ script = "on-payment", state = { order = 7 }, ttl_s = 3600 })
 -- https://hooks.example.com/cb/acme/<80-char signed token>
 ```
 
 `script` is optional (without it the tenant's [router](router.md) picks one); `ttl_s` defaults to and is capped at
-one week; `state` is any JSON value stored in [`native.db`](dynamodb.md) (at most 64 KB). The first `POST` to the URL
+one week; `state` is any JSON value stored in [`ig.db`](dynamodb.md) (at most 64 KB). The first `POST` to the URL
 enqueues the request and runs the script as a `queue` trigger with
 `event = { method, path, query, headers, body, body_base64, state }`; any later call gets 404.
 

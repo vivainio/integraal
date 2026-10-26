@@ -1,6 +1,6 @@
 # Batch jobs
 
-`native.batch` hands a unit of work to a partner system through a **dedicated bucket**, and runs a
+`igp.batch` hands a unit of work to a partner system through a **dedicated bucket**, and runs a
 continuation when the partner is done. There is no connection to the partner and nothing waits: the
 invocation that submits the job ends, and the partner's answer arrives later as an S3 notification.
 
@@ -24,8 +24,9 @@ Scripts address keys relative to the tenant folder; the partner uses the full ke
 ## Script API
 
 ```lua
+local igp = require("@native/patterns@1")
 function on_invoke(ctx, ev)
-  local job = native.batch.new()                       -- { id = "..." } makes resubmitting idempotent
+  local job = igp.batch.new()                       -- { id = "..." } makes resubmitting idempotent
   job:input_rows("ids", ev.ids)                        -- optional: large inputs as files, not params
   local customers = job:query("customers", "customers_by_id", { input = "ids" })
   job:query("orders", "open_orders", { since = ev.since })
@@ -41,7 +42,7 @@ end
 | `input(name, content, opts?)` | attaches a file: a string or a stream. Calling it again with the same name adds another part. `opts.ext` (default `.ndjson`) is the file extension |
 | `input_rows(name, rows, opts?)` | attaches rows from an array or an iterator function, as NDJSON cut into parts of about 64 MiB. The row count is recorded |
 | `state(value)` | any JSON value kept for the continuation |
-| `continue_with(script)` | the script `native.batch.route` picks for this job's `done.json` |
+| `continue_with(script)` | the script `igp.batch.route` picks for this job's `done.json` |
 | `submit()` | writes `state/<job>.json`, then `request.json`. A job needs at least one query and can be submitted once |
 
 Input files are written when you attach them, but are inert until `request.json` exists, because
@@ -90,11 +91,12 @@ should notify, so parts do not each wake a script. The event is routed like any 
 `stores` name, so it never collides with a data store, and an object in a data store named
 `jobs/x/done.json` is not a batch event.
 
-The router asks `native.batch.route` which script owns the job:
+The router asks `igp.batch.route` which script owns the job:
 
 ```lua
+local igp = require("@native/patterns@1")
 local function on_route(_ctx, event)
-  local routed = native.batch.route(event)           -- nil unless this is a batch done.json
+  local routed = igp.batch.route(event)           -- nil unless this is a batch done.json
   if routed then
     return routed.script and { script = routed.script, event = routed.event } or "batch-gone"
   end
@@ -108,8 +110,9 @@ gone, which is a duplicate delivery after cleanup; send it to a script that does
 ## The continuation
 
 ```lua
+local igp = require("@native/patterns@1")
 function on_queue(ctx, ev)
-  local job = native.batch.hydrate(ev)                -- nil if not complete or already cleaned up
+  local job = igp.batch.hydrate(ev)                -- nil if not complete or already cleaned up
   if not job then return end
   local by_id = {}
   for row in job:rows("customers") do by_id[row.id] = row end
@@ -151,13 +154,14 @@ ends, the host performs the request in the background, and the continuation runs
 is in.
 
 ```lua
+local igp = require("@native/patterns@1")
 function on_invoke(ctx, ev)
-  local job = native.batch.new()
-  job:http("charge", {                                   -- same options as native.http.request
+  local job = igp.batch.new()
+  job:http("charge", {                                   -- same options as ig.http.request
     method = "POST",
-    url = native.config.api_base .. "charges",
+    url = ig.config.api_base .. "charges",
     headers = { authorization = "Bearer {{vault:stripe.key}}" },
-    body = native.json.encode(ev.order),
+    body = ig.json.encode(ev.order),
     vault = { "header" },
   })
   job:state({ order = ev.order.id })
@@ -166,22 +170,22 @@ function on_invoke(ctx, ev)
 end
 
 function on_queue(ctx, ev)                               -- script "charged"
-  local job = native.batch.hydrate(ev, { allow_failure = true })
+  local job = igp.batch.hydrate(ev, { allow_failure = true })
   if not job then return end
   if not job.ok then error(job.error) end                -- the request could not be completed
   local r = job.results.charge                           -- { status, headers, parts }
-  local body = native.json.decode(job:body("charge"))
+  local body = ig.json.decode(job:body("charge"))
   return { delete = job:keys() }
 end
 ```
 
 - The request is checked when `job:http` is called: `http.allow`, vault `allow` lists and the
-  `max_http_requests` count apply exactly as for `native.http`, so a request that could never be
+  `max_http_requests` count apply exactly as for `ig.http`, so a request that could never be
   sent fails in the submitting script.
 - **The request is never written to the bucket**, so vault secrets stay in memory. Only the response
   is: the body as `jobs/<job>/<name>.0000.body`, and status and headers in `done.json`, which is
   written last and triggers the continuation like a partner's `done.json`. Vault values are redacted
-  from the response as for `native.http`.
+  from the response as for `ig.http`.
 - A response with any status counts as an answer (`ok = true`; check `results.<name>.status`). `ok = false`
   with an `error` means no response arrived: connection failure, timeout (15 minutes per request), or the
   response could not be stored.
@@ -199,7 +203,7 @@ end
 
 ## Tenant config and deployment
 
-Tenant `config.json`: `"batch": true` enables `native.batch` for the tenant (otherwise the script gets an
+Tenant `config.json`: `"batch": true` enables `igp.batch` for the tenant (otherwise the script gets an
 error, not the bucket). Deployment config:
 
 ```json
@@ -224,7 +228,7 @@ partner per tenant if tenants must not see each other's jobs.
 
 Each bucket call counts against `max_data_ops`; each part read is one. Streams obey
 `max_stream_mb` and the invocation deadline. Rows longer than `max_object_mb` are rejected.
-`native.ndjson.rows(string_or_stream)` reads any NDJSON the same way outside of jobs.
+`ig.ndjson.rows(string_or_stream)` reads any NDJSON the same way outside of jobs.
 
 ## Not covered
 

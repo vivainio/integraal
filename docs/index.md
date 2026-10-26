@@ -8,7 +8,7 @@ exposes a **versioned native API** (S3 data access, allowlisted HTTP, streaming 
 --!strict
 --!runtime 1
 local function handle(ctx: Context, event: any)
-  native.log("info", "hello from " .. ctx.tenant)
+  ig.log("info", "hello from " .. ctx.tenant)
   return { trigger = ctx.trigger, echo = event }
 end
 
@@ -21,7 +21,7 @@ return { handle = handle }
   and SQS messages. See [Triggers](triggers.md).
 - **Tenant isolation by construction.** Each invocation gets a fresh VM, a data scope confined to
   the tenant's own S3 prefix, and an HTTP allowlist the tenant cannot edit.
-- **Typed.** The `native` API ships Luau type definitions; scripts are written in `--!strict`
+- **Typed.** The `ig` / `igp` API ships Luau type definitions; scripts are written in `--!strict`
   and checked before upload. See [Types](types.md).
 - **Versioned wrappers.** Scripts pin the native API with `--!runtime N`, so new APIs ship without
   breaking existing tenants.

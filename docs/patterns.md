@@ -79,7 +79,7 @@ sequenceDiagram
     participant Third as Third party
     participant WH as Webhook Lambda
     participant W as Fargate
-    Script->>Third: native.callback.create(...) URL
+    Script->>Third: igp.callback.create(...) URL
     Third->>WH: POST /cb/tenant/token
     WH->>W: enqueue (state attached)
     W->>W: run script B
@@ -112,7 +112,7 @@ process and not applied on Lambda. [Outbound HTTP](http.md), [Throttling](http.m
 
 ```mermaid
 flowchart LR
-    S[script] -->|native.http.request| A{allowlist} --> T{{"throttle<br/>max_concurrent, per_second"}} --> X[External API]
+    S[script] -->|ig.http.request| A{allowlist} --> T{{"throttle<br/>max_concurrent, per_second"}} --> X[External API]
     T -. no slot before deadline .-> E[throttled error]
 ```
 
@@ -147,7 +147,7 @@ flowchart LR
 ```
 
 ### Recoverable consumers
-Use [`native.claim`](claims.md) for work that may be redelivered: acquire a lease, renew it while
+Use [`igp.claim`](claims.md) for work that may be redelivered: acquire a lease, renew it while
 working, then store the completed result. A crashed worker's lease expires so a retry can take
 over. A completed request returns its saved result. External effects must still be safe to repeat.
 
@@ -175,7 +175,7 @@ set of members. The same barrier works for queue workers and external acknowledg
 
 ### Workers do the parallel work
 
-Create the barrier before recording work with [`native.queue.handoff`](queue.md#durable-handoff).
+Create the barrier before recording work with [`ig.queue.handoff`](queue.md#durable-handoff).
 The minute sweep delivers each persisted message, recovering interrupted sends. Each worker
 saves its result and acknowledges its member. The last acknowledgement sends the continuation,
 which reads the outcomes with `hydrate`.
@@ -189,11 +189,12 @@ flowchart LR
 ```
 
 ```lua
+local igp = require("@native/patterns@1")
 -- scatter: ev.flow and ev.chunks must be stable across retries of this request
 local names = {}
 for i, _ in ipairs(ev.chunks) do names[i] = tostring(i) end
 if #names == 0 then return end
-local id = native.barrier.create({
+local id = igp.barrier.create({
   id = ev.flow, members = names, continue_with = "merge", deadline_s = 3600,
 })
 local msgs = {}
@@ -201,17 +202,17 @@ for i, chunk in ipairs(ev.chunks) do
   msgs[i] = { script = "work", event = { flow = id, member = names[i], chunk = chunk } }
 end
 for _, message in ipairs(msgs) do
-  native.queue.handoff(id .. "/" .. message.event.member, message)
+  ig.queue.handoff(id .. "/" .. message.event.member, message)
 end
 
 -- work (on_queue): do_work and the result write must be safe to repeat
 local result = do_work(ev.chunk)
 local key = ev.flow .. "/" .. ev.member .. ".json"
-native.store.Out.put(key, native.json.encode(result))
-native.barrier.ack(ev.flow, ev.member, { ok = true, result = { key = key } })
+ig.store.Out.put(key, ig.json.encode(result))
+igp.barrier.ack(ev.flow, ev.member, { ok = true, result = { key = key } })
 
 -- merge (on_queue): publishing the merged output must also be safe to repeat
-local b = native.barrier.hydrate(ev)
+local b = igp.barrier.hydrate(ev)
 if not b then return end
 for member, outcome in b:results() do
   -- Read successful results from outcome.result.key; handle failures explicitly.
@@ -241,7 +242,7 @@ continuation dispatch. It does not make the entire workflow atomic:
 
 Create the barrier with the object keys you plan to send, then put the documents in a store.
 Route the partner's S3 marker objects, queue messages or callbacks to a script that calls
-`native.barrier.ack(id, member, outcome)`. The continuation gathers the outcomes just as it does
+`igp.barrier.ack(id, member, outcome)`. The continuation gathers the outcomes just as it does
 for queue workers. Keep the batch id and object keys stable when retrying dispatch, and make
 partner submissions safe to repeat. See [getting acks in](barrier.md#getting-acks-in).
 
@@ -249,7 +250,7 @@ partner submissions safe to repeat. See [getting acks in](barrier.md#getting-ack
 
 One [batch job](batch.md) can contain several independent queries: the partner runs them however
 it likes, and `done.json` signals completion. The continuation sees every result at once; no
-separate `native.barrier` is needed.
+separate `igp.barrier` is needed.
 
 Many parts at once can flood the queue for everyone else; per-tenant concurrency caps are on the
 [roadmap](roadmap.md).

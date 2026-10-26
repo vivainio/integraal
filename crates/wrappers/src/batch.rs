@@ -1,4 +1,4 @@
-//! `native.batch`: hand a unit of work to a partner through a bucket and pick the answer up later.
+//! `igp.batch`: hand a unit of work to a partner through a bucket and pick the answer up later.
 //!
 //! A job is a folder in the deployment's dedicated batch bucket (never one of the tenant's data
 //! stores), under the tenant's own prefix:
@@ -11,8 +11,8 @@
 //! ```
 //!
 //! The partner's `done.json` is an ordinary S3 notification, so it reaches the tenant's router like
-//! any other; `native.batch.route` turns it into the continuation script saved with the job, and
-//! `native.batch.hydrate` loads the job's state and results there.
+//! any other; `igp.batch.route` turns it into the continuation script saved with the job, and
+//! `igp.batch.hydrate` loads the job's state and results there.
 
 use std::{
     collections::BTreeMap,
@@ -91,7 +91,7 @@ struct Ctx {
 impl Ctx {
     fn scope(&self) -> mlua::Result<StoreScope> {
         self.batch.clone().ok_or_else(|| {
-            err("native.batch is not available: the tenant config needs \"batch\": true and the deployment a `batch` bucket")
+            err("igp.batch is not available: the tenant config needs \"batch\": true and the deployment a `batch` bucket")
         })
     }
 
@@ -374,7 +374,7 @@ impl UserData for Job {
         );
         // A request the host performs itself once the job is submitted, however long it takes: only
         // the response is written to the bucket, and the continuation runs when it arrives. Takes
-        // the options of `native.http.request` (without `stream`). The request is checked now.
+        // the options of `ig.http.request` (without `stream`). The request is checked now.
         methods.add_method("http", |_, this, (name, opts): (String, Table)| {
             let env = this.ctx.http.as_ref().ok_or_else(|| {
                 err("job:http is only available on the Fargate server, not on Lambda")
@@ -520,7 +520,7 @@ impl UserData for Job {
             d.state = v;
             Ok(())
         });
-        // Script that `native.batch.route` picks when the partner's `done.json` arrives.
+        // Script that `igp.batch.route` picks when the partner's `done.json` arrives.
         methods.add_method("continue_with", |_, this, script: String| {
             if !token_ok(&script, 128) {
                 return Err(err(format!("invalid script name {script:?}")));
@@ -818,7 +818,7 @@ struct Hydrated {
 
 fn hydrate(lua: &Lua, ctx: &Arc<Ctx>, event: &Table, allow_failure: bool) -> mlua::Result<Value> {
     let id = event_job(event)?.ok_or_else(|| {
-        err("native.batch.hydrate needs a batch event (a done.json from the batch bucket) or { job = ... }")
+        err("igp.batch.hydrate needs a batch event (a done.json from the batch bucket) or { job = ... }")
     })?;
     let scope = ctx.scope()?;
     let Some(env) = load_envelope(ctx, &scope, &id)? else {

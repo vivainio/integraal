@@ -1,4 +1,4 @@
-//! `native.gzip`: streaming gzip over the same byte streams and sinks as the rest of the API.
+//! `ig.gzip`: streaming gzip over the same byte streams and sinks as the rest of the API.
 //!
 //! `open` decompresses a stream on the fly, `writer` compresses into a store sink (or memory),
 //! and `compress`/`decompress` handle small strings.
@@ -118,7 +118,7 @@ pub fn api(
     gz.set(
         "open",
         lua.create_function(move |lua, src: Value| {
-            let r = source(src, "native.gzip.open")?;
+            let r = source(src, "ig.gzip.open")?;
             let input = BufReader::new(Limited {
                 inner: r,
                 left: max_stream_bytes,
@@ -138,7 +138,7 @@ pub fn api(
             let target = match sink {
                 Some(ud) => Target::Sink(
                     Sink::from_userdata(&ud)
-                        .ok_or_else(|| mlua::Error::runtime("native.gzip.writer expects a sink"))?,
+                        .ok_or_else(|| mlua::Error::runtime("ig.gzip.writer expects a sink"))?,
                 ),
                 None => Target::Mem {
                     buf: Vec::new(),
@@ -178,7 +178,7 @@ pub fn api(
                 .map_err(|e| mlua::Error::runtime(format!("gzip: {e}")))?;
             if out.len() > max_object_bytes {
                 return Err(mlua::Error::runtime(
-                    "decompressed data exceeds the object size limit; use native.gzip.open to stream it",
+                    "decompressed data exceeds the object size limit; use ig.gzip.open to stream it",
                 ));
             }
             lua.create_string(&out)

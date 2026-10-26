@@ -1,4 +1,4 @@
-//! `native.xml.extract(source, rules)`: declarative record extraction from a string or stream,
+//! `ig.xml.extract(source, rules)`: declarative record extraction from a string or stream,
 //! one Lua table per matched element. Rules use the `xmlstream` extractor DSL.
 
 use std::{
@@ -32,11 +32,10 @@ pub(crate) fn api(
     xml.set(
         "extract",
         lua.create_function(move |lua, (source, rules): (Value, String)| {
-            let ex = Arc::new(
-                Extract::parse(&rules).map_err(|e| mlua::Error::runtime(e.to_string()))?,
-            );
+            let ex =
+                Arc::new(Extract::parse(&rules).map_err(|e| mlua::Error::runtime(e.to_string()))?);
             let src = Limited {
-                inner: source_reader(source, "native.xml.extract")?,
+                inner: source_reader(source, "ig.xml.extract")?,
                 left: u64::MAX,
                 deadline: deadline.clone(),
             };

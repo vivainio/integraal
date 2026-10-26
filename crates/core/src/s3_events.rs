@@ -132,7 +132,7 @@ impl S3Events {
 
     /// One record -> one invocation (no script, so the tenant's router picks one) with
     /// `event = { store, key, size, etag, event }`: `store` is the logical name and `key` is relative
-    /// to the tenant's prefix, so both can be passed straight to `native.store` or `delete`.
+    /// to the tenant's prefix, so both can be passed straight to `ig.store` or `delete`.
     /// `Ok(None)` means the record needs no processing (not a creation event, or a folder marker).
     pub fn invocation(&self, record: &Value) -> Result<Option<Invocation>, String> {
         let name = record

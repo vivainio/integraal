@@ -1,15 +1,15 @@
-//! Versioned native API exposed to Luau scripts as the global `native`.
+//! Versioned native API exposed to Luau scripts as the global `ig` and versioned native modules.
 //!
 //! A script pins its API version with a header line: `--!runtime 1`.
 //! Each version lives in its own module and is only ever extended, so
 //! existing tenant scripts keep working while newer versions ship.
 //!
-//! v1: `native.log`, `native.json`, `native.time`, and `native.store.<name>`
+//! v1: `ig.log`, `ig.json`, `ig.time`, and `ig.store.<name>`
 //! (`get`/`put`/`delete`/`list`/`open` on the tenant's own prefix of each store its config grants), and
-//! `native.http` (`request`/`get`, restricted to the tenant's allowlist), and
-//! `native.config` (the tenant's `vars`), `native.callback` (single-use callback URLs), and `native.db` (small key-value items
-//! under the tenant's own partition keys, each expiring after a week), and `native.crypto`
-//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `native.zip` (streaming zip reader and writer), `native.gzip` (streaming and string gzip), `native.deadline` (time-boxed blocks), and `native.sql` (scratch SQLite databases that can be saved to and loaded from stores), and `native.queue` (send new work to the job queue), and `native.barrier` (wait for a known set of acknowledgements, then continue once), and `native.task` (attach a title, metrics, attributes and details to the task's execution summary).
+//! `ig.http` (`request`/`get`, restricted to the tenant's allowlist), and
+//! `ig.config` (the tenant's `vars`), `igp.callback` (single-use callback URLs), and `ig.db` (small key-value items
+//! under the tenant's own partition keys, each expiring after a week), and `ig.crypto`
+//! (authenticated encryption with tenant-scoped named keys, hashing, random bytes, hex/base64), and `ig.zip` (streaming zip reader and writer), `ig.gzip` (streaming and string gzip), `ig.deadline` (time-boxed blocks), and `ig.sql` (scratch SQLite databases that can be saved to and loaded from stores), and `ig.queue` (send new work to the job queue), and `igp.barrier` (wait for a known set of acknowledgements, then continue once), and `ig.task` (attach a title, metrics, attributes and details to the task's execution summary).
 
 mod barrier;
 mod claim;
@@ -150,33 +150,33 @@ pub type ScriptName = std::sync::Arc<std::sync::Mutex<String>>;
 pub struct HostContext {
     pub tenant: String,
     pub script: ScriptName,
-    /// Tenant-scoped object storage by store name, as granted by the tenant config; exposed as `native.store.<name>`.
+    /// Tenant-scoped object storage by store name, as granted by the tenant config; exposed as `ig.store.<name>`.
     pub stores: StoreScopes,
-    /// The tenant's folder in the deployment's dedicated batch bucket; `native.batch` errors when absent.
+    /// The tenant's folder in the deployment's dedicated batch bucket; `igp.batch` errors when absent.
     pub batch: Option<StoreScope>,
-    /// Tenant-scoped small item store with one-week expiry; `native.db` errors when absent.
+    /// Tenant-scoped small item store with one-week expiry; `ig.db` errors when absent.
     pub db: Option<DbScope>,
-    /// The job queue behind `native.queue.send`; `native.queue` errors when absent.
+    /// The job queue behind `ig.queue.send`; `ig.queue` errors when absent.
     pub queue: Option<std::sync::Arc<dyn QueueBackend>>,
-    /// Public base URL of the webhook ingress; `native.callback` errors when absent.
+    /// Public base URL of the webhook ingress; `igp.callback` errors when absent.
     pub callback_base_url: Option<String>,
     /// Operator-set limits on outbound HTTP, shared by everything in this process (Fargate only).
     pub throttle: Option<std::sync::Arc<Throttle>>,
-    /// Whether this process outlives invocations, so `native.batch` jobs may carry `job:http`
+    /// Whether this process outlives invocations, so `igp.batch` jobs may carry `job:http`
     /// requests (Fargate only).
     pub background_http: bool,
     /// Outbound HTTP allowlist from the tenant config (empty denies all).
     pub http: HttpPolicy,
-    /// Credential vault for `{{vault:NAME}}` in `native.http`; such requests error when absent.
+    /// Credential vault for `{{vault:NAME}}` in `ig.http`; such requests error when absent.
     pub vault: Option<std::sync::Arc<Vault>>,
-    /// Operator master keys behind `native.crypto.encrypt`/`decrypt`/`hmac_sha256`; those error when absent.
+    /// Operator master keys behind `ig.crypto.encrypt`/`decrypt`/`hmac_sha256`; those error when absent.
     pub master_keys: Option<MasterKeys>,
-    /// Tenant `vars` from config.json, exposed read-only as `native.config`.
+    /// Tenant `vars` from config.json, exposed read-only as `ig.config`.
     pub vars: serde_json::Map<String, serde_json::Value>,
     pub limits: HostLimits,
     /// Collects this invocation's log for the flow it belongs to; absent when the tenant has no flow logs.
     pub flow_log: Option<FlowLog>,
-    /// Collects this invocation's task summary (`native.task`); scripts may call it without one,
+    /// Collects this invocation's task summary (`ig.task`); scripts may call it without one,
     /// and what they set is discarded.
     pub summary: Option<Summary>,
 }
@@ -201,13 +201,30 @@ pub fn parse_runtime_version(source: &str) -> Result<u32, WrapperError> {
     Ok(DEFAULT_VERSION)
 }
 
-/// Installs the `native` global for `version`. Call before sandboxing the state.
+/// Installs the `ig` global and built-in module loader for `version`. Call before sandboxing the state.
 pub fn install(lua: &Lua, version: u32, host: &HostContext) -> Result<(), WrapperError> {
     match version {
         1 => v1::install(lua, host)?,
         v => return Err(WrapperError::UnsupportedVersion(v)),
     }
     Ok(())
+}
+
+/// Resolves a versioned built-in module without tenant storage access.
+/// Installed by the runtime before sandboxing; module identity is per invocation.
+pub fn require_native(lua: &Lua, spec: &str) -> mlua::Result<mlua::Table> {
+    match spec {
+        "@native/patterns@1" => lua.named_registry_value("integraal.patterns.1"),
+        "@native/patterns" => Err(mlua::Error::runtime(
+            "patterns need an explicit version: require(\"@native/patterns@1\")",
+        )),
+        _ if spec.starts_with("@native/patterns@") => Err(mlua::Error::runtime(format!(
+            "unsupported native patterns version in {spec:?} (supported: 1)"
+        ))),
+        _ => Err(mlua::Error::runtime(format!(
+            "unknown native module {spec:?}"
+        ))),
+    }
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
-//! `native.xml.parse(source, opts)`: builds an in-memory node tree and queries it with XPath 1.0.
+//! `ig.xml.parse(source, opts)`: builds an in-memory node tree and queries it with XPath 1.0.
 //!
 //! The tree and the XPath engine come from the `uppsala` crate. The whole document is read first
 //! (capped at the object size limit) and parsed with DTDs refused; larger inputs belong to the
-//! `native.xml.events` pull parser.
+//! `ig.xml.events` pull parser.
 
 use std::{io::Read, sync::Arc};
 
@@ -64,7 +64,7 @@ fn build(
     .map_err(xml_err)?;
     if bytes.len() > max_bytes {
         return Err(xml_err(
-            "document exceeds the object size limit; use native.xml.events",
+            "document exceeds the object size limit; use ig.xml.events",
         ));
     }
     let text = String::from_utf8(bytes).map_err(|_| xml_err("document is not valid UTF-8"))?;
@@ -295,7 +295,7 @@ pub fn api(
     xml.set(
         "parse",
         lua.create_function(move |_, (source, opts): (Value, Option<Table>)| {
-            let reader = source_reader(source, "native.xml.parse")?;
+            let reader = source_reader(source, "ig.xml.parse")?;
             let trim = opts
                 .map(|o| o.get::<Option<bool>>("trim"))
                 .transpose()?

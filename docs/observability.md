@@ -24,13 +24,13 @@ The `log` setting still filters spans and logs. A span below that level is not e
 | `sqs_message` | each queue message the server handles |
 | `invoke` | each script invocation (`tenant`, `script`, `trigger`, `outcome`) |
 | `place_batch`, `place_tenant` | intake placement |
-| `http.client` | each outbound `native.http` request: method, host and status only, never the path or query |
-| `dynamodb.*`, `s3.*`, `sqs.send` | calls the runtime makes for `native.db`, stores and `native.queue` |
+| `http.client` | each outbound `ig.http` request: method, host and status only, never the path or query |
+| `dynamodb.*`, `s3.*`, `sqs.send` | calls the runtime makes for `ig.db`, stores and `ig.queue` |
 
 ## One trace per flow
 
 An event and everything it causes share one trace id, across queue hops. Every message the runtime
-sends to SQS (`native.queue.send`, barrier completions, webhook callbacks, requeued S3 records)
+sends to SQS (`ig.queue.send`, barrier completions, webhook callbacks, requeued S3 records)
 carries the W3C `traceparent` and `tracestate` as SQS message attributes; the intake Lambda
 forwards them, and the server continues the trace in its `sqs_message` span. Messages from senders
 that set no such attributes start a new trace.
@@ -39,7 +39,7 @@ Work that is picked up later also keeps the trace of whoever created it:
 
 - A **barrier** stores the creating invocation's trace, and the continuation message it sends when
   the last member is acked joins that trace, however many invocations acked in between.
-- A **callback** (`native.callback`) stores it too, and the message the webhook enqueues joins it.
+- A **callback** (`igp.callback`) stores it too, and the message the webhook enqueues joins it.
 - A **batch job** is resumed by the partner's `done.json`, an S3 notification that carries no
   trace. The invocation that routes or hydrates the job therefore starts a new trace and adds a
   span **link** to the submitting invocation's.
@@ -47,7 +47,7 @@ Work that is picked up later also keeps the trace of whoever created it:
 The tracer is installed even when no OTLP endpoint is set, so the trace id exists (and is
 propagated) without a collector.
 
-`native.log` lines are ordinary log events inside the invocation's span, so each carries the
+`ig.log` lines are ordinary log events inside the invocation's span, so each carries the
 invocation's trace.
 
 ## Flow logs
@@ -58,8 +58,8 @@ deployment names the bucket with `flow_logs` in `integraal.json` ([Deployment](d
 bucket is separate from the data stores, and scripts cannot reach it.
 
 Each invocation of an opted-in tenant writes one **segment** when it ends: gzipped NDJSON holding
-a header (script, trigger, attempt, start time, trace id), the invocation's `native.log` lines,
-its outbound `native.http` calls (method, host, status and time, never the path or query), engine
+a header (script, trigger, attempt, start time, trace id), the invocation's `ig.log` lines,
+its outbound `ig.http` calls (method, host, status and time, never the path or query), engine
 errors, and a footer (outcome, duration, error). A segment is written whatever the outcome,
 including timeouts. It keeps the first 192 KB and the last 64 KB of lines and says how many it
 dropped in between.
@@ -167,22 +167,22 @@ onto columns if you compact them into a columnar format later.
 | `trace_id`, `span_id`, `continues_trace` | the [flow](#one-trace-per-flow) the task belongs to, and whether the task continued it or started it |
 | `start_ms`, `duration_ms`, `outcome`, `error` | `outcome` is `ok`, `timeout`, `script_error` or `error`; `error` is cut at 500 bytes |
 | `failure_kind`, `failure_frame` | the [structured failure](#script-failures): its kind, and the innermost script frame as `chunk:line function` |
-| `http_requests`, `http_failed` | outbound `native.http` calls, and those with no response or a status outside 2xx and 3xx |
-| `log_lines`, `log_errors` | `native.log` lines, and those at level `error` |
+| `http_requests`, `http_failed` | outbound `ig.http` calls, and those with no response or a status outside 2xx and 3xx |
+| `log_lines`, `log_errors` | `ig.log` lines, and those at level `error` |
 | `title`, `metrics`, `attrs`, `detail`, `truncated` | what the script attached; see below |
 
-### `native.task`
+### `ig.task`
 
-A script describes its own task with `native.task`. The functions can be called any number of times
+A script describes its own task with `ig.task`. The functions can be called any number of times
 and in any order, and the record keeps whatever was set before a timeout or an error, so set things
 as you learn them instead of at the end.
 
 ```lua
-native.task.title("Imported orders from acme-eu")
-native.task.metric("orders.rows", 1432)     -- a number; setting it again replaces it
-native.task.add("orders.skipped")           -- adds 1, or the given delta, to a metric
-native.task.attr("region", "eu")            -- a short string you can filter on
-native.task.detail({ skipped = { "a", "b" } })
+ig.task.title("Imported orders from acme-eu")
+ig.task.metric("orders.rows", 1432)     -- a number; setting it again replaces it
+ig.task.add("orders.skipped")           -- adds 1, or the given delta, to a metric
+ig.task.attr("region", "eu")            -- a short string you can filter on
+ig.task.detail({ skipped = { "a", "b" } })
 ```
 
 | Function | Limit |
@@ -193,7 +193,7 @@ native.task.detail({ skipped = { "a", "b" } })
 | `detail(value)` | any JSON value, up to 8 KB serialized |
 
 A value over a limit is cut or dropped and the record says `"truncated": true`; the call never fails
-the task. A `detail` value that is not JSON raises an error in the script, as `native.json.encode`
+the task. A `detail` value that is not JSON raises an error in the script, as `ig.json.encode`
 would. Use dotted names such as `orders.rows` to group metrics and attributes.
 
 Scripts can put any data in these fields, unlike flow logs, which hold none. Read the bucket's

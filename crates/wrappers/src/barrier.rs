@@ -1,10 +1,10 @@
-//! `native.barrier`: wait for a known set of acknowledgements, then continue once.
+//! `igp.barrier`: wait for a known set of acknowledgements, then continue once.
 //!
 //! A barrier is a work list: a set of member names (usually object keys) and one outcome per member.
 //! Acks arrive by any channel (S3 events, queue messages, callbacks), each through
-//! `native.barrier.ack`; the ack that resolves the last pending member sends the continuation.
+//! `igp.barrier.ack`; the ack that resolves the last pending member sends the continuation.
 //!
-//! Rows live in a partition of their own, which scripts cannot reach through `native.db`:
+//! Rows live in a partition of their own, which scripts cannot reach through `ig.db`:
 //!
 //! ```text
 //! sk ""             header: total, continuation script, state, deadline, expiry
@@ -177,7 +177,7 @@ impl Barriers {
             }
             if self.queue.is_none() {
                 return Err(
-                    "continue_with needs native.queue (the tenant's config needs \"queue\": true and the deployment a queue)"
+                    "continue_with needs ig.queue (the tenant's config needs \"queue\": true and the deployment a queue)"
                         .into(),
                 );
             }
@@ -434,7 +434,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
         move || -> mlua::Result<Arc<Barriers>> {
             let db = db
                 .clone()
-                .ok_or_else(|| err("native.barrier needs native.db (the config's db section)"))?;
+                .ok_or_else(|| err("igp.barrier needs ig.db (the config's db section)"))?;
             Ok(Arc::new(Barriers {
                 db,
                 tenant: tenant.clone(),
@@ -458,7 +458,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             };
             let members: Vec<String> = match opts.get::<Value>("members")? {
                 Value::Table(t) => t.sequence_values::<String>().collect::<Result<_, _>>()?,
-                _ => return Err(err("native.barrier.create needs members = { ... }")),
+                _ => return Err(err("igp.barrier.create needs members = { ... }")),
             };
             let state = match opts.get::<Value>("state")? {
                 Value::Nil => Json::Null,

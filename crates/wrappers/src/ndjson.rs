@@ -1,4 +1,4 @@
-//! `native.ndjson.rows(source)`: one JSON value per line, from a string or a byte stream.
+//! `ig.ndjson.rows(source)`: one JSON value per line, from a string or a byte stream.
 //! Memory use is bounded by a single line, not by the input.
 
 use std::io::{self, BufRead, BufReader, Read};
@@ -71,7 +71,7 @@ pub fn api(
                 Value::UserData(ud) => take_stream(&ud)?,
                 _ => {
                     return Err(mlua::Error::runtime(
-                        "native.ndjson.rows expects a string or a stream",
+                        "ig.ndjson.rows expects a string or a stream",
                     ))
                 }
             };

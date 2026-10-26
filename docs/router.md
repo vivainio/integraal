@@ -57,4 +57,4 @@ return { on_route = on_route }
 - [Operator ticks](schedules.md#operator-ticks) (`type = "schedule"`) and barrier events
   (`barrier.complete`, `barrier.overdue`) unless the barrier names a script. Match on `event.type`;
   see [event types](schedules.md#event-types).
-- A [batch job](batch.md#wiring-the-continuation)'s `done.json`, which the router hands to `native.batch.route`.
+- A [batch job](batch.md#wiring-the-continuation)'s `done.json`, which the router hands to `igp.batch.route`.

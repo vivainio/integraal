@@ -2,7 +2,7 @@
 
 Scripts can use directories on the host's file system, but only the ones the operator whitelists.
 There is no separate API: a whitelisted directory is exposed as a **store**, so scripts use
-`native.store.<name>` with the same functions, grants and key rules as for [S3 stores](stores.md).
+`ig.store.<name>` with the same functions, grants and key rules as for [S3 stores](stores.md).
 Reusing it means the grants, streaming, limits and accounting work the same way. The only
 difference is where the bytes go.
 
@@ -17,7 +17,7 @@ digits and `_`) to an absolute directory:
 
 A tenant's files live in `<path>/<prefix><tenant>/`. The tenant's `config.json` grants access
 exactly as for S3 (`{ "stores": { "Local": ["read", "write"] } }`), and scripts then call
-`native.store.Local.get(key)`, `put`, `list`, `open`, `create` and `delete`.
+`ig.store.Local.get(key)`, `put`, `list`, `open`, `create` and `delete`.
 
 On Lambda the directory must be a mounted volume such as EFS, because the function's own disk does
 not outlive the invocation.

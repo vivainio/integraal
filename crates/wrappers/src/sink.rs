@@ -1,5 +1,5 @@
-//! Write side of streams: `native.store.<name>.create(key)` returns a sink that uploads as it is
-//! written, so output larger than memory works. `native.zip.writer` writes into one.
+//! Write side of streams: `ig.store.<name>.create(key)` returns a sink that uploads as it is
+//! written, so output larger than memory works. `ig.zip.writer` writes into one.
 
 use std::{
     io,

@@ -1,4 +1,4 @@
--- Load alongside native.d.luau when typechecking user test suites.
+-- Load alongside ig.d.luau when typechecking user test suites.
 declare extern type PeerDocument with
     job: string
     key: string

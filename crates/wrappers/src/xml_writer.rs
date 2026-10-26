@@ -1,4 +1,4 @@
-//! `native.xml.writer(sink?, opts?)`: a streaming XML generator. Text and attribute values are
+//! `ig.xml.writer(sink?, opts?)`: a streaming XML generator. Text and attribute values are
 //! escaped, names are validated and well-formedness (balanced tags, a single root) is enforced,
 //! so a script cannot emit a broken document by accident. Output goes straight into a store
 //! sink, or is built in memory (capped at the object size limit) and returned by `finish()`.
@@ -416,16 +416,12 @@ pub fn api(
                         _ => None,
                     }),
                 ),
-                _ => {
-                    return Err(mlua::Error::runtime(
-                        "native.xml.writer expects (sink?, opts?)",
-                    ))
-                }
+                _ => return Err(mlua::Error::runtime("ig.xml.writer expects (sink?, opts?)")),
             };
             let target = match sink {
                 Some(ud) => Target::Sink(
                     Sink::from_userdata(&ud)
-                        .ok_or_else(|| mlua::Error::runtime("native.xml.writer expects a sink"))?,
+                        .ok_or_else(|| mlua::Error::runtime("ig.xml.writer expects a sink"))?,
                 ),
                 None => Target::Mem {
                     cap: max_object_bytes,

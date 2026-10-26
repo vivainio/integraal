@@ -1,6 +1,6 @@
 # Crypto
 
-## Script API: `native.crypto`
+## Script API: `ig.crypto`
 Authenticated encryption without handling key material. Scripts name a key (`"invoices"`: 1-64
 characters of letters, digits, `-`, `_`, `.`); the host derives it from the operator's master key
 and your tenant name (HKDF-SHA256), so tenants cannot read each other's data even with the same
@@ -20,9 +20,9 @@ key name. Needs [`crypto`](#deployment-master-keys) in the deployment config.
 ciphertext being moved to another key). Inputs are capped at `max_object_mb`.
 
 ```lua
-local b = native.store.Out
-b.put("invoices/7.json", native.crypto.encrypt("invoices", body, "invoices/7.json"))
-local plain = native.crypto.decrypt("invoices", b.get("invoices/7.json"), "invoices/7.json")
+local b = ig.store.Out
+b.put("invoices/7.json", ig.crypto.encrypt("invoices", body, "invoices/7.json"))
+local plain = ig.crypto.decrypt("invoices", b.get("invoices/7.json"), "invoices/7.json")
 ```
 
 ## Public-key variant (uploads from outside)
@@ -38,9 +38,9 @@ age -r age1... report.csv > report.csv.age     # no -a: armored input is not sup
 ```
 
 ```lua
-local pk = native.crypto.public_key("inbox")                     -- publish this
-local url = native.store.In.presign_put("drop/report.csv.age")    -- give this to the sender
-local csv = native.crypto.open("inbox", native.store.In.get("drop/report.csv.age"))
+local pk = ig.crypto.public_key("inbox")                     -- publish this
+local url = ig.store.In.presign_put("drop/report.csv.age")    -- give this to the sender
+local csv = ig.crypto.open("inbox", ig.store.In.get("drop/report.csv.age"))
 ```
 
 `open` tries every configured master key, so uploads sealed to an older public key still open after
@@ -65,7 +65,7 @@ operator adds key 2 and makes it active, old data still decrypts and new data us
 migrate lazily, re-encrypt whatever `is_current` reports as `false`.
 
 To rotate: generate key 2, deploy with both keys and `"active": 2`, let scripts re-encrypt data
-that `native.crypto.is_current` reports as stale, then drop key 1. Data sealed with a key you remove
+that `ig.crypto.is_current` reports as stale, then drop key 1. Data sealed with a key you remove
 can no longer be decrypted, and losing every key loses the data: back them up separately from the data.
 
 Changing the *key name* is a tenant-side rotation and needs the script to read with the old name

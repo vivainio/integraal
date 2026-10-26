@@ -1,16 +1,20 @@
 local cases = {}
 local cache, loading = {}, {}
+local native_require = require
 local function fresh()
     cache, loading = {}, {}
+    local module_require = require
     __install_native()
+    if require ~= module_require then native_require = require end
+    require = module_require
     -- HTTP is always intercepted; a missing mock must never reach the network.
     local routes = {}
     test.http_calls = {}
     function test.http(method, url, response)
         table.insert(routes, {method = method, url = url, response = response})
     end
-    native.http = {}
-    function native.http.request(opts)
+    ig.http = {}
+    function ig.http.request(opts)
         local request = { method = opts.method or "GET", url = opts.url,
             headers = opts.headers or {}, body = opts.body }
         table.insert(test.http_calls, request)
@@ -22,11 +26,12 @@ local function fresh()
         end
         error("unmocked HTTP request: " .. request.method .. " " .. tostring(request.url), 2)
     end
-    function native.http.get(url, headers)
-        return native.http.request({ url = url, headers = headers })
+    function ig.http.get(url, headers)
+        return ig.http.request({ url = url, headers = headers })
     end
 end
 function require(spec)
+    if string.sub(spec, 1, 8) == "@native/" then return native_require(spec) end
     if cache[spec] ~= nil then return cache[spec] end
     assert(not loading[spec], "circular require: " .. spec)
     loading[spec] = true
@@ -63,8 +68,8 @@ end
 function test.mock(path, implementation)
     assert(type(implementation) == "function", "mock needs a function")
     local parts = string.split(path, ".")
-    assert(parts[1] == "native" and #parts > 1, "mock path must start with native.")
-    local target = native
+    assert((parts[1] == "ig" or parts[1] == "igp") and #parts > 1, "mock path must start with ig. or igp.")
+    local target = if parts[1] == "ig" then ig else require("@native/patterns@1")
     for i = 2, #parts - 1 do
         local key = parts[i]
         assert(type(target[key]) == "table", "unknown mock path: " .. path)

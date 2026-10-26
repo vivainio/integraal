@@ -1,21 +1,21 @@
 # SQL scratch databases
 
-`native.sql` gives a script a private **SQLite database in memory** for working data: staging a feed,
+`ig.sql` gives a script a private **SQLite database in memory** for working data: staging a feed,
 deduplicating, joining, aggregating, keeping a run's bookkeeping. It lives only for the invocation, so
 there is nothing to share or clean up. To hand work to a later invocation, save it to a store and load
 it there.
 
 ```lua
-local db = native.sql.open()
+local db = ig.sql.open()
 db:exec("create table seen (id text primary key, amount real)")
-for ev in native.xml.events(native.gzip.open(native.store.In.open("feed.xml.gz"))) do
+for ev in ig.xml.events(ig.gzip.open(ig.store.In.open("feed.xml.gz"))) do
   if ev.type == "start" and ev.tag == "item" then
     db:exec("insert or ignore into seen values (?, ?)", { ev.attrs.id, tonumber(ev.attrs.amount) })
   end
 end
 
 -- keep it for later processing
-local out = native.store.Temp.create("job-42.db")
+local out = ig.store.Temp.create("job-42.db")
 db:save(out)
 out:close()
 ```
@@ -23,16 +23,16 @@ out:close()
 A later invocation (a queue message, a callback) continues from the file:
 
 ```lua
-local db = native.sql.load(native.store.Temp.open("job-42.db"))
+local db = ig.sql.load(ig.store.Temp.open("job-42.db"))
 for _, row in db:query("select id, amount from seen order by amount desc limit 10") do ... end
 ```
 
 ## API
 | | |
 | --- | --- |
-| `native.sql.open()` | a new empty database |
-| `native.sql.load(source)` | a database from a saved file; `source` is a string or a stream. The loaded database is writable. |
-| `native.sql.null` | bind it as a parameter to store `NULL` |
+| `ig.sql.open()` | a new empty database |
+| `ig.sql.load(source)` | a database from a saved file; `source` is a string or a stream. The loaded database is writable. |
+| `ig.sql.null` | bind it as a parameter to store `NULL` |
 | `db:exec(sql, params?)` | runs statements and returns the rows changed by the last one. Without `params` it may contain several statements (schema scripts); with them it must be one. |
 | `db:query(sql, params?)` | all result rows as an array of `{column = value}` tables. `NULL` columns are absent. Fails past 100 000 rows: add `LIMIT` or page through (`where id > ? order by id limit 1000`). |
 | `db:get(sql, params?)` | the first row, or `nil` |

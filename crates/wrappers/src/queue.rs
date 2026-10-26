@@ -1,4 +1,4 @@
-//! `native.queue`: hands new work to the deployment's job queue.
+//! `ig.queue`: hands new work to the deployment's job queue.
 //!
 //! Each message is the usual envelope `{tenant, script?, version?, event}`. The tenant is always the
 //! caller's own, so a script can only queue work for itself.
@@ -31,7 +31,7 @@ pub struct OutMessage {
     pub group: Option<String>,
 }
 
-/// Where `native.queue.send` delivers (SQS in production). Implementations may block and split the
+/// Where `ig.queue.send` delivers (SQS in production). Implementations may block and split the
 /// slice as their service requires. A failure may leave part of the messages sent.
 pub trait QueueBackend: Send + Sync {
     fn send(&self, messages: &[OutMessage]) -> Result<(), String>;
@@ -86,7 +86,7 @@ pub(crate) fn api(
         lua.create_function(move |lua, messages: Table| {
             let backend = backend.clone().ok_or_else(|| {
                 mlua::Error::runtime(
-                    "native.queue is not available (the tenant's config needs \"queue\": true and the deployment a queue)",
+                    "ig.queue is not available (the tenant's config needs \"queue\": true and the deployment a queue)",
                 )
             })?;
             // A single message `{ script = ..., event = ... }` or an array of them.
@@ -103,7 +103,7 @@ pub(crate) fn api(
             let total = sent.load(Ordering::Relaxed) + items.len();
             if total > MAX_SENT_PER_INVOCATION {
                 return Err(mlua::Error::runtime(format!(
-                    "native.queue.send: more than {MAX_SENT_PER_INVOCATION} messages in one invocation"
+                    "ig.queue.send: more than {MAX_SENT_PER_INVOCATION} messages in one invocation"
                 )));
             }
             let mut out = Vec::with_capacity(items.len());

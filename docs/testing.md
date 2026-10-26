@@ -22,7 +22,7 @@ It requires an explicit localhost roto endpoint.
 -- tests/orders.test.luau
 test.case("submits an order", function()
     test.http("POST", "https://partner.example/orders", function(request)
-        test.equal(native.json.decode(request.body), { sku = "ABC" })
+        test.equal(ig.json.decode(request.body), { sku = "ABC" })
         return { status = 201, headers = {}, body = '{"id":"42"}' }
     end)
 
@@ -33,7 +33,7 @@ test.case("submits an order", function()
 end)
 ```
 
-For editor/typechecker support, load `types/testing.d.luau` alongside `types/native.d.luau`.
+For editor/typechecker support, load `types/testing.d.luau` alongside `types/ig.d.luau`.
 
 ## Assertions and mocks
 
@@ -44,9 +44,9 @@ For editor/typechecker support, load `types/testing.d.luau` alongside `types/nat
 - `test.http(method, url, response)` matches an exact method and URL. The response can be a table
   or a function receiving `{ method, url, headers, body }`. Registrations can serve repeated requests;
   the first matching registration wins. Use a function with a counter for response sequences or errors.
-- `test.http_calls` records all requests, including unmatched ones. Both `native.http.get` and
-  `native.http.request` use the same interceptor. Unmatched calls throw without sending traffic.
-- `test.mock("native.time.now_ms", function() return 1234 end)` replaces another native function
+- `test.http_calls` records all requests, including unmatched ones. Both `ig.http.get` and
+  `ig.http.request` use the same interceptor. Unmatched calls throw without sending traffic.
+- `test.mock("ig.time.now_ms", function() return 1234 end)` replaces another native function
   and returns a spy. `spy.calls` contains packed argument tables (`.n` preserves nil arguments).
   Set up mocks before loading the script under test.
 
@@ -61,6 +61,7 @@ submits a job with document inputs; the test reads those documents, writes an ac
 passes the completion event to the real router and continuation.
 
 ```lua
+local igp = require("@native/patterns@1")
 local submitted = test.load("upload/latest.luau").handle(ctx, {
     body = '<invoice id="42"/>', reference = "INV-42",
 })
@@ -70,7 +71,7 @@ test.equal(document.body, '<invoice id="42"/>')
 local event = test.peer.ack(document, {
     results = { receipt = { { accepted = true } } },
 })
-local routed = native.batch.route(event)
+local routed = igp.batch.route(event)
 assert(routed and routed.script)
 local continuation = test.load(routed.script .. "/latest.luau")
 local completed = continuation.on_queue(queue_ctx, routed.event)
@@ -86,7 +87,7 @@ test.equal(completed.receipts, { { accepted = true } })
   an array of rows (written as NDJSON), or `{ body = "..." }` for a raw result document. If supplied,
   results must cover every query with no extra names. Omit options for empty results for every query.
 - `test.peer.ack(document, { ok = false, error = "invalid invoice" })` reports a failure. The real
-  `native.batch.hydrate(event, { allow_failure = true })` exposes it to the continuation.
+  `igp.batch.hydrate(event, { allow_failure = true })` exposes it to the continuation.
 
 Acknowledgments include part sizes and SHA-256 hashes, which the real result reader verifies.
 Invalid results fail before any response objects are written. A job that already has `done.json`
@@ -95,7 +96,7 @@ calls; an acknowledgment completes the whole job.
 
 The helpers require tenant `"batch": true` and a deployment `batch` bucket. They read and write only
 that tenant's `jobs/` subtree. They do not poll SQS, dispatch handlers or apply returned `delete`
-actions: tests explicitly pass the returned event through `native.batch.route` and invoke the
+actions: tests explicitly pass the returned event through `igp.batch.route` and invoke the
 continuation. A running server with S3 notifications can also consume the written marker, so use
 an isolated roto instance for this style of test. Ordinary store uploads and HTTP callbacks have
 application-specific acknowledgment formats and are not handled by `test.peer` yet.
@@ -133,3 +134,7 @@ The current runner supports S3 stores, the configured DynamoDB table, queue, bat
 callback URL. It does not configure host-directory/FTP/SFTP stores, vault credentials, master
 keys, background jobs or automatic resource provisioning. It uses fixed test budgets rather than
 tenant limit overrides. See `examples/acme/tests/hello.test.luau` for a storage test against roto.
+
+Pattern mocks use the imported module: `test.mock("igp.claim.acquire", fn)` targets
+`require("@native/patterns@1").claim.acquire`. Here `igp` is a mock path prefix,
+regardless of the local name used by the script.

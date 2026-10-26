@@ -76,12 +76,12 @@ impl FlowLog {
         }
     }
 
-    /// A `native.log` line.
+    /// A `ig.log` line.
     pub fn log(&self, level: &str, script: &str, msg: &str) {
         self.push(json!({ "t": now_ms(), "type": "log", "level": level, "script": script, "msg": cut(msg) }));
     }
 
-    /// An outbound `native.http` request: never the path or query. `status` is `None` when no
+    /// An outbound `ig.http` request: never the path or query. `status` is `None` when no
     /// response arrived.
     pub fn http(&self, method: &str, host: &str, status: Option<u16>, took_ms: u64) {
         self.push(json!({ "t": now_ms(), "type": "http", "method": method, "host": host, "status": status, "ms": took_ms }));

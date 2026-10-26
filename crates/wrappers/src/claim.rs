@@ -127,7 +127,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
         let db = host.db.clone();
         move || -> mlua::Result<DbScope> {
             let db = db.clone().ok_or_else(|| {
-                mlua::Error::runtime("native.claim needs native.db (the deployment's db section)")
+                mlua::Error::runtime("igp.claim needs ig.db (the deployment's db section)")
             })?;
             // Reserve both operations before changing state.
             for _ in 0..2 {

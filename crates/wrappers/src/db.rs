@@ -198,7 +198,7 @@ impl DbScope {
     }
 
     /// The partition holding a barrier. Like locks, it contains a control character, so scripts cannot
-    /// read or forge barrier rows through `native.db`.
+    /// read or forge barrier rows through `ig.db`.
     pub(crate) fn barrier_pk(&self, id: &str) -> Result<String, String> {
         check("barrier id", id, false)?;
         Ok(barrier_partition(&self.tenant, id))
@@ -233,7 +233,7 @@ pub const MAX_LOCK_LEASE: Duration = Duration::from_secs(15 * 60);
 
 impl DbScope {
     /// The partition holding a lock. It contains a control character, which `check` rejects in
-    /// script-supplied keys, so scripts cannot read or forge locks through `native.db`.
+    /// script-supplied keys, so scripts cannot read or forge locks through `ig.db`.
     fn lock_pk(&self, name: &str) -> Result<String, String> {
         check("lock name", name, false)?;
         Ok(format!("TEN#{}#\u{1}lock#{name}", self.tenant))

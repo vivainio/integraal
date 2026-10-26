@@ -1,11 +1,11 @@
 //! Credential vault: secrets that scripts can send but never read.
 //!
 //! Operators store a secret together with the URL prefixes it may be sent to. A script puts
-//! `{{vault:NAME.field.path}}` in the headers or body of a `native.http` request; the host substitutes the
+//! `{{vault:NAME.field.path}}` in the headers or body of a `ig.http` request; the host substitutes the
 //! value after the tenant's allowlist check, and only when the request URL also matches the
 //! secret's own `allow` list. No native function returns a secret.
 //!
-//! Entries live in the item table under `VAULT#<tenant>`, which `native.db` cannot address, with no
+//! Entries live in the item table under `VAULT#<tenant>`, which `ig.db` cannot address, with no
 //! expiry. Values are sealed with a key derived from the master keys, bound to tenant and name.
 
 use std::sync::Arc;

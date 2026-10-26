@@ -45,7 +45,7 @@ Each section is documented in the chapter for the feature it configures.
 | `vars` | [below](#vars) |
 
 ## `vars`
-Arbitrary JSON, exposed to scripts as `native.config`. String values can be interpolated into
+Arbitrary JSON, exposed to scripts as `ig.config`. String values can be interpolated into
 [`http.allow`](http.md#tenant-config-httpallow) as `${name}`; an undefined or non-string reference fails the invocation instead of
 silently changing the allowlist.
 

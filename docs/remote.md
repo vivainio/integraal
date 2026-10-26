@@ -1,7 +1,7 @@
 # FTP and SFTP
 
 Scripts can use files on an FTP, FTPS or SFTP server. As with [directories](filesystem.md), there is
-no separate API: the server is a **store**, so scripts use `native.store.<name>` with the same
+no separate API: the server is a **store**, so scripts use `ig.store.<name>` with the same
 functions, grants and key rules as for [S3 stores](stores.md).
 
 The protocols are not built into Integraal. Each operation runs the `curl` binary, so **`curl` must be

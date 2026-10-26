@@ -1,4 +1,4 @@
-//! `native.crypto`: authenticated encryption and hashing for tenant scripts.
+//! `ig.crypto`: authenticated encryption and hashing for tenant scripts.
 //!
 //! Scripts never hold key material. They name a key (`"invoices"`) and the host derives
 //! 32 bytes for it from the operator's master key with HKDF-SHA256, bound to the tenant,
@@ -26,7 +26,7 @@ const FORMAT: u8 = 1;
 const NONCE: usize = 24;
 const HEADER: usize = 2;
 const TAG: usize = 16;
-/// Most `native.crypto.random` returns in one call.
+/// Most `ig.crypto.random` returns in one call.
 const MAX_RANDOM: usize = 1024;
 
 /// The operator's root secret. Never exposed to scripts.
@@ -183,7 +183,7 @@ fn encrypt(id: u8, key: &[u8; 32], plain: &[u8], aad: &[u8]) -> Result<Vec<u8>, 
 /// The key number a blob was sealed with.
 fn blob_key_id(blob: &[u8]) -> Result<u8, String> {
     if blob.len() < HEADER + NONCE + TAG || blob[0] != FORMAT {
-        return Err("not a value produced by native.crypto.encrypt".into());
+        return Err("not a value produced by ig.crypto.encrypt".into());
     }
     Ok(blob[1])
 }
@@ -207,7 +207,7 @@ pub(crate) fn api(
         mlua::Error::runtime(m.to_string())
     }
     fn no_keys() -> mlua::Error {
-        err("native.crypto keys are not configured for this runtime (crypto.keys)")
+        err("ig.crypto keys are not configured for this runtime (crypto.keys)")
     }
 
     let master_active = master.as_ref().map(|m| m.active);

@@ -1,9 +1,10 @@
-# Locks (`native.lock`)
+# Locks (`igp.lock`)
 
 Mutual exclusion for scripts that must not run the same critical section twice at once.
 
 ```lua
-local ran, result = native.lock.with("import-42", { scope = "db", lease_ms = 30000, wait_ms = 5000 }, function()
+local igp = require("@native/patterns@1")
+local ran, result = igp.lock.with("import-42", { scope = "db", lease_ms = 30000, wait_ms = 5000 }, function()
   return import_everything()
 end)
 if not ran then
@@ -11,7 +12,7 @@ if not ran then
 end
 ```
 
-`native.lock.with(name, opts?, fn) -> (acquired, ...)` takes the lock, runs `fn()`, and releases the
+`igp.lock.with(name, opts?, fn) -> (acquired, ...)` takes the lock, runs `fn()`, and releases the
 lock again however `fn` ends (return, error, or interrupt). It returns `true` followed by whatever
 `fn` returned, or just `false` if the lock could not be had in time. Errors from `fn` are raised
 as usual.
@@ -27,7 +28,7 @@ Names are per tenant. Two tenants using the same name never contend.
 ## The lease is enforced
 
 When `lease_ms` runs out, `fn` is interrupted, exactly as with
-[`native.deadline.with`](native-api.md#nativedeadline), and `with` raises `"deadline exceeded"`.
+[`ig.deadline.with`](native-api.md#igdeadline), and `with` raises `"deadline exceeded"`.
 So a holder that is slow or stuck stops before anyone else can take the lock, and the lock needs
 no fencing token. The interrupt covers script code and native calls (HTTP, SQL, stream reads),
 but a write that was already in flight can still complete, so make the protected work safe to
@@ -43,7 +44,7 @@ counts from the moment `with` starts asking for the lock, so time spent waiting 
   task runs many scripts at once. On **Lambda** an execution environment runs one invocation at a
   time, so a local lock only ever excludes the script from itself. Use `db` to exclude across
   Lambda invocations, and across Fargate tasks.
-- **`db`** keeps one row per lock in the [`native.db`](dynamodb.md) table (under the tenant's partition
+- **`db`** keeps one row per lock in the [`ig.db`](dynamodb.md) table (under the tenant's partition
   prefix, in a partition scripts cannot address). It needs `db.table`. Waiting polls with a
   growing, jittered pause; every attempt counts against `max_data_ops`.
 
@@ -52,4 +53,4 @@ Locks are not reentrant: taking a lock you already hold waits for yourself, so u
 
 ## Deployment
 
-Nothing beyond [`native.db`](dynamodb.md#deployment): conditional `PutItem` and `DeleteItem`.
+Nothing beyond [`ig.db`](dynamodb.md#deployment): conditional `PutItem` and `DeleteItem`.

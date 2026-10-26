@@ -1,4 +1,4 @@
-//! Background HTTP for `native.batch`: `job:http(name, opts)` describes a request, and after
+//! Background HTTP for `igp.batch`: `job:http(name, opts)` describes a request, and after
 //! `submit` the host performs it on its own thread, outside the invocation's time budget. Only the
 //! response is written to the batch bucket (the request, which may carry vault secrets, never is),
 //! followed by `done.json`, so the usual continuation runs. Fargate only: a Lambda sandbox is
@@ -46,7 +46,7 @@ pub(crate) struct Response {
 }
 
 impl Env {
-    /// Parses `{ method, url, headers, body, vault }` like `native.http.request` and applies the same
+    /// Parses `{ method, url, headers, body, vault }` like `ig.http.request` and applies the same
     /// checks, so a request that could never be sent fails in the submitting script.
     pub fn prepare(&self, budget: &Budget, opts: &Table) -> mlua::Result<Prepared> {
         budget.take_http().map_err(err)?;

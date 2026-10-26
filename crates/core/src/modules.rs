@@ -3,6 +3,7 @@
 //! ```lua
 //! local dates = require("@lib/util/dates")          -- <tenant>/lib/util/dates.luau
 //! local csv   = require("@shared/csv@2.1.0")        -- @shared/csv/2.1.0.luau
+//! local igp   = require("@native/patterns@1")       -- built-in patterns, version 1
 //! ```
 //!
 //! A module is a chunk that returns a value (usually a table). It runs once per invocation, in the
@@ -49,6 +50,9 @@ pub(crate) fn install(lua: &Lua, host: ModuleHost, tenant: &str) -> mlua::Result
     let loading: Table = lua.create_table()?;
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let require = lua.create_function(move |lua, spec: String| {
+        if spec.starts_with("@native/") {
+            return integraal_wrappers::require_native(lua, &spec).map(Value::Table);
+        }
         let key = resolve(&tenant, &spec).map_err(mlua::Error::runtime)?;
         let id = key.object_key();
         let cached: Value = loaded.get(id.as_str())?;

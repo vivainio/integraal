@@ -1,6 +1,6 @@
 # Barriers
 
-`native.barrier` waits for a known set of acknowledgements, then continues once. Use it when you
+`igp.barrier` waits for a known set of acknowledgements, then continues once. Use it when you
 split work among queue workers or send documents to a partner, and need a continuation after
 every item has an outcome. [Scatter and gather](patterns.md#scatter-and-gather) uses a barrier
 to coordinate the gather; the barrier itself does not dispatch the work.
@@ -12,7 +12,7 @@ script records it, and the call that resolves the last member sends the continua
 ```mermaid
 sequenceDiagram
     participant S as sender script
-    participant B as barrier (native.db)
+    participant B as barrier (ig.db)
     participant P as partner
     participant A as ack script
     participant F as continuation
@@ -28,8 +28,9 @@ sequenceDiagram
 ## Script API
 
 ```lua
+local igp = require("@native/patterns@1")
 -- send
-local id = native.barrier.create({
+local id = igp.barrier.create({
   id = batch,                              -- optional; created again with the same id does nothing
   members = names,                         -- what the acks will name, e.g. "a.xml"
   continue_with = "finalize",              -- script that runs when every member is resolved
@@ -37,24 +38,24 @@ local id = native.barrier.create({
   deadline_s = 3600,                       -- optional; see Deadlines
   overdue_with = "chase",                  -- optional script for the overdue event; else the router picks
 })
-for _, name in names do native.store.In.put(batch .. "/" .. name, docs[name]) end
+for _, name in names do ig.store.In.put(batch .. "/" .. name, docs[name]) end
 
 -- ack: runs for every acknowledgement, whatever channel it came by
-local r = native.barrier.ack(batch, name, { ok = true, result = { id = "r-17" } })
+local r = igp.barrier.ack(batch, name, { ok = true, result = { id = "r-17" } })
 
 -- finalize
 function on_queue(ctx, ev)
-  local b = native.barrier.hydrate(ev)     -- nil if not complete, or expired / cleaned up
+  local b = igp.barrier.hydrate(ev)     -- nil if not complete, or expired / cleaned up
   if not b then return end
   for member, outcome in b:results() do
-    if not outcome.ok then native.log("warn", member .. ": " .. tostring(outcome.error)) end
+    if not outcome.ok then ig.log("warn", member .. ": " .. tostring(outcome.error)) end
   end
 end
 ```
 
 | Function | |
 | --- | --- |
-| `create(opts)` | registers the members and returns the id. `members` is required, at most 10 000, each at most 200 bytes, no duplicates. `id` is generated when absent. `continue_with` needs [`native.queue`](queue.md) (`"queue": true`). `state` is any JSON, at most 32 KB. Calling it again with the id of a barrier that is already complete does nothing; with the id of one cut short by a crash it finishes the job |
+| `create(opts)` | registers the members and returns the id. `members` is required, at most 10 000, each at most 200 bytes, no duplicates. `id` is generated when absent. `continue_with` needs [`ig.queue`](queue.md) (`"queue": true`). `state` is any JSON, at most 32 KB. Calling it again with the id of a barrier that is already complete does nothing; with the id of one cut short by a crash it finishes the job |
 | `ack(id, member, outcome?)` | records the outcome, retires the member and, if none are left, sends the continuation. Returns `{ duplicate, complete, dispatched }` |
 | `resume(id)` | retries continuation dispatch without an ack payload. Returns `true` if this call sent; `false` if members are pending, dispatch is already marked sent, or no queue is configured. A live dispatch lease raises the same retryable error as `ack`. Unknown, expired or incompletely created barriers raise |
 | `pending(id, limit?)` | the members still waiting, in name order (at most 100 per call) |
@@ -85,7 +86,7 @@ reported as `duplicate = true` and changes nothing.
 
 The barrier does not care how an ack arrives. Everything that can reach a script can ack: an S3
 notification for an object the partner wrote, a message the partner put on the queue, a
-[callback](callbacks.md). Route the event to one `ack` script and call `native.barrier.ack` there.
+[callback](callbacks.md). Route the event to one `ack` script and call `igp.barrier.ack` there.
 
 The ack has to say **which barrier and which member**. The simplest convention is to put both in the
 keys you control:
@@ -96,6 +97,7 @@ Acks/<batch>/<doc>.json  what the partner writes back
 ```
 
 ```lua
+local igp = require("@native/patterns@1")
 -- router
 local function on_route(_ctx, event)
   if event.store == "Acks" then return "ack" end
@@ -106,14 +108,14 @@ end
 function on_queue(ctx, ev)
   local batch, doc = string.match(ev.key, "^([^/]+)/(.+)%.json$")
   if not batch then return end
-  local body = native.json.decode(native.store.Acks.get(ev.key) or "{}")
-  native.barrier.ack(batch, doc .. ".xml", { ok = body.status == "ok", error = body.error })
+  local body = ig.json.decode(ig.store.Acks.get(ev.key) or "{}")
+  igp.barrier.ack(batch, doc .. ".xml", { ok = body.status == "ok", error = body.error })
 end
 ```
 
 Two batches that both contain `invoice.xml` do not collide, because the barrier id is part of the
 address. If the partner can echo back nothing but the document key, store a `member -> batch` row in
-[`native.db`](dynamodb.md) when you send and look it up in the ack script.
+[`ig.db`](dynamodb.md) when you send and look it up in the ack script.
 
 ## Deadlines
 
@@ -125,7 +127,7 @@ when it comes due, the sweep sends the tenant
 ```
 
 (`script` only when `overdue_with` is set; otherwise the [router](router.md) picks one by
-`event.type`). The script looks at `native.barrier.pending(id)` and `status(id)` and decides: ask the
+`event.type`). The script looks at `igp.barrier.pending(id)` and `status(id)` and decides: ask the
 partner again, alert someone, or ack the missing members itself.
 
 - **The barrier stays open.** Overdue only reports. A late ack still completes the barrier and sends
@@ -153,8 +155,8 @@ partner again, alert someone, or ack the missing members itself.
   and the next attempt sees the send finished.
 - **Unknown members are refused.** Acking a name that is not on the list raises, so a stray event
   cannot complete a barrier.
-- **Tenant-private.** The rows live in a partition that `native.db` cannot address, so scripts
-  cannot read or forge them except through `native.barrier`.
+- **Tenant-private.** The rows live in a partition that `ig.db` cannot address, so scripts
+  cannot read or forge them except through `igp.barrier`.
 
 ## Crash recovery
 
@@ -171,7 +173,7 @@ from a durable retry source, and let errors propagate so failed deliveries are r
   dispatching the continuation, even if the outcome was already recorded. A crash during dispatch
   may leave a lease; retry after it expires. There is no background sweep that retries completion
   dispatch on its own. If redelivery exhausts its retries, replay the failed ack or call
-  `native.barrier.resume(id)` once all members have been resolved. `resume` leaves pending members
+  `igp.barrier.resume(id)` once all members have been resolved. `resume` leaves pending members
   and outcomes unchanged; it does not resend a continuation already marked sent.
 - **Make continuation effects safe to repeat.** Sending the continuation and marking it sent are
   separate operations, and the queue can redeliver it too. Use stable output keys or a destination
@@ -211,7 +213,7 @@ leases still expire after 60 seconds. Existing barriers retain their stored expi
 
 Needs the `db` section of the [global config](deployment.md#configuration), and for `continue_with`
 the tenant's `"queue": true` and a `queue.url`. No other IAM: the same table actions as
-[`native.db`](dynamodb.md), including `Query`.
+[`ig.db`](dynamodb.md), including `Query`.
 
 Without a queue, a barrier still works as a plain work list: `ack` tells you when `complete`, and
 you act on it yourself. More than one caller can see `complete = true`, so make the resulting

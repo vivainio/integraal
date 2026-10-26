@@ -527,7 +527,7 @@ mod tests {
         let e = engine(
             r#"--!runtime 1
             return { on_place = function(ctx, ev)
-              local ok = pcall(function() return native.http.get("https://example.com/") end)
+              local ok = pcall(function() return ig.http.get("https://example.com/") end)
               if ok then return "large" end
               return "small"
             end }"#,

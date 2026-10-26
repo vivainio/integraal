@@ -1,4 +1,4 @@
-//! `native.lock.with(name, opts, fn)`: mutual exclusion inside the process (`scope = "local"`) or
+//! `igp.lock.with(name, opts, fn)`: mutual exclusion inside the process (`scope = "local"`) or
 //! across every process sharing the table (`scope = "db"`).
 //!
 //! The lock is held only while `fn` runs, and the lease is enforced by the deadline stack: when it
@@ -150,7 +150,7 @@ pub fn api(
                     }
                     Scope::Db => {
                         let scope = db.clone().ok_or_else(|| {
-                            mlua::Error::runtime("native.lock needs db.table for scope \"db\"")
+                            mlua::Error::runtime("igp.lock needs db.table for scope \"db\"")
                         })?;
                         let lease = lease.unwrap_or(DEFAULT_DB_LEASE);
                         let mut pause = POLL_START;

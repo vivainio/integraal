@@ -1,6 +1,7 @@
 --!nonstrict
 --!runtime 1
 -- Routes everything that arrives without a script name.
+local igp = require("@native/patterns@1")
 local function on_route(_ctx, event)
 	if event.type == "schedule" then
 		return "ticker"
@@ -8,7 +9,7 @@ local function on_route(_ctx, event)
 	if event.type == "barrier.overdue" then
 		return "overdue"
 	end
-	local batch = native.batch.route(event)
+	local batch = igp.batch.route(event)
 	if batch then
 		return batch.script and { script = batch.script, event = batch.event } or "hello"
 	end
