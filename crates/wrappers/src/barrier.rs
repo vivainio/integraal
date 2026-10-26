@@ -2,7 +2,8 @@
 //!
 //! A barrier is a work list: a set of member names (usually object keys) and one outcome per member.
 //! Acks arrive by any channel (S3 events, queue messages, callbacks), each through
-//! `igp.barrier.ack`; the ack that resolves the last pending member sends the continuation.
+//! `igp.barrier.ack`; once sealed, the ack resolving the last pending member sends the continuation.
+//! Open barriers accept atomic member additions; sealing an already resolved list dispatches it.
 //!
 //! Rows live in a partition of their own, which scripts cannot reach through `ig.db`:
 //!
@@ -68,6 +69,12 @@ struct Header {
     total: usize,
     /// Set once every member row exists; acks are refused before that.
     ready: bool,
+    /// Legacy and ordinary barriers are sealed; open lists can accept more members.
+    #[serde(default = "default_sealed")]
+    sealed: bool,
+    /// Retained only until atomic open-list creation finishes, to validate crash retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creation_members: Option<Vec<String>>,
     #[serde(rename = "then")]
     continue_with: Option<String>,
     /// Script that gets the overdue event; without it the tenant's router picks one.
@@ -79,6 +86,10 @@ struct Header {
     /// The trace of the invocation that created the barrier; the continuation joins it.
     #[serde(default)]
     trace: TraceContext,
+}
+
+fn default_sealed() -> bool {
+    true
 }
 
 /// What one `ack` call found.
@@ -96,6 +107,7 @@ pub struct AckOutcome {
 pub struct CreateSpec {
     pub id: String,
     pub members: Vec<String>,
+    pub sealed: bool,
     pub continue_with: Option<String>,
     pub overdue_with: Option<String>,
     pub state: Json,
@@ -107,7 +119,8 @@ fn timer_id(id: &str) -> String {
     format!("barrier.{id}")
 }
 
-/// The barrier operations, independent of Lua. Every backend call spends one `max_data_ops`.
+/// The barrier operations, independent of Lua. Reads and logical writes spend `max_data_ops`;
+/// a transaction charges each row written before committing.
 pub struct Barriers {
     db: DbScope,
     tenant: String,
@@ -153,17 +166,23 @@ impl Barriers {
         let CreateSpec {
             id,
             members,
+            sealed,
             continue_with,
             overdue_with,
             state,
             deadline_s,
         } = spec;
         let pk = self.db.barrier_pk(&id)?;
-        if members.is_empty() || members.len() > MAX_BARRIER_MEMBERS {
+        if (sealed && members.is_empty()) || members.len() > MAX_BARRIER_MEMBERS {
             return Err(format!(
                 "a barrier needs 1 to {MAX_BARRIER_MEMBERS} members, got {}",
                 members.len()
             ));
+        }
+        if !sealed && members.len() > 99 {
+            return Err(
+                "an open barrier accepts at most 99 initial members; use add for more".into(),
+            );
         }
         let mut seen = std::collections::HashSet::new();
         for m in &members {
@@ -207,9 +226,13 @@ impl Barriers {
 
         let now = now_secs();
         let ttl = crate::NO_EXPIRY;
+        let mut initial = members.clone();
+        initial.sort();
         let header = Header {
             total: members.len(),
             ready: false,
+            sealed,
+            creation_members: (!sealed).then_some(initial),
             continue_with,
             overdue_with,
             state,
@@ -227,15 +250,31 @@ impl Barriers {
             if old.ready {
                 return Ok(());
             }
-            if old.total != header.total {
+            if old.total != header.total
+                || old.sealed != header.sealed
+                || old.creation_members != header.creation_members
+            {
                 return Err("a barrier with this id exists with different members".into());
             }
         }
-        for m in &members {
-            self.op()?
-                .put_if_free(&pk, item(&format!("{PENDING}{m}"), "1".into(), ttl), now)?;
+        if sealed {
+            for m in &members {
+                self.op()?.put_if_free(
+                    &pk,
+                    item(&format!("{PENDING}{m}"), "1".into(), ttl),
+                    now,
+                )?;
+            }
         }
-        let stored = self.header(&pk)?;
+        let stored_row = self
+            .op()?
+            .get(&pk, HEADER)?
+            .and_then(DbScope::live)
+            .ok_or("barrier disappeared during create; retry")?;
+        let stored: Header = serde_json::from_str(&stored_row.value).map_err(|e| e.to_string())?;
+        if !sealed && stored.ready {
+            return Ok(());
+        }
         self.db.index_trace("barrier", &id, &stored.trace, ttl);
         // Registered from the stored header, so a create that is repeated after a crash arms the same timer.
         if let (Some(due), Some(_)) = (stored.due_s, &self.queue) {
@@ -257,9 +296,147 @@ impl Barriers {
         }
         let ready = Header {
             ready: true,
+            creation_members: None,
             ..stored
         };
-        self.op()?.put(&pk, item(HEADER, body(&ready)?, ttl))
+        let replacement = item(HEADER, body(&ready)?, ttl);
+        if sealed {
+            self.op()?.put(&pk, replacement)
+        } else {
+            let writes = members
+                .iter()
+                .map(|m| (pk.clone(), item(&format!("{PENDING}{m}"), "1".into(), ttl)))
+                .collect();
+            for _ in &members {
+                self.budget.take_data()?;
+            }
+            if !self
+                .op()?
+                .transact_if_current(&pk, &stored_row, replacement, writes, now_secs())?
+            {
+                return Err("barrier changed during create; retry".into());
+            }
+            Ok(())
+        }
+    }
+
+    fn live_header_row(&self, pk: &str) -> Result<(Item, Header), String> {
+        let row = self
+            .op()?
+            .get(pk, HEADER)?
+            .and_then(DbScope::live)
+            .ok_or("no such barrier (unknown, expired or cleaned up)")?;
+        let h: Header =
+            serde_json::from_str(&row.value).map_err(|e| format!("corrupt barrier: {e}"))?;
+        if !h.ready {
+            return Err("barrier is still being created".into());
+        }
+        if now_secs() >= h.expires_s {
+            return Err("barrier expired".into());
+        }
+        Ok((row, h))
+    }
+
+    /// Append up to 99 names atomically. A header compare fences concurrent additions and seal.
+    /// Pending/outcome rows together are permanent proof of membership: ack records before delete.
+    pub fn add(&self, id: &str, members: &[String]) -> Result<usize, String> {
+        if members.is_empty() || members.len() > 99 {
+            return Err("barrier.add needs 1 to 99 members per call".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for member in members {
+            check("barrier member", member, false)?;
+            if member.len() > MAX_MEMBER_LEN {
+                return Err("barrier member longer than 200 bytes".into());
+            }
+            if !seen.insert(member) {
+                return Err(format!("duplicate barrier member {member:?}"));
+            }
+        }
+        let pk = self.db.barrier_pk(id)?;
+        let (row, mut h) = self.live_header_row(&pk)?;
+        if h.sealed {
+            return Err("barrier is sealed; cannot add members".into());
+        }
+        let mut writes = Vec::new();
+        for member in members {
+            let p = format!("{PENDING}{member}");
+            if self.op()?.get(&pk, &p)?.and_then(DbScope::live).is_some() {
+                continue;
+            }
+            if self
+                .op()?
+                .get(&pk, &format!("{RESULT}{member}"))?
+                .and_then(DbScope::live)
+                .is_some()
+            {
+                continue;
+            }
+            writes.push((pk.clone(), item(&p, "1".into(), crate::NO_EXPIRY)));
+        }
+        let added = writes.len();
+        if h.total + added > MAX_BARRIER_MEMBERS {
+            return Err("barrier exceeds 10000 members".into());
+        }
+        h.total += added;
+        // Even a duplicate-only add compares the header: a concurrent seal must reject it.
+        for _ in 0..added {
+            self.budget.take_data()?;
+        }
+        let replacement = item(
+            HEADER,
+            serde_json::to_string(&h).map_err(|e| e.to_string())?,
+            row.ttl,
+        );
+        if !self
+            .op()?
+            .transact_if_current(&pk, &row, replacement, writes, now_secs())?
+        {
+            return Err("barrier changed during add; retry".into());
+        }
+        Ok(added)
+    }
+
+    /// Close the member list. Index dispatch recovery atomically with sealing, so a crash cannot
+    /// leave an empty sealed barrier without a continuation-recovery source.
+    pub fn seal(&self, id: &str) -> Result<bool, String> {
+        let pk = self.db.barrier_pk(id)?;
+        let (row, mut h) = self.live_header_row(&pk)?;
+        if !h.sealed {
+            h.sealed = true;
+            let mut writes = Vec::new();
+            if self.queue.is_some() {
+                let recovery = Recovery {
+                    tenant: self.tenant.clone(),
+                    id: id.into(),
+                    member: None,
+                };
+                writes.push((
+                    RECOVERY.into(),
+                    item(
+                        &recovery_key(&self.tenant, id, None),
+                        serde_json::to_string(&recovery).map_err(|e| e.to_string())?,
+                        crate::NO_EXPIRY,
+                    ),
+                ));
+                self.budget.take_data()?;
+            }
+            let replacement = item(
+                HEADER,
+                serde_json::to_string(&h).map_err(|e| e.to_string())?,
+                row.ttl,
+            );
+            if !self
+                .op()?
+                .transact_if_current(&pk, &row, replacement, writes, now_secs())?
+            {
+                return Err("barrier changed during seal; retry".into());
+            }
+        }
+        let sent = self.resume(id)?;
+        // Pending members have their own recovery entries when they ack.
+        self.clear_recovery(id, None)?;
+        Ok(sent)
     }
 
     fn any_pending(&self, pk: &str) -> Result<bool, String> {
@@ -337,6 +514,19 @@ impl Barriers {
                 dispatched: false,
             });
         }
+        let header = if header.sealed {
+            header
+        } else {
+            self.live_header(&pk)?
+        };
+        if !header.sealed {
+            self.clear_recovery(id, Some(member))?;
+            return Ok(AckOutcome {
+                duplicate,
+                complete: false,
+                dispatched: false,
+            });
+        }
         let dispatched = self.dispatch(&pk, id, &header)?;
         self.clear_recovery(id, Some(member))?;
         Ok(AckOutcome {
@@ -394,7 +584,7 @@ impl Barriers {
     pub fn resume(&self, id: &str) -> Result<bool, String> {
         let pk = self.db.barrier_pk(id)?;
         let header = self.live_header(&pk)?;
-        if self.any_pending(&pk)? {
+        if !header.sealed || self.any_pending(&pk)? {
             return Ok(false);
         }
         self.register_recovery(id, None)?;
@@ -446,7 +636,7 @@ impl Barriers {
                 dispatched |= ack.dispatched;
             }
         }
-        let complete = !self.any_pending(&pk)?;
+        let complete = self.live_header(&pk)?.sealed && !self.any_pending(&pk)?;
         if complete {
             // Also repairs a complete barrier with an interrupted dispatch and no pending rows.
             dispatched |= self.resume(id)?;
@@ -472,7 +662,7 @@ impl Barriers {
     pub fn status(&self, id: &str) -> Result<Json, String> {
         let pk = self.db.barrier_pk(id)?;
         let h = self.header(&pk)?;
-        let complete = h.ready && !self.any_pending(&pk)?;
+        let complete = h.ready && h.sealed && !self.any_pending(&pk)?;
         let sent = self
             .op()?
             .get(&pk, FINAL)?
@@ -480,7 +670,7 @@ impl Barriers {
             .is_some_and(|i| i.value == "sent");
         let overdue = !complete && h.due_s.is_some_and(|d| now_secs() >= d);
         Ok(json!({
-            "id": id, "total": h.total, "ready": h.ready, "complete": complete,
+            "id": id, "total": h.total, "ready": h.ready, "sealed": h.sealed, "complete": complete,
             "dispatched": sent, "overdue": overdue, "due_s": h.due_s,
         }))
     }
@@ -675,6 +865,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             };
             let members: Vec<String> = match opts.get::<Value>("members")? {
                 Value::Table(t) => t.sequence_values::<String>().collect::<Result<_, _>>()?,
+                Value::Nil if opts.get::<Option<bool>>("sealed")? == Some(false) => Vec::new(),
                 _ => return Err(err("igp.barrier.create needs members = { ... }")),
             };
             let state = match opts.get::<Value>("state")? {
@@ -684,6 +875,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             b.create(CreateSpec {
                 id: id.clone(),
                 members,
+                sealed: opts.get::<Option<bool>>("sealed")?.unwrap_or(true),
                 continue_with: opts.get::<Option<String>>("continue_with")?,
                 overdue_with: opts.get::<Option<String>>("overdue_with")?,
                 state,
@@ -692,6 +884,22 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             .map_err(err)?;
             Ok(id)
         })?,
+    )?;
+
+    let mk = make.clone();
+    barrier.set(
+        "add",
+        lua.create_function(move |_, (id, members): (String, Table)| {
+            let members = members
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            mk()?.add(&id, &members).map_err(err)
+        })?,
+    )?;
+    let mk = make.clone();
+    barrier.set(
+        "seal",
+        lua.create_function(move |_, id: String| mk()?.seal(&id).map_err(err))?,
     )?;
 
     let mk = make.clone();
@@ -789,7 +997,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
                 Ok(h) => h,
                 Err(_) => return Ok(Value::Nil), // cleaned up or expired: a duplicate delivery
             };
-            if !header.ready || b.any_pending(&pk).map_err(err)? {
+            if !header.ready || !header.sealed || b.any_pending(&pk).map_err(err)? {
                 return Ok(Value::Nil);
             }
             let t = lua.create_table()?;
@@ -905,6 +1113,28 @@ mod tests {
             }
             Ok(free)
         }
+        fn transact_if_current(
+            &self,
+            pk: &str,
+            expected: &Item,
+            replacement: Item,
+            additional: Vec<(String, Item)>,
+            now: u64,
+        ) -> Result<bool, String> {
+            let mut rows = self.0.lock().unwrap();
+            let key = (pk.to_string(), expected.sk.clone());
+            if rows
+                .get(&key)
+                .is_none_or(|row| row != expected || row.ttl <= now)
+            {
+                return Ok(false);
+            }
+            rows.insert(key, replacement);
+            for (pk, row) in additional {
+                rows.insert((pk, row.sk.clone()), row);
+            }
+            Ok(true)
+        }
         fn delete_if_value(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
             unimplemented!()
         }
@@ -972,6 +1202,7 @@ mod tests {
         CreateSpec {
             id: id.into(),
             members: members.iter().map(|m| m.to_string()).collect(),
+            sealed: true,
             continue_with: Some("finalize".into()),
             overdue_with: None,
             state: json!({ "batch": 7 }),
@@ -981,6 +1212,191 @@ mod tests {
 
     fn ok() -> Json {
         json!({ "ok": true })
+    }
+
+    fn open_spec(id: &str, members: &[&str]) -> CreateSpec {
+        CreateSpec {
+            sealed: false,
+            ..spec(id, members)
+        }
+    }
+
+    #[test]
+    fn open_lists_accept_early_acks_and_deduplicate_adds_until_sealed() {
+        let (b, _, sent) = setup();
+        b.create(open_spec("grow", &[])).unwrap();
+        assert_eq!(b.status("grow").unwrap()["sealed"], false);
+        assert!(!b.resume("grow").unwrap());
+        let r = b.reconcile("grow", "", 10, |_| panic!("empty")).unwrap();
+        assert_eq!(r["complete"], false);
+        assert_eq!(b.add("grow", &["a".into(), "b".into()]).unwrap(), 2);
+        assert!(!b.ack("grow", "a", &ok()).unwrap().complete);
+        assert!(!b.ack("grow", "b", &ok()).unwrap().complete);
+        assert_eq!(
+            b.add("grow", &["a".into(), "b".into(), "c".into()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(b.pending("grow", 10).unwrap(), vec!["c"]);
+        assert_eq!(b.status("grow").unwrap()["total"], 3);
+        assert!(sent.0.lock().unwrap().is_empty());
+        assert!(!b.seal("grow").unwrap());
+        assert!(b.add("grow", &["a".into()]).unwrap_err().contains("sealed"));
+        assert!(b.ack("grow", "c", &ok()).unwrap().dispatched);
+        assert!(!b.seal("grow").unwrap());
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sealing_empty_or_already_resolved_lists_dispatches_once() {
+        for early_ack in [false, true] {
+            let (b, _, sent) = setup();
+            b.create(open_spec("grow", if early_ack { &["a"] } else { &[] }))
+                .unwrap();
+            if early_ack {
+                b.ack("grow", "a", &ok()).unwrap();
+            }
+            assert!(b.seal("grow").unwrap());
+            assert!(!b.seal("grow").unwrap());
+            let status = b.status("grow").unwrap();
+            assert_eq!(status["complete"], true);
+            assert_eq!(status["sealed"], true);
+            assert_eq!(sent.0.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn interrupted_open_create_and_add_can_be_retried_without_partial_membership() {
+        use std::sync::atomic::Ordering;
+        let (b, mem, _) = setup();
+        b.budget.data_left.store(2, Ordering::Relaxed);
+        assert!(b.create(open_spec("grow", &["initial"])).is_err());
+        let pk = b.db.barrier_pk("grow").unwrap();
+        assert!(
+            !serde_json::from_str::<Header>(&mem.get(&pk, HEADER).unwrap().unwrap().value)
+                .unwrap()
+                .ready
+        );
+        b.budget.data_left.store(100, Ordering::Relaxed);
+        assert!(b
+            .create(open_spec("grow", &["different"]))
+            .unwrap_err()
+            .contains("different members"));
+        b.create(open_spec("grow", &["initial"])).unwrap();
+        b.ack("grow", "initial", &ok()).unwrap();
+        for budget in 0..8 {
+            b.budget.data_left.store(budget, Ordering::Relaxed);
+            assert!(b.add("grow", &["a".into(), "b".into()]).is_err());
+            assert!(mem.get(&pk, "p#a").unwrap().is_none());
+            assert!(mem.get(&pk, "p#b").unwrap().is_none());
+        }
+        b.budget.data_left.store(100, Ordering::Relaxed);
+        assert_eq!(b.add("grow", &["a".into(), "b".into()]).unwrap(), 2);
+        // Treat a lost success response as a retry: no duplicate count or resurrected member.
+        b.ack("grow", "a", &ok()).unwrap();
+        assert_eq!(b.add("grow", &["a".into(), "b".into()]).unwrap(), 0);
+        b.create(open_spec("grow", &["initial"])).unwrap();
+        assert_eq!(b.pending("grow", 10).unwrap(), vec!["b"]);
+        assert_eq!(b.status("grow").unwrap()["total"], 3);
+    }
+
+    #[test]
+    fn seal_commit_is_recoverable_even_when_the_invocation_stops_before_dispatch() {
+        use std::sync::atomic::Ordering;
+        let (b, mem, sent) = setup();
+        b.create(open_spec("grow", &[])).unwrap();
+        b.budget.data_left.store(3, Ordering::Relaxed);
+        assert!(b.seal("grow").is_err());
+        assert_eq!(
+            sweep(mem.clone(), sent.clone(), now_secs(), 100)
+                .unwrap()
+                .fired,
+            1
+        );
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+        b.budget.data_left.store(100, Ordering::Relaxed);
+        assert!(!b.seal("grow").unwrap());
+    }
+
+    #[test]
+    fn stale_add_transaction_cannot_cross_seal_and_legacy_headers_remain_sealed() {
+        let (b, mem, _) = setup();
+        b.create(open_spec("grow", &[])).unwrap();
+        let pk = b.db.barrier_pk("grow").unwrap();
+        let (row, mut h) = b.live_header_row(&pk).unwrap();
+        b.seal("grow").unwrap();
+        h.total += 1;
+        assert!(!mem
+            .transact_if_current(
+                &pk,
+                &row,
+                item(HEADER, serde_json::to_string(&h).unwrap(), row.ttl),
+                vec![(pk.clone(), item("p#late", "1".into(), crate::NO_EXPIRY))],
+                now_secs()
+            )
+            .unwrap());
+        assert!(mem.get(&pk, "p#late").unwrap().is_none());
+        b.create(spec("old", &["a"])).unwrap();
+        let pk = b.db.barrier_pk("old").unwrap();
+        let row = mem.get(&pk, HEADER).unwrap().unwrap();
+        let mut header: Json = serde_json::from_str(&row.value).unwrap();
+        header.as_object_mut().unwrap().remove("sealed");
+        mem.put(&pk, item(HEADER, header.to_string(), row.ttl))
+            .unwrap();
+        assert!(b.add("old", &["b".into()]).is_err());
+        assert!(b.ack("old", "a", &ok()).unwrap().dispatched);
+    }
+
+    #[test]
+    fn sealing_and_the_last_ack_cannot_miss_each_other() {
+        for _ in 0..30 {
+            let (b, _, sent) = setup();
+            b.create(open_spec("grow", &["a"])).unwrap();
+            std::thread::scope(|scope| {
+                let ack = scope.spawn(|| b.ack("grow", "a", &ok()).map(|_| ()));
+                let seal = scope.spawn(|| b.seal("grow").map(|_| ()));
+                for result in [ack.join().unwrap(), seal.join().unwrap()] {
+                    if let Err(error) = result {
+                        assert!(error.contains("retry"), "{error}");
+                    }
+                }
+            });
+            assert_eq!(b.status("grow").unwrap()["complete"], true);
+            assert_eq!(sent.0.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn growable_membership_validates_limits_without_writes_and_works_without_a_queue() {
+        let (mut b, mem, _) = setup();
+        b.queue = None;
+        let mut spec = open_spec("grow", &[]);
+        spec.continue_with = None;
+        b.create(spec).unwrap();
+        let before = mem.0.lock().unwrap().clone();
+        for names in [
+            vec![],
+            vec!["a".into(), "a".into()],
+            vec!["x".repeat(201)],
+            (0..100).map(|i| i.to_string()).collect(),
+        ] {
+            assert!(b.add("grow", &names).is_err());
+            assert_eq!(*mem.0.lock().unwrap(), before);
+        }
+        let pk = b.db.barrier_pk("grow").unwrap();
+        let mut h = b.header(&pk).unwrap();
+        h.total = MAX_BARRIER_MEMBERS;
+        mem.put(
+            &pk,
+            item(HEADER, serde_json::to_string(&h).unwrap(), crate::NO_EXPIRY),
+        )
+        .unwrap();
+        assert!(b
+            .add("grow", &["new".into()])
+            .unwrap_err()
+            .contains("10000"));
+        assert!(!b.seal("grow").unwrap());
+        assert_eq!(b.status("grow").unwrap()["complete"], true);
     }
 
     #[test]

@@ -47,6 +47,19 @@ pub trait ItemBackend: Send + Sync {
     ) -> Result<bool, String> {
         Err("backend does not support atomic conditional replacement".into())
     }
+    /// Atomically replaces an exact live row and writes additional rows (at most 100 writes total).
+    /// No writes occur if the expected row changed. Required for barrier growth/sealing; never
+    /// emulate with separate writes or an expiring lock, which cannot fence a stalled writer.
+    fn transact_if_current(
+        &self,
+        _pk: &str,
+        _expected: &Item,
+        _replacement: Item,
+        _additional: Vec<(String, Item)>,
+        _now: u64,
+    ) -> Result<bool, String> {
+        Err("backend does not support atomic conditional transactions".into())
+    }
     /// Deletes the item only if its value is `value`; returns whether it deleted.
     fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String>;
     /// Atomically adds `delta` to the counter at `(pk, sk)` and returns the new value, creating it at

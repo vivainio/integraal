@@ -2241,6 +2241,28 @@ pub(crate) mod tests {
                 Ok(false)
             }
         }
+        fn transact_if_current(
+            &self,
+            pk: &str,
+            expected: &integraal_wrappers::Item,
+            replacement: integraal_wrappers::Item,
+            additional: Vec<(String, integraal_wrappers::Item)>,
+            now: u64,
+        ) -> Result<bool, String> {
+            let mut rows = self.0.lock().unwrap();
+            let key = (pk.to_string(), expected.sk.clone());
+            if rows
+                .get(&key)
+                .is_none_or(|row| row != expected || row.ttl <= now)
+            {
+                return Ok(false);
+            }
+            rows.insert(key, replacement);
+            for (pk, row) in additional {
+                rows.insert((pk, row.sk.clone()), row);
+            }
+            Ok(true)
+        }
         fn delete_if_value(&self, pk: &str, sk: &str, value: &str) -> Result<bool, String> {
             let mut m = self.0.lock().unwrap();
             let key = (pk.to_string(), sk.to_string());

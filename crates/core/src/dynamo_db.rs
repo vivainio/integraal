@@ -1,7 +1,8 @@
 use crate::sdk_err;
 use aws_sdk_dynamodb::{
     error::SdkError,
-    types::{AttributeValue, ReturnValue},
+    operation::transact_write_items::TransactWriteItemsError,
+    types::{AttributeValue, Put, ReturnValue, TransactWriteItem},
     Client,
 };
 use integraal_wrappers::{Item, ItemBackend};
@@ -206,6 +207,81 @@ impl ItemBackend for DynamoBackend {
                     Ok(false)
                 }
                 Err(e) => Err(sdk_err(&e)),
+            }
+        })
+    }
+
+    #[tracing::instrument(name = "dynamodb.transact_if_current", skip_all, fields(table = %self.table))]
+    fn transact_if_current(
+        &self,
+        pk: &str,
+        expected: &Item,
+        replacement: Item,
+        additional: Vec<(String, Item)>,
+        now: u64,
+    ) -> Result<bool, String> {
+        if expected.sk != replacement.sk || additional.len() >= 100 {
+            return Err("transaction must retain the sort key and have at most 100 writes".into());
+        }
+        let mut keys = std::collections::HashSet::from([(pk.to_string(), expected.sk.clone())]);
+        for (pk, row) in &additional {
+            if !keys.insert((pk.clone(), row.sk.clone())) {
+                return Err("transaction contains duplicate keys".into());
+            }
+        }
+        if expected.ttl <= now {
+            return Ok(false);
+        }
+        let mut conditional = Put::builder()
+            .table_name(&self.table)
+            .set_item(Some(item_attributes(pk, &replacement)))
+            .expression_attribute_names("#t", "ttl")
+            .expression_attribute_values(":v", s(&expected.value));
+        conditional = if expected.ttl == integraal_wrappers::NO_EXPIRY {
+            conditional.condition_expression("v = :v AND attribute_not_exists(#t)")
+        } else {
+            conditional
+                .condition_expression("v = :v AND #t = :expiry AND #t > :now")
+                .expression_attribute_values(":expiry", AttributeValue::N(expected.ttl.to_string()))
+                .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+        };
+        let mut writes = vec![TransactWriteItem::builder()
+            .put(conditional.build().map_err(|e| e.to_string())?)
+            .build()];
+        for (pk, row) in additional {
+            let put = Put::builder()
+                .table_name(&self.table)
+                .set_item(Some(item_attributes(&pk, &row)))
+                .build()
+                .map_err(|e| e.to_string())?;
+            writes.push(TransactWriteItem::builder().put(put).build());
+        }
+        self.handle.block_on(async {
+            let result = self
+                .client
+                .transact_write_items()
+                .set_transact_items(Some(writes))
+                .send()
+                .await;
+            match result {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    // Only a failed compare is a normal contention result; surface throttling,
+                    // transaction conflicts and validation failures for durable retry.
+                    if let Some(TransactWriteItemsError::TransactionCanceledException(cancelled)) =
+                        e.as_service_error()
+                    {
+                        if cancelled
+                            .cancellation_reasons()
+                            .first()
+                            .and_then(|r| r.code())
+                            == Some("ConditionalCheckFailed")
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    Err(sdk_err(&e))
+                }
             }
         })
     }

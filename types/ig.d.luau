@@ -333,19 +333,24 @@ declare extern type PatternsV1 with
         route: (event: { [string]: any }) -> { job: string, script: string?, event: { [string]: any } }?,
     }
     barrier: {
-        -- Registers the members to wait for (at most 10 000); returns the id (generated unless given).
-        create: (opts: { id: string?, members: { string }, continue_with: string?, state: any, deadline_s: number?, overdue_with: string? }) -> string,
-        -- Records a member's outcome (the first ack wins). `complete` once every member is resolved;
+        -- Registers members (at most 10 000); returns the id. Default sealed=true needs members.
+        -- sealed=false opens a growable list, with 0–99 initial members (members may be omitted).
+        create: (opts: { id: string?, members: { string }?, sealed: boolean?, continue_with: string?, state: any, deadline_s: number?, overdue_with: string? }) -> string,
+        -- Open lists only: atomically adds 1–99 members, returning the count of new names.
+        add: (id: string, members: { string }) -> number,
+        -- Closes the list; true only if this call dispatched the continuation. Safe to repeat.
+        seal: (id: string) -> boolean,
+        -- Records a member's outcome (the first ack wins). `complete` once sealed and all resolved;
         -- `dispatched` when this call sent the continuation.
         ack: (id: string, member: string, outcome: { ok: boolean?, error: string?, result: any }?) -> { duplicate: boolean, complete: boolean, dispatched: boolean },
-        -- Retries dispatch for a complete barrier; true only if this call sent. Active lease raises.
+        -- Retries dispatch for a complete, sealed barrier; true only if this call sent. Active lease raises.
         resume: (id: string) -> boolean,
         -- Checks a page of pending members; nil leaves a member pending. Errors propagate.
         -- Default limit 10, maximum 100. Continue with next_after; nil ends this pass.
         reconcile: (id: string, check: (member: string) -> { ok: boolean?, error: string?, result: any }?, opts: { after: string?, limit: number? }?) -> { checked: number, acknowledged: number, next_after: string?, complete: boolean, dispatched: boolean },
         -- Up to `limit` (default and maximum 100) members still waiting, in name order.
         pending: (id: string, limit: number?) -> { string },
-        status: (id: string) -> { id: string, total: number, ready: boolean, complete: boolean, dispatched: boolean, overdue: boolean, due_s: number? },
+        status: (id: string) -> { id: string, total: number, ready: boolean, sealed: boolean, complete: boolean, dispatched: boolean, overdue: boolean, due_s: number? },
         -- In the continuation: nil if the barrier is not complete or has expired.
         hydrate: (event: { [string]: any }) -> BarrierResult?,
     }

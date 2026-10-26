@@ -6,8 +6,8 @@ every item has an outcome. [Scatter and gather](patterns.md#scatter-and-gather) 
 to coordinate the gather; the barrier itself does not dispatch the work.
 
 A barrier is a **work list**: a set of member names, usually object keys, and one outcome per
-member. Nothing waits and nothing polls. Each ack is an ordinary event that reaches a script; the
-script records it, and the call that resolves the last member sends the continuation.
+member. A growable list stays open until explicitly sealed. Nothing waits and nothing polls. Each ack is an ordinary event that reaches a script; the
+script records it, and the call that resolves the last member of a sealed list sends the continuation.
 
 ```mermaid
 sequenceDiagram
@@ -55,12 +55,14 @@ end
 
 | Function | |
 | --- | --- |
-| `create(opts)` | registers the members and returns the id. `members` is required, at most 10 000, each at most 200 bytes, no duplicates. `id` is generated when absent. `continue_with` needs [`ig.queue`](queue.md) (`"queue": true`). `state` is any JSON, at most 32 KB. Calling it again with the id of a barrier that is already complete does nothing; with the id of one cut short by a crash it finishes the job |
-| `ack(id, member, outcome?)` | records the outcome, retires the member and, if none are left, sends the continuation. Returns `{ duplicate, complete, dispatched }` |
-| `resume(id)` | retries continuation dispatch without an ack payload. Returns `true` if this call sent; `false` if members are pending, dispatch is already marked sent, or no queue is configured. A live dispatch lease raises the same retryable error as `ack`. Unknown, expired or incompletely created barriers raise |
+| `create(opts)` | registers the members and returns the id. `sealed` defaults to `true`: `members` is required, at most 10 000, each at most 200 bytes, no duplicates. With `sealed = false`, creates an open list with 0–99 initial members (`members` may be omitted). `id` is generated when absent. `continue_with` needs [`ig.queue`](queue.md) (`"queue": true`). `state` is any JSON, at most 32 KB. Calling it again with the id of a barrier that is already complete does nothing; with the id of one cut short by a crash it finishes the job |
+| `add(id, members)` | atomically adds 1–99 names to an open list; returns the number of new members. Existing pending or resolved names count as duplicates and are unchanged. Additions after sealing raise |
+| `seal(id)` | closes the list and attempts continuation dispatch if nothing is pending; returns `true` only if this call sent. Safe to repeat; concurrent changes and live dispatch leases raise retryable errors |
+| `ack(id, member, outcome?)` | records the outcome, retires the member and, if none are left and the list is sealed, sends the continuation. Returns `{ duplicate, complete, dispatched }` |
+| `resume(id)` | retries continuation dispatch without an ack payload. Returns `true` if this call sent; `false` if the list is open, members are pending, dispatch is already marked sent, or no queue is configured. A live dispatch lease raises the same retryable error as `ack`. Unknown, expired or incompletely created barriers raise |
 | `reconcile(id, check, opts?)` | checks a page of pending members against durable results and acknowledges those whose checker returns an outcome. See [Reconciliation](#reconciliation) |
 | `pending(id, limit?)` | the members still waiting, in name order (at most 100 per call) |
-| `status(id)` | `{ id, total, ready, complete, dispatched, overdue, due_s }` |
+| `status(id)` | `{ id, total, ready, sealed, complete, dispatched, overdue, due_s }` |
 | `hydrate(event)` | in the continuation: the barrier named by `event.barrier`, or `nil` |
 
 `BarrierResult` from `hydrate`:
@@ -70,6 +72,50 @@ end
 | `id`, `total`, `state` | the barrier id, the number of members, the value passed to `create` |
 | `results()` | iterator of `member, outcome` over every member, in name order. Pages through the table 100 at a time, so it works for lists far larger than one value |
 | `failures()` | array of `{ member, error, result }` for the members whose outcome is `ok = false` |
+
+### Growing a work list
+
+Create an open barrier when the complete work list cannot fit in one invocation's data-operation
+budget. Keep its id and enumeration progress in a durable source, add a chunk, then dispatch only
+that chunk's work after `add` succeeds. Acknowledgements can arrive while more members are being
+added. Completion and continuation dispatch wait until `seal` has closed the list.
+
+```lua
+local igp = require("@native/patterns@1")
+igp.barrier.create({ id = batch, sealed = false, continue_with = "finalize" })
+-- Across durable invocations, using chunks that fit the data-operation budget:
+local added = igp.barrier.add(batch, { "a.xml", "b.xml" })
+-- Dispatch these members' work after registration succeeds.
+-- Once all chunks are registered:
+igp.barrier.seal(batch)
+```
+
+`add` compares the header and writes the new pending rows in one conditional transaction. An
+interrupted call commits all of its new members and the total, or none. Retrying a committed
+addition returns zero for existing names, including members already acknowledged; it cannot
+resurrect them. Duplicate names within one call raise. A barrier holds at most 10 000 unique members
+across all chunks. `add` accepts at most 99 names because the transaction also writes the header.
+Initial members of an open barrier use the same atomic registration and 99-member limit.
+
+`seal` closes the list atomically against concurrent additions. If an addition wins, sealing must
+retry and includes those members. If sealing wins, additions raise, including duplicate-only calls.
+Wait for every intended producer/addition to succeed before sealing. A retried producer should
+check `status().sealed` before deciding whether to skip an already completed enumeration step;
+it must not silently drop new members after sealing. Adding after a successful seal is always an
+error. Repeating `create` for a ready barrier leaves its sealed state unchanged.
+
+A sealed empty list is complete and can dispatch immediately. An open list is never complete,
+even with no pending members: `status`, `ack`, `reconcile`, `resume` and `hydrate` follow that rule.
+`ready` means creation finished, while `sealed` means membership is final. `total` includes all
+registered members, pending or acknowledged. Deadlines start at creation and may report an open
+list overdue; sealing does not extend them.
+
+Sealing records a dispatch-recovery entry in the same transaction, so a crash after closing an
+already-resolved list is repaired by the minute sweep. Contention, budget exhaustion and backend
+errors propagate; retry from durable input. Calls share the usual invocation budget. `add` charges
+one header read, one or two membership reads per name, and one write per new member plus the
+header; reserve enough budget for these before choosing a chunk size. It precharges the writes
+before committing. Smaller chunks may be necessary even though the API permits 99 names.
 
 ### Outcomes
 
@@ -154,7 +200,7 @@ page. The report is `{ checked, acknowledged, next_after, complete, dispatched }
 - `next_after` advances past the page even if some members are unfinished, so they cannot starve
   later members. It is absent at the end; an exactly full last page may need an extra empty call.
   Restart without a cursor on a later pass to revisit unfinished members.
-- `complete` means no members remain pending. `dispatched` means this call sent the continuation.
+- `complete` means the list is sealed and no members remain pending. `dispatched` means this call sent the continuation.
   A complete barrier also retries interrupted dispatch, like `resume`.
 
 Reconciliation uses ordinary `ack` semantics: first outcome wins, including when a notification
@@ -296,7 +342,10 @@ leases still expire after 60 seconds. Existing barriers retain their stored expi
 Needs the `db` section of the [global config](deployment.md#configuration), and for `continue_with`
 the tenant's `"queue": true` and a `queue.url`. Automatic recovery additionally needs the shared
 [minute tick](schedules.md#operator-ticks) handled by Fargate or the runtime Lambda. The sweep uses
-the same table actions as [`ig.db`](dynamodb.md), including `Query`.
+the same table actions as [`ig.db`](dynamodb.md), including `Query`. Growable creation, `add`,
+and `seal` use DynamoDB transactions with conditional `Put` actions, requiring `dynamodb:PutItem`
+on the table. Custom item backends must implement atomic conditional transactions; separate
+writes or expiring locks cannot safely substitute for them.
 
 Without a queue, a barrier still works as a plain work list: `ack` tells you when `complete`, and
 you act on it yourself. More than one caller can see `complete = true`, so make the resulting

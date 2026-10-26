@@ -16,10 +16,9 @@ deletes are implemented; the rest of the pipeline is not.
 ## Barriers
 [Automatic continuation recovery](barrier.md#recovery-sweep) is implemented: interrupted indexed
 acks and dispatches are recovered by the bounded minute sweep. Explicit
-[reconciliation](barrier.md#reconciliation) checks durable results for lost notifications. Remaining work:
+[reconciliation](barrier.md#reconciliation) checks durable results for lost notifications.
+[Growable barriers](barrier.md#growing-a-work-list) support chunked `add` and explicit `seal`. Remaining work:
 
-- Growing a barrier after `create` (`add` and a `seal`), for work lists larger than one invocation's
-  `max_data_ops`.
 - Quorum and first-success gathers: continue after enough successful responses, with explicit
   handling of late results and remaining work.
 
