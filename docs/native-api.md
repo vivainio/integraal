@@ -46,7 +46,7 @@ assert(igp.version == 1)
 ```
 
 Core includes queue delivery, task reporting, NDJSON, and other I/O and data utilities.
-Patterns include retries, claims, locks, callbacks, barriers, and batch jobs. They share the invocation's
+Patterns include [durable workflows](workflows.md), retries, claims, locks, callbacks, barriers, and batch jobs. They share the invocation's
 budgets and deadlines with core. Neither `native` nor `igp` is a global. Repeated imports return the same pattern table within
 one invocation; each invocation gets fresh state. Built-in imports do not fetch tenant or shared
 modules from storage.

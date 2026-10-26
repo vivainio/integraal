@@ -186,6 +186,7 @@ pub struct Placement {
 
 /// A fully resolved unit of work: which script runs, with which event.
 struct Call {
+    version: Option<String>,
     tenant: String,
     script: String,
     trigger: Trigger,
@@ -710,6 +711,7 @@ impl Engine {
                 let key = ScriptKey::new(&inv.tenant, &script, inv.version.as_deref())?;
                 let source = self.loader.load(&key).await?;
                 let call = Call {
+                    version: inv.version.clone(),
                     tenant: inv.tenant,
                     script,
                     trigger: inv.trigger,
@@ -1110,12 +1112,32 @@ fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Va
     }
     let module: Table = chunk.call(()).map_err(|e| vm.fail(e))?;
 
-    let handler: Function = call
-        .trigger
-        .handlers()
-        .iter()
-        .find_map(|name| module.get::<Option<Function>>(*name).ok().flatten())
-        .ok_or(Error::NoHandler(call.trigger, call.trigger.handlers()))?;
+    let is_sequence = call.trigger == Trigger::Queue
+        && matches!(
+            call.event.get("type").and_then(serde_json::Value::as_str),
+            Some("sequence.start" | "sequence.resume" | "sequence.signal")
+        );
+    let handler: Function = if is_sequence {
+        let workflow: Function = module.get("workflow").map_err(|e| vm.fail(e))?;
+        let driver: Function = lua
+            .named_registry_value("integraal.sequence.driver")
+            .map_err(internal)?;
+        let script = call.script.clone();
+        let version = call
+            .version
+            .clone()
+            .ok_or_else(|| Error::Script("sequence requires an explicit script version".into()))?;
+        lua.create_function(move |_, (_ctx, event): (Table, mlua::Value)| {
+            driver.call::<mlua::Value>((workflow.clone(), script.clone(), version.clone(), event))
+        })
+        .map_err(internal)?
+    } else {
+        call.trigger
+            .handlers()
+            .iter()
+            .find_map(|name| module.get::<Option<Function>>(*name).ok().flatten())
+            .ok_or(Error::NoHandler(call.trigger, call.trigger.handlers()))?
+    };
 
     let ctx = lua.create_table().map_err(internal)?;
     ctx.set("tenant", call.tenant.as_str()).map_err(internal)?;
@@ -1145,7 +1167,7 @@ fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Va
     let result: serde_json::Value = lua
         .from_value(out)
         .map_err(|e| vm.bad_result(format!("handler result is not JSON-serializable: {e}")))?;
-    if call.trigger == Trigger::Queue {
+    if call.trigger == Trigger::Queue && !is_sequence {
         apply_deletes(&result, &call.event, &vm.stores, vm.batch.as_ref())?;
     }
     Ok(result)
@@ -1244,6 +1266,7 @@ fn run_routed(
         config,
     )?;
     let route_call = Call {
+        version: None,
         tenant: inv.tenant.clone(),
         script: router,
         trigger: Trigger::Route,
@@ -1278,6 +1301,7 @@ fn run_routed(
     let key = ScriptKey::new(&inv.tenant, &script, version.as_deref())?;
     let target = handle.block_on(loader.load(&key))?;
     let call = Call {
+        version,
         tenant: inv.tenant.clone(),
         script,
         trigger: inv.trigger,
@@ -1352,6 +1376,382 @@ pub(crate) mod tests {
             attempt: 0,
             continues_trace: false,
         }
+    }
+
+    fn sequence_world(source: &str, enabled: bool) -> (Engine, Arc<MemItems>, Arc<MemQueue>) {
+        let store = Arc::new(MemoryStore::default());
+        store.put(&ScriptKey::new("acme", "flow", Some("v1")).unwrap(), source);
+        store.put(&ScriptKey::new("acme", "flow", None).unwrap(), source);
+        store.put(&ScriptKey::new("acme", "starter", None).unwrap(), r#"
+            local p = require("@native/patterns@1")
+            return { handle = function(_, ev)
+                if ev.signal then return p.sequence.signal(ev.id, ev.signal, ev.value) end
+                return p.sequence.start(ev.id, {script="flow", version=ev.version or "v1", input=ev.input})
+            end }
+        "#);
+        store.put(
+            &ScriptKey::new("acme", "router", None).unwrap(),
+            "return { on_route = function() error('workflow must bypass router') end }",
+        );
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            if enabled {
+                r#"{"queue":true,"router":"router"}"#
+            } else {
+                r#"{"router":"router"}"#
+            },
+        );
+        let items = Arc::new(MemItems::default());
+        let queue = Arc::new(MemQueue::default());
+        let e = Engine::new(
+            Arc::new(CachedLoader::new(Shared(store), Duration::from_secs(60))),
+            Limits::default(),
+        )
+        .with_db(items.clone())
+        .with_queue(queue.clone());
+        (e, items, queue)
+    }
+    async fn sequence_api(
+        e: &Engine,
+        event: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        e.invoke(Invocation {
+            script: Some("starter".into()),
+            ..inv(Trigger::Invoke, event)
+        })
+        .await
+    }
+    async fn sequence_event(
+        e: &Engine,
+        event: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        e.invoke(Invocation {
+            script: Some("flow".into()),
+            version: Some("v1".into()),
+            ..inv(Trigger::Queue, event)
+        })
+        .await
+    }
+    fn sequence_pending(items: &MemItems, queue: &MemQueue) -> Vec<serde_json::Value> {
+        integraal_wrappers::sweep_outbox(
+            items,
+            queue,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            100,
+        )
+        .unwrap();
+        std::mem::take(&mut *queue.0.lock().unwrap())
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect()
+    }
+    async fn sequence_deliver(
+        e: &Engine,
+        envelope: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        let mut invocation: Invocation = serde_json::from_value(envelope).unwrap();
+        invocation.trigger = Trigger::Queue;
+        e.invoke(invocation).await
+    }
+
+    #[tokio::test]
+    async fn sequence_launch_replay_signal_and_duplicates_use_the_pinned_workflow() {
+        let (e, items, queue) = sequence_world(
+            r#"
+            return { workflow = function(seq, input)
+                local loaded = seq:step("load", function()
+                    ig.db.add("effects")
+                    return {order=input.order, key=seq:key("load")}
+                end)
+                local result = seq:wait("approved")
+                return {order=loaded.order, approved=result.ok, key=loaded.key}
+            end }
+        "#,
+            true,
+        );
+        let launch = json!({"id":"order/42", "input":{"order":42}});
+        assert_eq!(sequence_api(&e, launch.clone()).await.unwrap(), json!(true));
+        assert_eq!(sequence_api(&e, launch).await.unwrap(), json!(false));
+        assert!(
+            sequence_api(&e, json!({"id":"order/42","input":{"order":43}}))
+                .await
+                .is_err()
+        );
+        let starts = sequence_pending(&items, &queue);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0]["script"], "flow");
+        assert_eq!(starts[0]["version"], "v1");
+        assert_eq!(
+            sequence_deliver(&e, starts[0].clone()).await.unwrap(),
+            json!({"state":"suspended"})
+        );
+        assert_eq!(
+            sequence_deliver(&e, starts[0].clone()).await.unwrap(),
+            json!({"state":"suspended"})
+        );
+        assert_eq!(
+            items.get("TEN#acme#effects", "").unwrap().unwrap().value,
+            "1"
+        );
+        sequence_api(
+            &e,
+            json!({"id":"order/42","signal":"approved","value":{"ok":true}}),
+        )
+        .await
+        .unwrap();
+        let signals = sequence_pending(&items, &queue);
+        assert_eq!(signals.len(), 1);
+        let done = sequence_deliver(&e, signals[0].clone()).await.unwrap();
+        assert_eq!(done["state"], "complete");
+        assert_eq!(done["result"]["order"], 42);
+        assert_eq!(done["result"]["approved"], true);
+        assert!(done["result"]["key"]
+            .as_str()
+            .unwrap()
+            .starts_with("sequence/"));
+        assert_eq!(
+            sequence_deliver(&e, signals[0].clone()).await.unwrap(),
+            done
+        );
+        assert_eq!(sequence_deliver(&e, starts[0].clone()).await.unwrap(), done);
+        assert_eq!(
+            items.get("TEN#acme#effects", "").unwrap().unwrap().value,
+            "1"
+        );
+        assert!(sequence_api(
+            &e,
+            json!({"id":"order/42","signal":"approved","value":{"ok":false}})
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn sequence_barrier_example_gathers_in_the_same_workflow_file() {
+        let source = include_str!("../../../examples/acme/order-workflow/v1.luau")
+            .replace("order-workflow", "flow");
+        let (e, items, queue) = sequence_world(&source, true);
+        sequence_api(&e, json!({"id":"gather","input":{"items":["a","b","c"]}}))
+            .await
+            .unwrap();
+        let mut pending = sequence_pending(&items, &queue);
+        let mut completed = None;
+        for _ in 0..10 {
+            if pending.is_empty() {
+                break;
+            }
+            for envelope in pending {
+                let result = sequence_deliver(&e, envelope).await.unwrap();
+                if result["state"] == "complete" {
+                    completed = Some(result["result"].clone());
+                }
+            }
+            pending = sequence_pending(&items, &queue);
+        }
+        let results = completed.expect("barrier must resume its workflow");
+        assert_eq!(results["a"]["result"], "A");
+        assert_eq!(results["b"]["result"], "B");
+        assert_eq!(results["c"]["result"], "C");
+    }
+
+    #[tokio::test]
+    async fn sequence_failure_retries_only_unfinished_steps() {
+        let (e, items, _) = sequence_world(
+            r#"
+            return { workflow = function(seq)
+                local first = seq:step("first", function() return ig.db.add("first") end)
+                local second = seq:step("second", function()
+                    local attempt = ig.db.add("second")
+                    if attempt == 1 then error("transient failure") end
+                    return attempt
+                end)
+                return {first=first, second=second}
+            end }
+        "#,
+            true,
+        );
+        let start = json!({"type":"sequence.start","id":"retry","input":null});
+        assert!(sequence_event(&e, start.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("transient failure"));
+        assert_eq!(
+            sequence_event(&e, start).await.unwrap(),
+            json!({"state":"complete","result":{"first":1,"second":2}})
+        );
+        assert_eq!(items.get("TEN#acme#first", "").unwrap().unwrap().value, "1");
+    }
+
+    #[tokio::test]
+    async fn sequence_sleep_reuses_its_due_time_and_timer_resumes_it() {
+        let (e, items, queue) = sequence_world(
+            r#"
+            return { workflow = function(seq)
+                seq:step("once", function() ig.db.add("once") end)
+                seq:sleep("nap", 1)
+                return "awake"
+            end }
+        "#,
+            true,
+        );
+        let start = json!({"type":"sequence.start","id":"sleep","input":null});
+        assert_eq!(
+            sequence_event(&e, start.clone()).await.unwrap(),
+            json!({"state":"suspended"})
+        );
+        let timers = items.query("SYS#timer", "", "", 100).unwrap();
+        assert_eq!(timers.len(), 1);
+        assert_eq!(
+            sequence_event(&e, start).await.unwrap(),
+            json!({"state":"suspended"})
+        );
+        let repeated = items.query("SYS#timer", "", "", 100).unwrap();
+        assert_eq!(repeated.len(), 1);
+        assert_eq!(repeated[0].sk, timers[0].sk);
+        assert_eq!(repeated[0].ttl, timers[0].ttl);
+        let original: serde_json::Value = serde_json::from_str(&timers[0].value).unwrap();
+        let replayed: serde_json::Value = serde_json::from_str(&repeated[0].value).unwrap();
+        assert_eq!(original["event"], replayed["event"]);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(
+            integraal_wrappers::sweep_timers(&*items, &*queue, now, 100)
+                .unwrap()
+                .fired,
+            1
+        );
+        let wake = std::mem::take(&mut *queue.0.lock().unwrap())
+            .pop()
+            .unwrap()
+            .0;
+        assert_eq!(
+            sequence_deliver(&e, wake).await.unwrap(),
+            json!({"state":"complete","result":"awake"})
+        );
+        assert_eq!(items.get("TEN#acme#once", "").unwrap().unwrap().value, "1");
+    }
+
+    #[tokio::test]
+    async fn sequence_long_loop_yields_and_replays_without_repeating_effects() {
+        let (e, items, queue) = sequence_world(
+            r#"
+            return { workflow = function(seq)
+                local sum = 0
+                for i=1,60 do
+                    sum += seq:step("item/" .. i, function() ig.db.add("count"); return i end)
+                end
+                seq:yield("finish-later")
+                return sum
+            end }
+        "#,
+            true,
+        );
+        let mut result = sequence_event(
+            &e,
+            json!({"type":"sequence.start","id":"long","input":null}),
+        )
+        .await
+        .unwrap();
+        let mut resumes = 0;
+        while result["state"] == "suspended" {
+            assert!(resumes < 5, "workflow should make forward progress");
+            let pending = sequence_pending(&items, &queue);
+            assert_eq!(pending.len(), 1);
+            result = sequence_deliver(&e, pending[0].clone()).await.unwrap();
+            resumes += 1;
+        }
+        assert_eq!(resumes, 3);
+        assert_eq!(result, json!({"state":"complete","result":1830}));
+        assert_eq!(
+            items.get("TEN#acme#count", "").unwrap().unwrap().value,
+            "60"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequence_requires_opt_in_and_a_version_and_preserves_ordinary_queue_handlers() {
+        let (off, _, _) = sequence_world("return {workflow=function() end}", false);
+        assert!(sequence_api(&off, json!({"id":"x","input":{}}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("queue"));
+        assert!(
+            sequence_event(&off, json!({"type":"sequence.start","id":"x","input":{}}))
+                .await
+                .is_err()
+        );
+        let (e, _, _) = sequence_world(
+            r#"
+            return {workflow=function() return 1 end, on_queue=function(_, ev) return ev end}
+        "#,
+            true,
+        );
+        assert!(
+            sequence_api(&e, json!({"id":"x","version":"latest","input":{}}))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sequence_event(&e, json!({"type":"ordinary","hello":true}))
+                .await
+                .unwrap(),
+            json!({"type":"ordinary","hello":true})
+        );
+    }
+
+    #[tokio::test]
+    async fn sequence_rejects_conflicting_runs_and_nested_or_duplicate_steps() {
+        let (e, _, _) = sequence_world(
+            r#"
+            return {workflow=function(seq, input)
+                seq:step("one", function()
+                    if input.nested then seq:step("nested", function() end) end
+                    return 1
+                end)
+                if input.duplicate then seq:step("one", function() end) end
+                return seq:wait("done")
+            end}
+        "#,
+            true,
+        );
+        assert!(sequence_event(
+            &e,
+            json!({"type":"sequence.start","id":"nested","input":{"nested":true}})
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("nested"));
+        assert!(sequence_event(
+            &e,
+            json!({"type":"sequence.start","id":"dup","input":{"duplicate":true}})
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate"));
+        sequence_event(&e, json!({"type":"sequence.start","id":"same","input":{}}))
+            .await
+            .unwrap();
+        assert!(sequence_event(
+            &e,
+            json!({"type":"sequence.start","id":"same","input":{"changed":true}})
+        )
+        .await
+        .is_err());
+        assert!(
+            sequence_event(&e, json!({"type":"sequence.resume","id":"missing"}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1515,6 +1915,7 @@ pub(crate) mod tests {
             ..Services::bare()
         };
         let call = Call {
+            version: None,
             tenant: "acme".into(),
             script: "s".into(),
             trigger: Trigger::Invoke,

@@ -33,6 +33,13 @@ return { on_queue = on_queue, handle = handle }
 
 If none exists the invocation fails with a *no handler* error.
 
+## Workflow entrypoint
+
+A script can also export `workflow(seq: WorkflowSequence, input)`. Durable sequence starts and
+resumes call this entrypoint directly, rebuilding local state from saved step results. Launch with
+`igp.sequence.start(id, { script = "...", version = "v1", input = ... })`; workflows need no
+`on_queue` wrapper. Ordinary events still use the handlers above. See [Durable workflows](workflows.md).
+
 ## Arguments
 
 `handler(ctx, event)`:

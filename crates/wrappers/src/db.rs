@@ -201,6 +201,14 @@ impl DbScope {
 }
 
 impl DbScope {
+    pub(crate) fn sequence_pk(&self, id: &str) -> Result<String, String> {
+        check("sequence id", id, false)?;
+        if id.len() > 200 {
+            return Err("sequence id exceeds 200 bytes".into());
+        }
+        Ok(format!("TEN#{}#\u{1}sequence#{}", self.tenant, id))
+    }
+
     /// Consumer claims cannot be addressed through the script-facing database API.
     pub(crate) fn claim_pk(&self, id: &str) -> Result<String, String> {
         check("claim id", id, false)?;

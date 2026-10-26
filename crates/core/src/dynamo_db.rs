@@ -187,18 +187,28 @@ impl ItemBackend for DynamoBackend {
             return Err("conditional replacement must retain the sort key".into());
         }
         self.handle.block_on(async {
-            let result = self
+            if expected.ttl <= now {
+                return Ok(false);
+            }
+            let request = self
                 .client
                 .put_item()
                 .table_name(&self.table)
                 .set_item(Some(item_attributes(pk, &replacement)))
-                .condition_expression("v = :v AND #t = :expiry AND #t > :now")
                 .expression_attribute_names("#t", "ttl")
-                .expression_attribute_values(":v", s(&expected.value))
-                .expression_attribute_values(":expiry", AttributeValue::N(expected.ttl.to_string()))
-                .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
-                .send()
-                .await;
+                .expression_attribute_values(":v", s(&expected.value));
+            let request = if expected.ttl == integraal_wrappers::NO_EXPIRY {
+                request.condition_expression("v = :v AND attribute_not_exists(#t)")
+            } else {
+                request
+                    .condition_expression("v = :v AND #t = :expiry AND #t > :now")
+                    .expression_attribute_values(
+                        ":expiry",
+                        AttributeValue::N(expected.ttl.to_string()),
+                    )
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+            };
+            let result = request.send().await;
             match result {
                 Ok(_) => Ok(true),
                 Err(SdkError::ServiceError(e))

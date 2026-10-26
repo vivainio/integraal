@@ -207,7 +207,7 @@ declare ig: {
         at: (id: string, due_s: number, message: { script: string?, version: string?, event: any }) -> number,
         after: (id: string, delay_s: number, message: { script: string?, version: string?, event: any }) -> number,
         cancel: (id: string, due_s: number) -> (),
-    }
+    },
     queue: {
         -- Persist a stable-id handoff for the minute sweep; false for an identical existing intent.
         handoff: (id: string, message: { script: string?, version: string?, event: any }) -> boolean,
@@ -314,9 +314,25 @@ declare D: ((v: any) -> Decimal) & {
 	from_float: (f: number) -> Decimal,
 }
 
+-- A replayed workflow receives this instead of a transport Context.
+declare extern type WorkflowSequence with
+    id: string
+    key: (self: WorkflowSequence, name: string) -> string
+    step: <T>(self: WorkflowSequence, name: string, run: () -> T) -> T
+    sleep: (self: WorkflowSequence, name: string, delay_s: number) -> ()
+    wait: (self: WorkflowSequence, name: string) -> any
+    yield: (self: WorkflowSequence, name: string) -> ()
+end
+
 -- Opinionated coordination patterns. Versioned independently from the core API.
 declare extern type PatternsV1 with
     version: number
+    sequence: {
+        -- Durable launch; false means an identical launch was already recorded.
+        start: (id: string, opts: { script: string, version: string, input: any }) -> boolean,
+        -- First value for this named signal wins; conflicting values raise.
+        signal: (id: string, name: string, value: any) -> boolean,
+    }
     retry: {
         schedule: (id: string, message: { script: string, version: string?, event: any }, opts: { attempt: number, max_attempts: number?, base_delay_s: number?, max_delay_s: number?, jitter: boolean?, retry_after_s: number? }) -> { state: "scheduled", attempt: number, due_s: number } | { state: "exhausted" },
     }

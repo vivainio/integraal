@@ -43,7 +43,12 @@ fn same_message(a: &Payload, b: &Payload) -> Result<(), String> {
     }
     Ok(())
 }
-fn record(db: &dyn ItemBackend, tenant: &str, id: &str, payload: Payload) -> Result<bool, String> {
+pub(crate) fn record(
+    db: &dyn ItemBackend,
+    tenant: &str,
+    id: &str,
+    payload: Payload,
+) -> Result<bool, String> {
     let sk = key(tenant, id)?;
     for value in [&payload.script, &payload.version].into_iter().flatten() {
         if !valid_name(value) {

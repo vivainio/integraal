@@ -25,6 +25,13 @@ sequenceDiagram
     F->>B: hydrate, read outcomes
 ```
 
+## Gather in a workflow
+
+A [durable workflow](workflows.md#signals-callbacks-jobs-and-barriers) can create and dispatch a
+barrier in a step, wait for a named signal, and gather results in its next step. Keep the barrier
+completion adapter alongside the workflow in the same script; it calls `igp.sequence.signal`
+instead of forwarding to a separate finalizer file.
+
 ## Script API
 
 ```lua

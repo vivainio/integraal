@@ -15,6 +15,7 @@ mod barrier;
 mod claim;
 mod outbox;
 mod retry;
+mod sequence;
 pub use db::NO_EXPIRY;
 pub use outbox::sweep as sweep_outbox;
 mod batch;

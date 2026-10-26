@@ -22,6 +22,7 @@ return { handle = handle }
   - coordination: locks, deadlines, barriers, queue sends, signed callback URLs
   - batch jobs through a partner bucket
   - allow-listed HTTP, streaming XML / zip / gzip, crypto
+- **Durable workflows:** replay a `workflow(seq, input)` across invocations, skipping saved steps and waiting for signals, timers, or barrier completion.
 - **Typed:** `--!strict` scripts checked against `types/ig.d.luau`.
 
 ## Documentation

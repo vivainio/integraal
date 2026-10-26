@@ -50,6 +50,12 @@ return { on_route = on_route }
 - A router cannot route to another router. With no `router` configured, a message that names no
   script fails with a *no route* error (queue: retried, then dead-lettered).
 
+## Workflow resumes
+
+[Durable workflow](workflows.md) starts and resumes name the saved script and explicit version,
+so they bypass the router and call the target's `workflow` entrypoint. Ordinary incoming events can
+still go through the router to a handler that starts a workflow or signals a waiting one.
+
 ## What gets routed
 - Any envelope without a `script`: queue messages, `POST /v1/{tenant}` over HTTP, direct invokes.
 - [S3 notifications](triggers.md#s3-notifications), which never name a script.
