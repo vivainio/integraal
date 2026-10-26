@@ -2757,6 +2757,60 @@ return { handle = function(ctx, ev)
     }
 
     #[tokio::test]
+    async fn barrier_reconcile_reads_durable_objects_after_lost_notifications() {
+        let src = r#"local igp = require("@native/patterns@1")
+return { handle = function(ctx, ev)
+    if ev.create then
+        igp.barrier.create({ id = "recover", members = {"a", "b"}, continue_with = "finalize" })
+        ig.store.Out.put("recover/b", '{"ok":true,"result":"done"}')
+        return
+    end
+    if ev.finish then ig.store.Out.put("recover/a", '{"ok":false,"error":"rejected"}') end
+    local r = igp.barrier.reconcile("recover", function(member)
+        if ev.bad then return false end
+        if ev.fail then error("probe failed") end
+        local body = ig.store.Out.get("recover/" .. member)
+        if body then return ig.json.decode(body) end
+    end, { limit = 1, after = ev.after })
+    if r.checked == 0 then assert(r.next_after == nil) end
+    return r
+end }"#;
+        let queue = Arc::new(MemQueue::default());
+        let e = engine_cfg(
+            src,
+            Limits::default(),
+            r#"{"queue":true,"stores":{"Out":"readwrite"}}"#,
+        )
+        .with_db(Arc::new(MemItems::default()))
+        .with_queue(queue.clone())
+        .with_store("Out", Arc::new(MemBackend::default()), "data/");
+        e.invoke(inv(Trigger::Queue, json!({"create":true})))
+            .await
+            .unwrap();
+        for event in [json!({"bad":true}), json!({"fail":true})] {
+            assert!(e.invoke(inv(Trigger::Queue, event)).await.is_err());
+        }
+        let first = e.invoke(inv(Trigger::Queue, json!({}))).await.unwrap();
+        assert_eq!(first["acknowledged"], 0);
+        assert_eq!(first["next_after"], "a");
+        let second = e
+            .invoke(inv(Trigger::Queue, json!({"after":"a"})))
+            .await
+            .unwrap();
+        assert_eq!(second["acknowledged"], 1);
+        assert_eq!(second["complete"], false);
+        let done = e
+            .invoke(inv(Trigger::Queue, json!({"finish":true})))
+            .await
+            .unwrap();
+        assert_eq!(done["complete"], true);
+        assert_eq!(done["dispatched"], true);
+        let repeated = e.invoke(inv(Trigger::Queue, json!({}))).await.unwrap();
+        assert_eq!(repeated["checked"], 0);
+        assert_eq!(queue.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn retry_pattern_schedules_versioned_work_and_exhausts_without_sending() {
         let src = r#"local igp = require("@native/patterns@1")
 return { handle = function(ctx, ev)

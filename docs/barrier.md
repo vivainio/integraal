@@ -58,6 +58,7 @@ end
 | `create(opts)` | registers the members and returns the id. `members` is required, at most 10 000, each at most 200 bytes, no duplicates. `id` is generated when absent. `continue_with` needs [`ig.queue`](queue.md) (`"queue": true`). `state` is any JSON, at most 32 KB. Calling it again with the id of a barrier that is already complete does nothing; with the id of one cut short by a crash it finishes the job |
 | `ack(id, member, outcome?)` | records the outcome, retires the member and, if none are left, sends the continuation. Returns `{ duplicate, complete, dispatched }` |
 | `resume(id)` | retries continuation dispatch without an ack payload. Returns `true` if this call sent; `false` if members are pending, dispatch is already marked sent, or no queue is configured. A live dispatch lease raises the same retryable error as `ack`. Unknown, expired or incompletely created barriers raise |
+| `reconcile(id, check, opts?)` | checks a page of pending members against durable results and acknowledges those whose checker returns an outcome. See [Reconciliation](#reconciliation) |
 | `pending(id, limit?)` | the members still waiting, in name order (at most 100 per call) |
 | `status(id)` | `{ id, total, ready, complete, dispatched, overdue, due_s }` |
 | `hydrate(event)` | in the continuation: the barrier named by `event.barrier`, or `nil` |
@@ -116,6 +117,53 @@ end
 Two batches that both contain `invoice.xml` do not collide, because the barrier id is part of the
 address. If the partner can echo back nothing but the document key, store a `member -> batch` row in
 [`ig.db`](dynamodb.md) when you send and look it up in the ack script.
+
+## Reconciliation
+
+Use reconciliation when a result was written but its notification never arrived. Call it from a
+scheduled tenant script, an overdue handler, or an operator-triggered recovery script for a known
+barrier. It is explicit; the shared minute sweep does not search all barriers or result stores.
+
+```lua
+local igp = require("@native/patterns@1")
+local r = igp.barrier.reconcile(ev.barrier, function(member)
+  local key = ev.barrier .. "/" .. member .. ".json"
+  local body = ig.store.Acks.get(key)
+  if not body then return nil end -- unfinished: keep pending
+  local result = ig.json.decode(body)
+  -- Validate the partner's completion record before acknowledging it.
+  if result.status == "ok" then return { ok = true, result = { key = key } } end
+  if result.status == "failed" then return { ok = false, error = result.error } end
+  return nil -- intermediate state
+end, { limit = 10, after = ev.after })
+-- If r.next_after is present, arrange another durable invocation with after = r.next_after.
+-- When it is absent this pass is finished; a later pass starts without after.
+```
+
+The checker receives a member name and must return an outcome table, or `nil` to leave it pending.
+An empty table acknowledges success, just like `ack`; `false` and other return types raise.
+Member names have no built-in store mapping. Use tenant-granted stores and unique result keys per
+operation; an old result object must not count as completion of new work. Object existence alone is
+sufficient only when your producer publishes that object as its final completion record.
+
+`opts.limit` defaults to 10 and must be 1–100. `opts.after` is the last member name from the previous
+page. The report is `{ checked, acknowledged, next_after, complete, dispatched }`:
+
+- `checked` counts members passed to the checker; `acknowledged` counts successful `ack` calls
+  that did not report a duplicate. Concurrent calls may observe the same member as pending.
+- `next_after` advances past the page even if some members are unfinished, so they cannot starve
+  later members. It is absent at the end; an exactly full last page may need an extra empty call.
+  Restart without a cursor on a later pass to revisit unfinished members.
+- `complete` means no members remain pending. `dispatched` means this call sent the continuation.
+  A complete barrier also retries interrupted dispatch, like `resume`.
+
+Reconciliation uses ordinary `ack` semantics: first outcome wins, including when a notification
+arrives during the check. Failed outcomes also resolve members. A concurrent dispatcher may raise
+the usual retryable lease error. Checks should be read-only and safe to repeat. Checker errors,
+invalid outcomes, store failures, deadlines, and data-operation limits propagate; earlier acks stay
+committed. Retry the same page after an error. All checks and acknowledgements share the invocation's
+normal budgets; reduce the page size when necessary. Unknown, expired, or unready barriers raise
+before the checker runs.
 
 ## Deadlines
 

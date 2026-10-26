@@ -403,6 +403,58 @@ impl Barriers {
         Ok(sent)
     }
 
+    /// Check a bounded page of pending members against application-owned durable results.
+    /// The checker returns None for unfinished work; outcomes use the ordinary ack path.
+    pub fn reconcile(
+        &self,
+        id: &str,
+        after: &str,
+        limit: usize,
+        mut check_result: impl FnMut(&str) -> Result<Option<Json>, String>,
+    ) -> Result<Json, String> {
+        if !(1..=MAX_QUERY_ITEMS).contains(&limit) {
+            return Err("reconcile limit must be 1 to 100".into());
+        }
+        if !after.is_empty() {
+            check("barrier member cursor", after, false)?;
+            if after.len() > MAX_MEMBER_LEN {
+                return Err("barrier member cursor exceeds 200 bytes".into());
+            }
+        }
+        let pk = self.db.barrier_pk(id)?;
+        self.live_header(&pk)?;
+        let cursor = if after.is_empty() {
+            String::new()
+        } else {
+            format!("{PENDING}{after}")
+        };
+        let page = self.op()?.query(&pk, PENDING, &cursor, limit)?;
+        // Advance over raw rows too, including expired legacy members.
+        let next_after = if page.len() == limit {
+            page.last().map(|row| row.sk[PENDING.len()..].to_string())
+        } else {
+            None
+        };
+        let (mut checked, mut acknowledged, mut dispatched) = (0, 0, false);
+        for row in page.into_iter().filter_map(DbScope::live) {
+            self.budget.deadline.check().map_err(str::to_string)?;
+            let member = &row.sk[PENDING.len()..];
+            checked += 1;
+            if let Some(outcome) = check_result(member)? {
+                let ack = self.ack(id, member, &outcome)?;
+                acknowledged += usize::from(!ack.duplicate);
+                dispatched |= ack.dispatched;
+            }
+        }
+        let complete = !self.any_pending(&pk)?;
+        if complete {
+            // Also repairs a complete barrier with an interrupted dispatch and no pending rows.
+            dispatched |= self.resume(id)?;
+        }
+        Ok(json!({ "checked": checked, "acknowledged": acknowledged,
+            "next_after": next_after, "complete": complete, "dispatched": dispatched }))
+    }
+
     /// Up to `limit` (at most 100) members still pending, in name order.
     pub fn pending(&self, id: &str, limit: usize) -> Result<Vec<String>, String> {
         let pk = self.db.barrier_pk(id)?;
@@ -660,6 +712,52 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
     barrier.set(
         "resume",
         lua.create_function(move |_, id: String| mk()?.resume(&id).map_err(err))?,
+    )?;
+
+    let mk = make.clone();
+    barrier.set(
+        "reconcile",
+        lua.create_function(
+            move |lua, (id, checker, opts): (String, mlua::Function, Option<Table>)| {
+                let after = opts
+                    .as_ref()
+                    .map(|t| t.get::<Option<String>>("after"))
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or_default();
+                let limit = opts
+                    .as_ref()
+                    .map(|t| t.get::<Option<usize>>("limit"))
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or(10);
+                // Preserve the original Lua error, including its traceback, across the Rust checker.
+                let mut failure = None;
+                let report = mk()?.reconcile(&id, &after, limit, |member| {
+                    let result = (|| -> mlua::Result<Option<Json>> {
+                        match checker.call::<Value>(member)? {
+                            Value::Nil => Ok(None),
+                            v @ Value::Table(_) => outcome_json(lua, v).map(Some),
+                            _ => Err(err("reconcile checker must return an outcome table or nil")),
+                        }
+                    })();
+                    result.map_err(|e| {
+                        failure = Some(e);
+                        "reconcile checker failed".into()
+                    })
+                });
+                if let Some(e) = failure {
+                    return Err(e);
+                }
+                let report = report.map_err(err)?;
+                let t = lua.create_table()?;
+                for field in ["checked", "acknowledged", "complete", "dispatched"] {
+                    t.set(field, lua.to_value(&report[field])?)?;
+                }
+                t.set("next_after", report["next_after"].as_str())?;
+                Ok(t)
+            },
+        )?,
     )?;
 
     let mk = make.clone();
@@ -1030,6 +1128,127 @@ mod tests {
         assert!(!b.resume("b1").unwrap());
         assert_eq!(sent.0.lock().unwrap().len(), 1);
         assert_eq!(b.outcomes(&pk, "").unwrap(), vec![("a".into(), ok())]);
+    }
+
+    #[test]
+    fn reconcile_pages_past_missing_results_and_can_start_a_new_pass() {
+        let (b, _, sent) = setup();
+        b.create(spec("b1", &["a", "b", "c"])).unwrap();
+        let first = b
+            .reconcile("b1", "", 2, |m| Ok((m == "b").then(ok)))
+            .unwrap();
+        assert_eq!(first["checked"], 2);
+        assert_eq!(first["acknowledged"], 1);
+        assert_eq!(first["next_after"], "b");
+        let last = b.reconcile("b1", "b", 2, |_| Ok(Some(ok()))).unwrap();
+        assert_eq!(last["next_after"], Json::Null);
+        assert_eq!(last["complete"], false);
+        assert_eq!(b.pending("b1", 100).unwrap(), vec!["a"]);
+        let done = b.reconcile("b1", "", 2, |_| Ok(Some(ok()))).unwrap();
+        assert_eq!(done["complete"], true);
+        assert_eq!(done["dispatched"], true);
+        let again = b
+            .reconcile("b1", "", 2, |_| panic!("nothing pending"))
+            .unwrap();
+        assert_eq!(again["checked"], 0);
+        assert_eq!(again["dispatched"], false);
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reconcile_preserves_a_competing_ack_and_propagates_checker_errors() {
+        let (b, _, sent) = setup();
+        b.create(spec("b1", &["a", "b"])).unwrap();
+        let failure = b
+            .reconcile("b1", "", 10, |member| {
+                if member == "b" {
+                    return Err("result store unavailable".into());
+                }
+                b.ack(
+                    "b1",
+                    member,
+                    &json!({"ok":false,"error":"partner rejected"}),
+                )?;
+                Ok(Some(ok()))
+            })
+            .unwrap_err();
+        assert_eq!(failure, "result store unavailable");
+        assert_eq!(b.pending("b1", 10).unwrap(), vec!["b"]);
+        let done = b.reconcile("b1", "", 10, |_| Ok(Some(ok()))).unwrap();
+        assert_eq!(done["acknowledged"], 1);
+        let pk = b.db.barrier_pk("b1").unwrap();
+        assert_eq!(b.outcomes(&pk, "").unwrap()[0].1["ok"], false);
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn simultaneous_reconcilers_share_ack_and_dispatch_claims() {
+        let (b, _, sent) = setup();
+        b.create(spec("b1", &["a"])).unwrap();
+        let rendezvous = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        b.reconcile("b1", "", 10, |_| {
+                            rendezvous.wait();
+                            Ok(Some(ok()))
+                        })
+                    })
+                })
+                .collect();
+            for h in handles {
+                if let Err(e) = h.join().unwrap() {
+                    assert!(e.contains("retry"), "{e}");
+                }
+            }
+        });
+        let done = b
+            .reconcile("b1", "", 10, |_| panic!("already resolved"))
+            .unwrap();
+        assert_eq!(done["complete"], true);
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reconcile_refuses_bad_limits_unready_and_expired_barriers_and_meters_work() {
+        use std::sync::atomic::Ordering;
+        let (b, mem, _) = setup();
+        b.create(spec("b1", &["a"])).unwrap();
+        for limit in [0, 101] {
+            assert!(b
+                .reconcile("b1", "", limit, |_| panic!("invalid request"))
+                .is_err());
+        }
+        let pk = b.db.barrier_pk("b1").unwrap();
+        let mut h = b.header(&pk).unwrap();
+        h.ready = false;
+        mem.put(
+            &pk,
+            item(HEADER, serde_json::to_string(&h).unwrap(), crate::NO_EXPIRY),
+        )
+        .unwrap();
+        assert!(b.reconcile("b1", "", 10, |_| panic!("not ready")).is_err());
+        h.ready = true;
+        h.expires_s = now_secs() - 1;
+        mem.put(
+            &pk,
+            item(HEADER, serde_json::to_string(&h).unwrap(), crate::NO_EXPIRY),
+        )
+        .unwrap();
+        assert!(b.reconcile("b1", "", 10, |_| panic!("expired")).is_err());
+        h.expires_s = crate::NO_EXPIRY;
+        mem.put(
+            &pk,
+            item(HEADER, serde_json::to_string(&h).unwrap(), crate::NO_EXPIRY),
+        )
+        .unwrap();
+        b.budget.data_left.store(2, Ordering::Relaxed);
+        assert!(b
+            .reconcile("b1", "", 10, |_| Ok(Some(ok())))
+            .unwrap_err()
+            .contains("limit"));
+        assert!(mem.get(&pk, "p#a").unwrap().is_some());
     }
 
     #[test]

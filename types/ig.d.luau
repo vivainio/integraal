@@ -340,6 +340,9 @@ declare extern type PatternsV1 with
         ack: (id: string, member: string, outcome: { ok: boolean?, error: string?, result: any }?) -> { duplicate: boolean, complete: boolean, dispatched: boolean },
         -- Retries dispatch for a complete barrier; true only if this call sent. Active lease raises.
         resume: (id: string) -> boolean,
+        -- Checks a page of pending members; nil leaves a member pending. Errors propagate.
+        -- Default limit 10, maximum 100. Continue with next_after; nil ends this pass.
+        reconcile: (id: string, check: (member: string) -> { ok: boolean?, error: string?, result: any }?, opts: { after: string?, limit: number? }?) -> { checked: number, acknowledged: number, next_after: string?, complete: boolean, dispatched: boolean },
         -- Up to `limit` (default and maximum 100) members still waiting, in name order.
         pending: (id: string, limit: number?) -> { string },
         status: (id: string) -> { id: string, total: number, ready: boolean, complete: boolean, dispatched: boolean, overdue: boolean, due_s: number? },

@@ -15,11 +15,11 @@ deletes are implemented; the rest of the pipeline is not.
 
 ## Barriers
 [Automatic continuation recovery](barrier.md#recovery-sweep) is implemented: interrupted indexed
-acks and dispatches are recovered by the bounded minute sweep. Remaining work:
+acks and dispatches are recovered by the bounded minute sweep. Explicit
+[reconciliation](barrier.md#reconciliation) checks durable results for lost notifications. Remaining work:
 
 - Growing a barrier after `create` (`add` and a `seal`), for work lists larger than one invocation's
   `max_data_ops`.
-- `reconcile`: ack members whose object already exists, to recover a lost notification.
 - Quorum and first-success gathers: continue after enough successful responses, with explicit
   handling of late results and remaining work.
 
@@ -45,7 +45,7 @@ explicit attempt limits and a partner retry-after floor. Remaining work:
 
 - Shared retry budgets and automatic partner rate-limit coordination.
 - Scheduled reconciliation of expected work against durable results, with safe replay of missing
-  work; extend the barrier-specific reconciliation above to other flows.
+  work; extend barrier reconciliation to other flows.
 
 ## Additional integration patterns
 - Debounce and coalesce: combine repeated updates for one business key into a refresh after
