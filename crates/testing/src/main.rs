@@ -322,4 +322,115 @@ mod tests {
             .exec()
             .unwrap();
     }
+    #[test]
+    fn equality_handles_nested_values_extra_keys_types_and_cycles() {
+        framework()
+            .load(
+                r#"
+            test.equal(nil, nil)
+            test.equal(false, false)
+            test.equal({ nested = {1, false, {name="a"}} }, { nested = {1, false, {name="a"}} })
+            for _, pair in ipairs({
+                {1, "1"}, {false, true}, {{}, {extra=true}},
+                {{extra=true}, {}}, {{nested={1, 2}}, {nested={1, 3}}},
+                {{value=false}, {}}, {{1, 2}, {2, 1}},
+            }) do
+                test.throws(function() test.equal(pair[1], pair[2]) end, "expected")
+            end
+            local a, b = {}, {}
+            a.self, b.self = a, b
+            test.equal(a, b)
+            b.extra = true
+            test.throws(function() test.equal(a, b) end, "expected")
+        "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn throws_matches_literal_substrings_and_rejects_missing_or_wrong_errors() {
+        framework()
+            .load(
+                r#"
+            test.throws(function() error("literal [x].* marker") end, "[x].*")
+            test.throws(function() error({ reason = "table error" }) end)
+            local ok, err = pcall(function() test.throws(function() return false end) end)
+            assert(not ok and string.find(tostring(err), "expected an error", 1, true))
+            ok, err = pcall(function()
+                test.throws(function() error("actual error") end, "absent")
+            end)
+            assert(not ok and string.find(tostring(err), "actual error", 1, true))
+            -- This would match as a pattern, but must fail as a literal substring.
+            ok = pcall(function() test.throws(function() error("abc") end, "a.c") end)
+            assert(not ok)
+        "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn http_static_responses_repeat_and_first_exact_route_wins() {
+        framework().load(r#"
+            test.http("GET", "https://partner/x", {status=201})
+            test.http("GET", "https://partner/x", {status=500})
+            for _ = 1, 2 do
+                assert(ig.http.get("https://partner/x", {token="secret"}).status == 201)
+            end
+            test.equal(test.http_calls[1].headers, {token="secret"})
+            test.throws(function() ig.http.get("https://partner/x/") end, "unmocked HTTP")
+            test.throws(function() ig.http.request({method="POST", url="https://partner/x"}) end, "unmocked HTTP")
+            assert(#test.http_calls == 4)
+        "#).exec().unwrap();
+    }
+
+    #[test]
+    fn failed_imports_can_retry_and_nil_and_false_exports_are_cached() {
+        framework()
+            .load(
+                r#"
+            local attempts = {}
+            function __load_module(spec)
+                attempts[spec] = (attempts[spec] or 0) + 1
+                if spec == "@lib/retry" and attempts[spec] == 1 then error("first failure") end
+                return function()
+                    if spec == "@lib/nil" then return nil end
+                    if spec == "@lib/false" then return false end
+                    return 42
+                end
+            end
+            test.throws(function() require("@lib/retry") end, "first failure")
+            assert(require("@lib/retry") == 42 and attempts["@lib/retry"] == 2)
+            for _ = 1, 2 do
+                assert(require("@lib/nil") == true)
+                assert(require("@lib/false") == false)
+            end
+            assert(attempts["@lib/nil"] == 1 and attempts["@lib/false"] == 1)
+        "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn case_registration_validates_arguments_and_preserves_order() {
+        framework()
+            .load(
+                r#"
+            test.throws(function() test.case(1, function() end) end, "case needs")
+            test.throws(function() test.case("bad", true) end, "case needs")
+            local ran = {}
+            test.case("first", function() table.insert(ran, 1) end)
+            test.case("second", function() table.insert(ran, 2) end)
+            test.equal(__case_names(), {"first", "second"})
+            __run_case(2)
+            test.equal(ran, {2})
+            __run_case(1)
+            test.equal(ran, {2, 1})
+        "#,
+            )
+            .exec()
+            .unwrap();
+    }
 }
