@@ -17,7 +17,7 @@ hmac = "0.12"
 sha2 = "0.10"
 url = "2"
 ureq = "3"
-quick-xml = "0.38"
+xmlstream = { git = "https://github.com/vivainio/xmlstream" }
 rusqlite = { version = "0.40", features = ["bundled", "serialize", "hooks", "limits"] }
 flate2 = "1"
 crc32fast = "1"

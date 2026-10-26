@@ -2108,7 +2108,6 @@ dependencies = [
  "mlua-decimal",
  "opentelemetry",
  "opentelemetry_sdk",
- "quick-xml",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2120,6 +2119,7 @@ dependencies = [
  "uppsala",
  "ureq 3.5.0",
  "url",
+ "xmlstream",
 ]
 
 [[package]]
@@ -4420,6 +4420,14 @@ name = "xmlparser"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
+
+[[package]]
+name = "xmlstream"
+version = "0.1.0"
+source = "git+https://github.com/vivainio/xmlstream#7016d3fdb0655d571f4f09772cbcc4879b3b2df1"
+dependencies = [
+ "quick-xml",
+]
 
 [[package]]
 name = "yoke"
