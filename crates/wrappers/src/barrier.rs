@@ -19,7 +19,8 @@
 //!
 //! `ack` is a sequence of idempotent steps (record the outcome if absent, delete the pending row,
 //! look for any pending row left), so a redelivered ack after a crash repeats the steps and cannot
-//! leave the barrier one short. There is no counter to drift.
+//! leave the barrier one short. There is no counter to drift. Each retiring ack also has a temporary
+//! recovery entry; the shared minute tick sweeps only these entries, not active barriers or history.
 
 use std::sync::Arc;
 
@@ -47,6 +48,20 @@ const HEADER: &str = "";
 const PENDING: &str = "p#";
 const RESULT: &str = "r#";
 const FINAL: &str = "~final";
+const RECOVERY: &str = "SYS#barrier-dispatch-pending";
+const RECOVERY_CLAIMS: &str = "SYS#barrier-dispatch-claim";
+const RECOVERY_CURSOR: &str = "SYS#barrier-dispatch-cursor";
+
+#[derive(Serialize, Deserialize)]
+struct Recovery {
+    tenant: String,
+    id: String,
+    member: Option<String>,
+}
+
+fn recovery_key(tenant: &str, id: &str, member: Option<&str>) -> String {
+    format!("{tenant}\u{1}{id}\u{1}{}", member.unwrap_or(""))
+}
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -255,6 +270,33 @@ impl Barriers {
             .any(|i| DbScope::live(i).is_some()))
     }
 
+    fn register_recovery(&self, id: &str, member: Option<&str>) -> Result<(), String> {
+        if self.queue.is_some() {
+            let recovery = Recovery {
+                tenant: self.tenant.clone(),
+                id: id.into(),
+                member: member.map(str::to_string),
+            };
+            self.op()?.put_if_absent(
+                RECOVERY,
+                item(
+                    &recovery_key(&self.tenant, id, member),
+                    serde_json::to_string(&recovery).map_err(|e| e.to_string())?,
+                    crate::NO_EXPIRY,
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn clear_recovery(&self, id: &str, member: Option<&str>) -> Result<(), String> {
+        if self.queue.is_some() {
+            self.op()?
+                .delete(RECOVERY, &recovery_key(&self.tenant, id, member))?;
+        }
+        Ok(())
+    }
+
     pub fn ack(&self, id: &str, member: &str, outcome: &Json) -> Result<AckOutcome, String> {
         let pk = self.db.barrier_pk(id)?;
         check("barrier member", member, false)?;
@@ -271,7 +313,6 @@ impl Barriers {
                 // Record the outcome first, then retire the pending row: a crash in between leaves the
                 // member pending, and the redelivered ack finishes the job. The first outcome wins.
                 self.op()?.put_if_absent(&pk, item(&r, body, ttl))?;
-                self.op()?.delete(&pk, &p)?;
                 false
             }
             None => {
@@ -282,7 +323,14 @@ impl Barriers {
             }
         };
 
+        // Each retiring ack owns a recovery entry. A barrier-wide marker cannot safely be
+        // cleared by an ack which sees another pending member: that member may retire next.
+        self.register_recovery(id, Some(member))?;
+        if !duplicate {
+            self.op()?.delete(&pk, &p)?;
+        }
         if self.any_pending(&pk)? {
+            self.clear_recovery(id, Some(member))?;
             return Ok(AckOutcome {
                 duplicate,
                 complete: false,
@@ -290,6 +338,7 @@ impl Barriers {
             });
         }
         let dispatched = self.dispatch(&pk, id, &header)?;
+        self.clear_recovery(id, Some(member))?;
         Ok(AckOutcome {
             duplicate,
             complete: true,
@@ -348,7 +397,10 @@ impl Barriers {
         if self.any_pending(&pk)? {
             return Ok(false);
         }
-        self.dispatch(&pk, id, &header)
+        self.register_recovery(id, None)?;
+        let sent = self.dispatch(&pk, id, &header)?;
+        self.clear_recovery(id, None)?;
+        Ok(sent)
     }
 
     /// Up to `limit` (at most 100) members still pending, in name order.
@@ -398,6 +450,119 @@ impl Barriers {
                 Ok((i.sk[RESULT.len()..].to_string(), v))
             })
             .collect()
+    }
+}
+
+/// Recover only interrupted acknowledgements and continuation sends, never barrier history.
+/// One logical sweep is driven by the shared minute tick, not a poller in each worker.
+/// The cursor bounds work and prevents failing/leased entries from starving later entries.
+pub fn sweep(
+    db: Arc<dyn ItemBackend>,
+    queue: Arc<dyn QueueBackend>,
+    now: u64,
+    limit: usize,
+) -> Result<timer::SweepReport, String> {
+    let mut report = timer::SweepReport::default();
+    if limit == 0 {
+        return Ok(report);
+    }
+    let mut after = db
+        .get(RECOVERY_CURSOR, "")?
+        .map_or_else(String::new, |row| row.value);
+    let mut visited = false;
+    for _ in 0..limit {
+        let rows = db.query(RECOVERY, "", &after, 1)?;
+        let Some(row) = rows.first() else {
+            // Keep idle sweeps read-only. Reset only an existing nonempty cursor.
+            if !after.is_empty() {
+                db.put(RECOVERY_CURSOR, item("", String::new(), crate::NO_EXPIRY))?;
+            }
+            return Ok(report);
+        };
+        visited = true;
+        after = row.sk.clone();
+        match recover(db.clone(), queue.clone(), row, now) {
+            Ok(true) => report.fired += 1,
+            Ok(false) => report.skipped += 1,
+            Err(error) => {
+                tracing::error!(key = %row.sk, %error, "barrier dispatch recovery failed");
+                report.failed += 1;
+            }
+        }
+    }
+    if visited {
+        db.put(RECOVERY_CURSOR, item("", after, crate::NO_EXPIRY))?;
+    }
+    Ok(report)
+}
+
+fn recover(
+    db: Arc<dyn ItemBackend>,
+    queue: Arc<dyn QueueBackend>,
+    row: &Item,
+    now: u64,
+) -> Result<bool, String> {
+    let recovery: Recovery = serde_json::from_str(&row.value).map_err(|e| e.to_string())?;
+    let old = db.get(RECOVERY_CLAIMS, &row.sk)?;
+    if old.as_ref().is_some_and(|claim| claim.ttl > now) {
+        return Ok(false);
+    }
+    let attempts = old
+        .and_then(|claim| claim.value.parse::<u32>().ok())
+        .unwrap_or(0);
+    // Persist backoff before trying: a crash or error leaves a bounded retry rate too.
+    let delay = (60u64.saturating_mul(1u64 << attempts.min(6))).min(3600);
+    if !db.put_if_free(
+        RECOVERY_CLAIMS,
+        item(&row.sk, attempts.saturating_add(1).to_string(), now + delay),
+        now,
+    )? {
+        return Ok(false);
+    }
+    // A successful foreground ack may have removed the work after the query.
+    if db.get(RECOVERY, &row.sk)?.is_none() {
+        return Ok(false);
+    }
+    let barriers = Barriers {
+        db: DbScope::new(db.clone(), &recovery.tenant),
+        tenant: recovery.tenant,
+        queue: Some(queue),
+        budget: Arc::new(Budget {
+            deadline: crate::Deadline::new(
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            ),
+            http_left: 0.into(),
+            data_left: 32.into(),
+        }),
+    };
+    let pk = barriers.db.barrier_pk(&recovery.id)?;
+    // Legacy expired/cleaned-up barriers cannot be repaired; retire their stale index entries.
+    let header = db.get(&pk, HEADER)?.and_then(DbScope::live);
+    let expired = match header {
+        None => true,
+        Some(row) => {
+            let h: Header = serde_json::from_str(&row.value).map_err(|e| e.to_string())?;
+            h.expires_s <= now
+        }
+    };
+    if expired {
+        db.delete(RECOVERY, &row.sk)?;
+        return Ok(false);
+    }
+    match recovery.member {
+        Some(member) => {
+            let outcome = db
+                .get(&pk, &format!("{RESULT}{member}"))?
+                .ok_or("recovery acknowledgement has no recorded outcome")?;
+            let outcome: Json = serde_json::from_str(&outcome.value).map_err(|e| e.to_string())?;
+            Ok(barriers.ack(&recovery.id, &member, &outcome)?.dispatched)
+        }
+        None => {
+            let sent = barriers.resume(&recovery.id)?;
+            // A stale resume entry for an incomplete barrier needs no dispatch recovery.
+            barriers.clear_recovery(&recovery.id, None)?;
+            Ok(sent)
+        }
     }
 }
 
@@ -1050,6 +1215,200 @@ mod tests {
             }
         }
         assert_eq!(seen, names);
+    }
+
+    #[test]
+    fn sweep_recovers_each_interruption_after_indexing_without_an_ack_redelivery() {
+        use std::sync::atomic::Ordering;
+        for budget in 4..=10 {
+            let (b, mem, sent) = setup();
+            b.create(spec("b1", &["a"])).unwrap();
+            b.budget.data_left.store(budget, Ordering::Relaxed);
+            let ack = b.ack("b1", "a", &ok());
+            assert_eq!(ack.is_ok(), budget == 10, "budget={budget}");
+            let pk = b.db.barrier_pk("b1").unwrap();
+            if mem
+                .get(&pk, FINAL)
+                .unwrap()
+                .is_some_and(|r| r.value == "sending")
+            {
+                mem.put(&pk, item(FINAL, "sending".into(), now_secs() - 1))
+                    .unwrap();
+            }
+            let report = sweep(mem.clone(), sent.clone(), now_secs(), 100).unwrap();
+            assert_eq!(report.failed, 0, "budget={budget}");
+            assert_eq!(mem.get(&pk, FINAL).unwrap().unwrap().value, "sent");
+            assert!(mem.query(RECOVERY, "", "", 100).unwrap().is_empty());
+            // A lost send receipt permits duplicates, never lost delivery.
+            assert_eq!(
+                sent.0.lock().unwrap().len(),
+                if budget == 8 { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
+    fn failed_index_registration_cannot_retire_the_last_member() {
+        use std::sync::atomic::Ordering;
+        let (b, mem, sent) = setup();
+        b.create(spec("b1", &["a"])).unwrap();
+        b.budget.data_left.store(3, Ordering::Relaxed);
+        assert!(b.ack("b1", "a", &ok()).is_err());
+        let pk = b.db.barrier_pk("b1").unwrap();
+        assert!(mem.get(&pk, "p#a").unwrap().is_some());
+        assert!(mem.query(RECOVERY, "", "", 100).unwrap().is_empty());
+        assert_eq!(
+            sweep(mem.clone(), sent.clone(), now_secs(), 100)
+                .unwrap()
+                .fired,
+            0
+        );
+        b.budget.data_left.store(100, Ordering::Relaxed);
+        assert!(b.ack("b1", "a", &ok()).unwrap().dispatched);
+    }
+
+    #[test]
+    fn concurrent_last_members_have_independent_recovery_entries() {
+        let (b, mem, sent) = setup();
+        b.create(spec("b1", &["a", "b"])).unwrap();
+        let pk = b.db.barrier_pk("b1").unwrap();
+        // Both workers save outcomes and register before retiring their members, then crash.
+        for member in ["a", "b"] {
+            mem.put(
+                &pk,
+                item(&format!("r#{member}"), ok().to_string(), crate::NO_EXPIRY),
+            )
+            .unwrap();
+            b.register_recovery("b1", Some(member)).unwrap();
+            mem.delete(&pk, &format!("p#{member}")).unwrap();
+        }
+        let reports = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let mem = mem.clone();
+                    let sent = sent.clone();
+                    scope.spawn(move || sweep(mem, sent, now_secs(), 100).unwrap())
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(reports.iter().map(|r| r.fired).sum::<usize>(), 1);
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+        // A contender can observe the active dispatch lease; the next eligible sweep cleans it.
+        sweep(mem.clone(), sent.clone(), now_secs() + 61, 100).unwrap();
+        assert!(mem.query(RECOVERY, "", "", 100).unwrap().is_empty());
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+    }
+
+    struct SelectiveFailure(Arc<Sent>);
+    impl QueueBackend for SelectiveFailure {
+        fn send(&self, messages: &[OutMessage]) -> Result<(), String> {
+            if messages.iter().any(|m| m.body.contains("broken")) {
+                return Err("queue unavailable for broken flow".into());
+            }
+            self.0.send(messages)
+        }
+    }
+
+    fn interrupted(b: &Barriers, mem: &Mem, id: &str) {
+        b.create(spec(id, &["a"])).unwrap();
+        let pk = b.db.barrier_pk(id).unwrap();
+        mem.put(&pk, item("r#a", ok().to_string(), crate::NO_EXPIRY))
+            .unwrap();
+        b.register_recovery(id, Some("a")).unwrap();
+        mem.delete(&pk, "p#a").unwrap();
+    }
+
+    #[test]
+    fn failed_dispatch_backs_off_and_the_cursor_does_not_starve_later_work() {
+        let (b, mem, sent) = setup();
+        interrupted(&b, &mem, "broken");
+        interrupted(&b, &mem, "healthy");
+        let queue = Arc::new(SelectiveFailure(sent.clone()));
+        let now = now_secs();
+        assert_eq!(sweep(mem.clone(), queue.clone(), now, 1).unwrap().failed, 1);
+        let key = recovery_key("acme", "broken", Some("a"));
+        let claim = mem.get(RECOVERY_CLAIMS, &key).unwrap().unwrap();
+        assert_eq!(claim.ttl, now + 60);
+        assert_eq!(sweep(mem.clone(), queue.clone(), now, 1).unwrap().fired, 1);
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+        // Cursor reaches the end, then wraps. The failed entry is skipped during backoff.
+        sweep(mem.clone(), queue.clone(), now, 1).unwrap();
+        assert_eq!(
+            sweep(mem.clone(), queue.clone(), now + 1, 100)
+                .unwrap()
+                .skipped,
+            1
+        );
+        let pk = b.db.barrier_pk("broken").unwrap();
+        mem.put(&pk, item(FINAL, "sending".into(), now - 1))
+            .unwrap();
+        assert_eq!(
+            sweep(mem.clone(), queue.clone(), now + 60, 100)
+                .unwrap()
+                .failed,
+            1
+        );
+        let claim = mem.get(RECOVERY_CLAIMS, &key).unwrap().unwrap();
+        assert_eq!(claim.ttl, now + 60 + 120);
+        mem.put(&pk, item(FINAL, "sending".into(), now - 1))
+            .unwrap();
+        assert_eq!(
+            sweep(mem.clone(), sent.clone(), now + 180, 100)
+                .unwrap()
+                .fired,
+            1
+        );
+        assert!(mem.query(RECOVERY, "", "", 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn idle_sweep_is_read_only_and_does_not_index_active_or_historical_barriers() {
+        let (b, mem, sent) = setup();
+        b.create(spec("active", &["a", "b"])).unwrap();
+        b.ack("active", "a", &ok()).unwrap();
+        b.create(spec("done", &["a"])).unwrap();
+        b.ack("done", "a", &ok()).unwrap();
+        let before = mem.0.lock().unwrap().clone();
+        assert_eq!(
+            sweep(mem.clone(), sent.clone(), now_secs(), 100).unwrap(),
+            timer::SweepReport::default()
+        );
+        assert_eq!(*mem.0.lock().unwrap(), before);
+        assert_eq!(sent.0.lock().unwrap().len(), 1);
+        assert!(mem.query(RECOVERY, "", "", 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resume_failure_is_indexed_and_missing_barriers_are_retired() {
+        let (mut b, mem, sent) = setup();
+        interrupted(&b, &mem, "broken");
+        // Legacy barriers do not have an ack index; an explicit resume enrolls them.
+        b.clear_recovery("broken", Some("a")).unwrap();
+        b.queue = Some(Arc::new(SelectiveFailure(sent.clone())));
+        assert!(b.resume("broken").is_err());
+        let pk = b.db.barrier_pk("broken").unwrap();
+        mem.put(&pk, item(FINAL, "sending".into(), now_secs() - 1))
+            .unwrap();
+        assert_eq!(
+            sweep(mem.clone(), sent.clone(), now_secs(), 100)
+                .unwrap()
+                .fired,
+            1
+        );
+        interrupted(&b, &mem, "removed");
+        mem.delete(&b.db.barrier_pk("removed").unwrap(), HEADER)
+            .unwrap();
+        assert_eq!(
+            sweep(mem.clone(), sent.clone(), now_secs(), 100)
+                .unwrap()
+                .failed,
+            0
+        );
+        assert!(mem.query(RECOVERY, "", "", 100).unwrap().is_empty());
     }
 
     #[test]

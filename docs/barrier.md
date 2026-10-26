@@ -170,11 +170,16 @@ from a durable retry source, and let errors propagate so failed deliveries are r
   write safely and call `ack` again. The barrier cannot make a store write or external side effect
   atomic with its acknowledgement. The first recorded outcome wins.
 - **Retry interrupted acks.** A repeated `ack` finishes retiring the member and, when appropriate,
-  dispatching the continuation, even if the outcome was already recorded. A crash during dispatch
-  may leave a lease; retry after it expires. There is no background sweep that retries completion
-  dispatch on its own. If redelivery exhausts its retries, replay the failed ack or call
-  `igp.barrier.resume(id)` once all members have been resolved. `resume` leaves pending members
-  and outcomes unchanged; it does not resend a continuation already marked sent.
+  dispatching the continuation, even if the outcome was already recorded. Before retiring a member,
+  `ack` persists a recovery entry. If the worker stops after this point, the Fargate minute sweep
+  finishes the acknowledgement and continuation dispatch without requiring ack redelivery. A crash
+  before indexing still requires ack redelivery; the member remains pending.
+- **Recover dispatch automatically.** Queue-send failures, exhausted invocation budgets, and crashes
+  can leave indexed work behind. The sweep retries it after any live dispatch lease expires.
+  `igp.barrier.resume(id)` remains available for explicit recovery; it leaves pending members and
+  outcomes unchanged and does not resend a continuation already marked sent. Failed resumes of
+  complete barriers also register recovery work. Legacy interruptions from before recovery indexing
+  was introduced need an ack replay or explicit `resume` to enroll them; there is no history scan.
 - **Make continuation effects safe to repeat.** Sending the continuation and marking it sent are
   separate operations, and the queue can redeliver it too. Use stable output keys or a destination
   idempotency key. Claiming with `put_if_absent` before performing an effect can lose that effect
@@ -185,6 +190,31 @@ A [deadline](#deadlines) helps detect missing members, including work that was n
 Its handler must decide how to retry or resolve them; it does not automatically repair dispatch
 or complete the barrier.
 
+## Recovery sweep
+
+The existing shared `system.tick` minute message drives the sweep on Fargate. There is no polling
+loop per worker. Automatic recovery needs the deployment database, queue, and minute tick; Lambda
+alone does not process ticks. A failed sweep is logged and the next minute can retry it.
+
+The index contains one temporary entry per in-flight acknowledgement or explicit complete-barrier
+resume. Successful operations delete their entries. Each ack registers **before** deleting its
+pending member: indexing only after detecting completion could lose dispatch if the process stops
+between the last member deletion and index registration. Separate member entries prevent concurrent
+acks from clearing each other's recovery work. Recorded outcomes remain first-write-wins.
+
+- An idle sweep performs two reads: its cursor and an empty pending-index query, with no writes.
+- Each tick examines at most 100 index entries, not all barriers or historical receipts. A durable
+  cursor advances past failed or leased entries and wraps at the end; a backlog may take several ticks.
+- Recovery claims prevent overlapping sweepers from working the same entry at once. Dispatch also
+  uses the existing per-barrier lease shared with foreground acks and resumes.
+- Each recovery attempt persists its next eligible time before working. Repeated attempts back off
+  from 60 seconds to at most one hour. Failed attempts are logged and counted in the tick report.
+  An entry in backoff is still read when visited, but is not dispatched again until eligible.
+- A crash after saving the sent receipt leaves only cleanup work. A crash after sending but before
+  saving that receipt can send again. Continuation effects must remain safe to repeat.
+- Index entries have no TTL until removed. Recovery claim rows have an expiry. Expired or removed
+  legacy barrier headers cause their stale index entries to be removed without sending.
+
 ## Cost and limits
 
 Every backend call is one `max_data_ops` ([limits](limits.md)).
@@ -192,14 +222,18 @@ Every backend call is one `max_data_ops` ([limits](limits.md)).
 | Call | Data ops |
 | --- | --- |
 | `create` with N members | N + 3 |
-| `ack` | 5; 8 for the call that sends the continuation; 4 for a duplicate |
-| `resume` | 2 while pending; 5 when it sends; 4 when already sent (plus 1 for deadline cancellation) |
+| `ack` (queue enabled) | 7 while members remain; 10 when it sends; 6 for a duplicate while pending, 8 if already sent |
+| `resume` (queue enabled) | 2 while pending; 7 when it sends; 6 when already sent (plus 1 for deadline cancellation) |
 | `results()` | 1 per 100 members |
 | `pending`, `hydrate` | 2 |
 | `status` | 3 |
 
 `create` is one invocation, so the work list must fit in the tenant's `max_data_ops`
 (default 1000, ceiling 10 000). Raise the tenant's limit for large batches.
+
+Without a queue, `ack` uses 5 data ops (4 for a duplicate); there is no recovery index or send.
+The index adds two database operations per queue-enabled ack or complete-barrier resume. Recovery
+sweeps use their own bounded per-entry budget, independent of the interrupted invocation.
 
 A barrier with `deadline_s` adds 1 data op to `create` and 1 to the ack that sends the continuation
 (it cancels the deadline timer).
@@ -212,7 +246,8 @@ leases still expire after 60 seconds. Existing barriers retain their stored expi
 ## Deployment
 
 Needs the `db` section of the [global config](deployment.md#configuration), and for `continue_with`
-the tenant's `"queue": true` and a `queue.url`. No other IAM: the same table actions as
+the tenant's `"queue": true` and a `queue.url`. Automatic recovery additionally needs the shared
+[minute tick](schedules.md#operator-ticks) handled by Fargate. No other IAM: the same table actions as
 [`ig.db`](dynamodb.md), including `Query`.
 
 Without a queue, a barrier still works as a plain work list: `ack` tells you when `complete`, and

@@ -9,16 +9,17 @@ deletes are implemented; the rest of the pipeline is not.
 
 - In-process chaining: a script returns `{ next = "...", event = ... }` and the engine continues
   within one invocation, sharing the deadline and call budgets.
-- Message dispositions from the return value: success acks; `ig.retry(delay, reason)`,
-  `ig.dead(reason)`, `ig.drop()`; `ctx.attempt` for backoff.
+- Design any remaining queue delivery controls as core primitives only where patterns need them.
+  Explicit delayed retries are provided by the versioned `igp.retry` pattern, not return dispositions.
 - Idempotency keyed on `(key, etag, script)`; per-tenant event-rate and concurrency caps.
 
 ## Barriers
+[Automatic continuation recovery](barrier.md#recovery-sweep) is implemented: interrupted indexed
+acks and dispatches are recovered by the bounded Fargate minute sweep. Remaining work:
+
 - Growing a barrier after `create` (`add` and a `seal`), for work lists larger than one invocation's
   `max_data_ops`.
 - `reconcile`: ack members whose object already exists, to recover a lost notification.
-- Automatic recovery of completed barriers whose continuation was never dispatched. `resume(id)`
-  exists, but currently needs an acknowledgement retry or an explicit recovery call.
 - Quorum and first-success gathers: continue after enough successful responses, with explicit
   handling of late results and remaining work.
 
@@ -38,10 +39,12 @@ remaining work:
 
 ## Reliable consumers and retries
 [Recoverable consumer claims](claims.md) are implemented: leases, ownership tokens, renewal and
-durable completion results. Remaining work:
+durable completion results.
 
-- Retry policies with exponential backoff, jitter, retry budgets and partner rate-limit handling,
-  building on the message dispositions above.
+[Retry policy](retry.md) is implemented as `igp.retry`: capped exponential backoff, jitter,
+explicit attempt limits and a partner retry-after floor. Remaining work:
+
+- Shared retry budgets and automatic partner rate-limit coordination.
 - Scheduled reconciliation of expected work against durable results, with safe replay of missing
   work; extend the barrier-specific reconciliation above to other flows.
 

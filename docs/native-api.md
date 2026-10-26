@@ -11,6 +11,7 @@ deployment settings behind it:
 | --- | --- |
 | `ig.store.<name>` | [Stores](stores.md), also whitelisted host directories: [File system](filesystem.md) |
 | `ig.db` | [DynamoDB](dynamodb.md) |
+| `igp.retry` | [Retry policy](retry.md) |
 | `igp.claim` | [Consumer claims](claims.md) |
 | `igp.lock` | [Locks](locks.md) |
 | `ig.queue` | [Queue](queue.md) |
@@ -44,7 +45,7 @@ assert(igp.version == 1)
 ```
 
 Core includes queue delivery, task reporting, NDJSON, and other I/O and data utilities.
-Patterns include claims, locks, callbacks, barriers, and batch jobs. They share the invocation's
+Patterns include retries, claims, locks, callbacks, barriers, and batch jobs. They share the invocation's
 budgets and deadlines with core. Neither `native` nor `igp` is a global. Repeated imports return the same pattern table within
 one invocation; each invocation gets fresh state. Built-in imports do not fetch tenant or shared
 modules from storage.

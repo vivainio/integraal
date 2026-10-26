@@ -20,7 +20,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use integraal_loader::{LoadError, ScriptKey};
-use integraal_wrappers::{sweep_outbox, sweep_timers, SweepReport, MAX_DELAY_SECS};
+use integraal_wrappers::{sweep_barriers, sweep_outbox, sweep_timers, SweepReport, MAX_DELAY_SECS};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -161,6 +161,8 @@ pub struct TickReport {
     pub swept: Option<SweepReport>,
     /// Durable handoffs recovered on minute ticks.
     pub outbox: Option<SweepReport>,
+    /// Interrupted barrier acknowledgements/continuation sends recovered on minute ticks.
+    pub barriers: Option<SweepReport>,
     /// Messages sent to tenants.
     pub sent: usize,
 }
@@ -217,6 +219,30 @@ impl Engine {
                         report.outbox = Some(r);
                     }
                     Err(e) => tracing::error!(error = %e, "outbox sweep failed"),
+                }
+            }
+        }
+
+        if tick.every == Every::Minute {
+            if let Some(items) = self.item_backend() {
+                let queue = queue.clone();
+                match tokio::task::spawn_blocking(move || {
+                    sweep_barriers(items, queue, unix_secs(), SWEEP_LIMIT)
+                })
+                .await
+                .map_err(|e| Error::Internal(e.to_string()))?
+                {
+                    Ok(r) => {
+                        if r.fired + r.failed > 0 {
+                            tracing::info!(
+                                fired = r.fired,
+                                failed = r.failed,
+                                "barrier dispatches swept"
+                            );
+                        }
+                        report.barriers = Some(r);
+                    }
+                    Err(e) => tracing::error!(error = %e, "barrier dispatch sweep failed"),
                 }
             }
         }

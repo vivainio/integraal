@@ -29,6 +29,7 @@ nav = [
     { "DynamoDB" = "dynamodb.md" },
     { "Locks" = "locks.md" },
     { "Consumer claims" = "claims.md" },
+    { "Retry policy" = "retry.md" },
     { "Queue" = "queue.md" },
     { "Callbacks" = "callbacks.md" },
     { "Batch jobs" = "batch.md" },

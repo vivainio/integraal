@@ -76,6 +76,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
         )?,
     )?;
     ig.set("db", db_api(lua, host, budget.clone())?)?;
+    igp.set("retry", crate::retry::api(lua, host, budget.clone())?)?;
     igp.set("claim", crate::claim::api(lua, host, budget.clone())?)?;
     let queue = crate::queue::api(lua, &host.tenant, host.queue.clone(), budget.clone())?;
     crate::outbox::install(lua, &queue, host, budget.clone())?;

@@ -311,6 +311,9 @@ declare D: ((v: any) -> Decimal) & {
 -- Opinionated coordination patterns. Versioned independently from the core API.
 declare extern type PatternsV1 with
     version: number
+    retry: {
+        schedule: (id: string, message: { script: string, version: string?, event: any }, opts: { attempt: number, max_attempts: number?, base_delay_s: number?, max_delay_s: number?, jitter: boolean?, retry_after_s: number? }) -> { state: "scheduled", attempt: number, due_s: number } | { state: "exhausted" },
+    }
     claim: {
         -- Acquires expired/absent work, reports busy ownership, or returns its durable result.
         acquire: (id: string, opts: { lease_s: number? }?) -> { state: "acquired", token: string, expires_s: number } | { state: "busy", expires_s: number } | { state: "complete", result: any },

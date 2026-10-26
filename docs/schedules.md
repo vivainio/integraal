@@ -49,7 +49,9 @@ the time the schedule was due; the engine passes it on untouched.
 
 A tick belongs to no tenant. The server that receives it:
 
-1. on the **minute** tick, sends every [timer](#timers) that is due;
+1. on the **minute** tick, sends up to 100 due [timers](#timers), recovers up to 100 pending
+   [durable handoffs](queue.md#durable-handoff), and examines up to 100 interrupted
+   [barrier acknowledgements/dispatches](barrier.md#recovery-sweep);
 2. reads `tenants.json` and sends one message to each tenant that asked for this kind of tick:
 
 ```json

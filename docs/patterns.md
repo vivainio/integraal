@@ -146,6 +146,12 @@ flowchart LR
     L -->|one at a time| C[critical section]
 ```
 
+### Delayed retries
+
+Use [`igp.retry`](retry.md) to schedule a failed operation with capped exponential backoff, jitter,
+a partner retry-after floor, and an explicit attempt limit. It uses durable timers; scripts decide
+which failures to retry and what to do when attempts are exhausted.
+
 ### Recoverable consumers
 Use [`igp.claim`](claims.md) for work that may be redelivered: acquire a lease, renew it while
 working, then store the completed result. A crashed worker's lease expires so a retry can take
@@ -222,7 +228,8 @@ end
 The barrier replaces the manual `put_if_absent` → `db.add` → claim → send recipe. That recipe
 can lose a count if a worker dies after claiming its member, and lose the gather message if it dies
 after claiming dispatch. Repeating `barrier.ack` repairs an interrupted acknowledgement and retries
-continuation dispatch. It does not make the entire workflow atomic:
+continuation dispatch. Once an ack is indexed before member retirement, the Fargate minute sweep
+also recovers it automatically. It does not make the entire workflow atomic:
 
 - **Scatter can stop halfway.** Retry the originating request with the same flow id, member list
   and inputs, and resend the work. Barrier creation is retryable and duplicate acks are harmless;

@@ -14,6 +14,7 @@
 mod barrier;
 mod claim;
 mod outbox;
+mod retry;
 pub use db::NO_EXPIRY;
 pub use outbox::sweep as sweep_outbox;
 mod batch;
@@ -45,7 +46,7 @@ mod xml_writer;
 mod zip;
 mod zip_writer;
 
-pub use barrier::{AckOutcome, Barriers, CreateSpec, MAX_BARRIER_MEMBERS};
+pub use barrier::{sweep as sweep_barriers, AckOutcome, Barriers, CreateSpec, MAX_BARRIER_MEMBERS};
 pub use batch::{fail_inflight_http, BATCH_STORE};
 pub use crypto::{MasterKey, MasterKeys};
 pub use db::{

@@ -2574,6 +2574,61 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn minute_tick_repairs_barrier_dispatch_after_the_ack_budget_is_exhausted() {
+        let src = r#"local igp = require("@native/patterns@1")
+return { handle = function(ctx, ev)
+            if ev.create then
+                return igp.barrier.create({ id = "recover", members = {"a"}, continue_with = "finalize" })
+            end
+            return igp.barrier.ack("recover", "a")
+        end }"#;
+        let queue = Arc::new(MemQueue::default());
+        let e = engine_cfg(
+            src,
+            Limits::default(),
+            r#"{"queue":true,"limits":{"max_data_ops":6}}"#,
+        )
+        .with_db(Arc::new(MemItems::default()))
+        .with_queue(queue.clone());
+        e.invoke(inv(Trigger::Queue, json!({"create":true})))
+            .await
+            .unwrap();
+        // Completion was persisted and indexed, but there is no budget left to send it.
+        assert!(e.invoke(inv(Trigger::Queue, json!({}))).await.is_err());
+        assert!(queue.0.lock().unwrap().is_empty());
+        let tick = crate::Tick {
+            every: crate::Every::Minute,
+            at: "unused".into(),
+        };
+        assert_eq!(
+            e.tick(&tick, &crate::Spread::default())
+                .await
+                .unwrap()
+                .barriers
+                .unwrap()
+                .fired,
+            1
+        );
+        assert_eq!(
+            e.tick(&tick, &crate::Spread::default())
+                .await
+                .unwrap()
+                .barriers
+                .unwrap()
+                .fired,
+            0
+        );
+        assert_eq!(
+            *queue.0.lock().unwrap(),
+            vec![(
+                json!({"tenant":"acme","script":"finalize",
+            "event":{"type":"barrier.complete","barrier":"recover"}}),
+                0
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn barrier_collects_acks_and_continues_once() {
         let src = r#"local igp = require("@native/patterns@1")
 return { handle = function(ctx, ev)
@@ -2699,6 +2754,89 @@ return { handle = function(ctx, ev)
         let capped = engine_cfg(src, Limits::default(), r#"{"limits":{"max_data_ops":1}}"#)
             .with_db(Arc::new(MemItems::default()));
         assert!(capped.invoke(inv(Trigger::Queue, json!({}))).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn retry_pattern_schedules_versioned_work_and_exhausts_without_sending() {
+        let src = r#"local igp = require("@native/patterns@1")
+return { handle = function(ctx, ev)
+            return igp.retry.schedule("order-7", { script = "work", version = "v1", event = { order = ev.order } }, {
+                attempt = ev.attempt, max_attempts = 3, base_delay_s = 2,
+                jitter = false, retry_after_s = 5,
+            })
+        end }"#;
+        let backend = Arc::new(MemItems::default());
+        let queue = Arc::new(MemQueue::default());
+        let e = engine_cfg(src, Limits::default(), r#"{"queue":true}"#)
+            .with_db(backend.clone())
+            .with_queue(queue.clone());
+        let call = || inv(Trigger::Queue, json!({"order":7,"attempt":1}));
+        let first = e.invoke(call()).await.unwrap();
+        assert_eq!(first["state"], "scheduled");
+        assert_eq!(first["attempt"], 2);
+        assert_eq!(e.invoke(call()).await.unwrap(), first);
+        assert!(e
+            .invoke(inv(Trigger::Queue, json!({"order":8,"attempt":1})))
+            .await
+            .is_err());
+        assert!(e
+            .invoke(inv(Trigger::Queue, json!({"order":7,"attempt":0})))
+            .await
+            .is_err());
+        assert_eq!(
+            e.invoke(inv(Trigger::Queue, json!({"order":7,"attempt":3})))
+                .await
+                .unwrap(),
+            json!({"state":"exhausted"})
+        );
+        let due = first["due_s"].as_u64().unwrap();
+        assert_eq!(
+            integraal_wrappers::sweep_timers(backend.as_ref(), queue.as_ref(), due - 1, 10)
+                .unwrap()
+                .fired,
+            0
+        );
+        assert_eq!(
+            integraal_wrappers::sweep_timers(backend.as_ref(), queue.as_ref(), due, 10)
+                .unwrap()
+                .fired,
+            1
+        );
+        assert_eq!(
+            *queue.0.lock().unwrap(),
+            vec![(
+                json!({"tenant":"acme","script":"work","version":"v1",
+            "event":{"type":"retry","id":"order-7","attempt":2,"event":{"order":7}}}),
+                0
+            )]
+        );
+        let no_services = engine(src, Limits::default());
+        assert_eq!(
+            no_services
+                .invoke(inv(Trigger::Queue, json!({"attempt":3})))
+                .await
+                .unwrap(),
+            json!({"state":"exhausted"})
+        );
+        assert!(no_services.invoke(call()).await.is_err());
+        let budget_db = Arc::new(MemItems::default());
+        let capped = engine_cfg(
+            src,
+            Limits::default(),
+            r#"{"queue":true,"limits":{"max_data_ops":2}}"#,
+        )
+        .with_db(budget_db.clone())
+        .with_queue(queue);
+        assert!(capped.invoke(call()).await.is_err());
+        assert!(
+            integraal_wrappers::list_timers(budget_db.as_ref(), "acme", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(budget_db
+            .get("SYS#retry", "acme\u{1}order-7\u{1}1")
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -3691,7 +3829,7 @@ return { handle = function()
                 assert(ig.version == 1 and igp.version == 1)
                 assert(igp.invocation_marker == nil)
                 igp.invocation_marker = true
-                for _, name in ipairs({"claim", "lock", "callback", "barrier", "batch"}) do
+                for _, name in ipairs({"retry", "claim", "lock", "callback", "barrier", "batch"}) do
                     assert(type(igp[name]) == "table", name)
                     assert(ig[name] == nil, name)
                 end
