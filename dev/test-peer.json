@@ -1,0 +1,4 @@
+{
+  "scripts": { "bucket": "scripts" },
+  "batch": { "bucket": "test-peer-batch", "prefix": "tenants/" }
+}

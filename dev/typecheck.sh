@@ -5,4 +5,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 files=("$@")
 [ ${#files[@]} -eq 0 ] && files=($(find examples -name '*.luau'))
-exec luau-lsp analyze --no-strict-dm-types --defs="$PWD/types/native.d.luau" --base-luaurc .luaurc "${files[@]}"
+exec luau-lsp analyze --no-strict-dm-types --defs="$PWD/types/native.d.luau" --defs="$PWD/types/testing.d.luau" --base-luaurc .luaurc "${files[@]}"

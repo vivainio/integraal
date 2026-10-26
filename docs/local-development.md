@@ -28,6 +28,8 @@ cargo test --workspace
 
 The engine tests use in-memory stores, so they need no AWS or simulator.
 
+For user-written Luau tests with roto and HTTP mocks, see [Testing Luau scripts](testing.md).
+
 ### Mega integration test
 
 `e2e/` holds a black-box test that exercises every [integration pattern](patterns.md) against a real

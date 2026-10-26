@@ -1,0 +1,15 @@
+[package]
+name = "integraal-testing"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "integraal-test"
+path = "src/main.rs"
+
+[dependencies]
+mlua.workspace = true
+serde_json.workspace = true
+integraal-core.workspace = true
+integraal-wrappers.workspace = true
+tokio.workspace = true
