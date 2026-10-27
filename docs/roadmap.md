@@ -23,8 +23,9 @@ acks and dispatches are recovered by the bounded minute sweep. Explicit
   handling of late results and remaining work.
 
 ## Schedules and timers
-- `ig.timer` for scripts: `at`/`after` and `cancel`, on the [timers](schedules.md#timers) the
-  barrier deadline already uses.
+[Script timers](timer.md) (`ig.timer.at`, `after`, and `cancel`) are implemented on the durable
+minute sweep. Remaining work:
+
 - Creating a tenant's own EventBridge schedules from its config (cron, time zones).
 - Splitting a tick's fan-out into chunks for very large tenant lists.
 - `type` on callback and batch `done.json` events.
@@ -56,11 +57,22 @@ explicit attempt limits and a partner retry-after floor. Remaining work:
 - Backpressure and bulkheads: bounded fan-out and tenant/destination concurrency limits, so a
   large flow or slow partner cannot consume all worker capacity.
 
+## Durable workflows
+[Durable workflows](workflows.md) are implemented: replayed steps, signals, sleeps, yields,
+and barrier waits, with the workflow script pinned at launch.
+
 ## Flow operations
+[Operator DLQ inspection and replay](ops.md#flow-inspection-and-dlq-replay) are
+implemented through the imported Luau `ops` API in directly invoked operator scripts: bounded SQS
+sampling, unchanged message bodies and attributes,
+original invocation failures when retained flow logs are available, and an S3 replay
+audit. Replay is at least once; see the documented send/delete failure windows.
+
+[Fleet and tenant pause](ops.md#fleet-and-tenant-pause) are implemented with a durable DynamoDB
+control slot, ten-second worker polling and bounded receipt holding for paused tenants. Remaining work:
+
 - Pin worker and continuation script versions across retries and multi-step flows. Handoffs can
   already specify a version; barriers and other continuation APIs need consistent support.
-- Inspect and replay dead-lettered work while preserving flow/member ids, showing the original
-  failure and recording an audit trail.
 - Surface flows approaching an explicit expiry, including legacy barrier state and callbacks,
   so recovery happens before the required state is lost.
 

@@ -308,6 +308,53 @@
       "type": "string",
       "description": "tracing filter such as info or integraal_core=debug.",
       "default": "info"
+    },
+    "operations": {
+      "description": "Operator Luau API and fleet/tenant SQS admission control. Requires db; audit bucket must be separate from all other buckets.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operator_tenant",
+        "audit_bucket"
+      ],
+      "properties": {
+        "audit_bucket": {
+          "type": "string",
+          "minLength": 1
+        },
+        "audit_prefix": {
+          "type": "string",
+          "pattern": "^$|/$"
+        },
+        "queues": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "dlq_url",
+              "destination_url"
+            ],
+            "properties": {
+              "dlq_url": {
+                "type": "string",
+                "minLength": 1
+              },
+              "destination_url": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "operator_tenant": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     }
   },
   "$defs": {
@@ -632,5 +679,10 @@
         }
       }
     }
+  },
+  "dependentRequired": {
+    "operations": [
+      "db"
+    ]
   }
 }

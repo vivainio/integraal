@@ -23,6 +23,7 @@ pub(crate) struct ModuleHost {
     pub(crate) loader: Arc<CachedLoader>,
     pub(crate) handle: tokio::runtime::Handle,
     pub(crate) debug: Option<crate::debug::DebugRun>,
+    pub(crate) ops: Option<crate::operations::OpsHost>,
 }
 
 /// Maps a `require` argument to the object it names.
@@ -50,6 +51,20 @@ pub(crate) fn install(lua: &Lua, host: ModuleHost, tenant: &str) -> mlua::Result
     let loading: Table = lua.create_table()?;
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let require = lua.create_function(move |lua, spec: String| {
+        if spec == "ops" || spec == "@native/ops@1" {
+            let host = host.ops.as_ref().ok_or_else(|| {
+                mlua::Error::runtime(
+                    "ops requires a direct invocation of the deployment operator tenant",
+                )
+            })?;
+            let cached: Value = loaded.get("@native/ops@1")?;
+            if !cached.is_nil() {
+                return Ok(cached);
+            }
+            let table = crate::operations::api(lua, host.clone())?;
+            loaded.set("@native/ops@1", table.clone())?;
+            return Ok(Value::Table(table));
+        }
         if spec.starts_with("@native/") {
             return integraal_wrappers::require_native(lua, &spec).map(Value::Table);
         }

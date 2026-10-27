@@ -69,6 +69,9 @@ pub struct GlobalConfig {
     /// Operator API on its own port (server only); see the server crate.
     #[serde(default)]
     pub admin: Option<AdminConfig>,
+    /// Imported Luau operator API and worker SQS admission control; disabled when absent.
+    #[serde(default)]
+    pub operations: Option<crate::operations::OperationsConfig>,
     /// Read-only query API for flow logs, bound to loopback only (server only).
     #[serde(default)]
     pub local_api: Option<LocalApiConfig>,
@@ -564,6 +567,48 @@ impl GlobalConfig {
                 return Err("batch.bucket must not also be an s3 store".into());
             }
         }
+        if let Some(o) = &self.operations {
+            if self.db.is_none() || integraal_loader::ScriptKey::config(&o.operator_tenant).is_err()
+            {
+                return Err("operations needs db and a valid operator_tenant".into());
+            }
+            if o.audit_bucket.is_empty()
+                || !(o.audit_prefix.is_empty() || o.audit_prefix.ends_with('/'))
+            {
+                return Err(
+                    "operations needs audit_bucket and audit_prefix empty or ending in '/'".into(),
+                );
+            }
+            if self.s3_buckets().any(|b| b == o.audit_bucket)
+                || self
+                    .flow_logs
+                    .as_ref()
+                    .is_some_and(|f| f.bucket == o.audit_bucket)
+                || self
+                    .batch
+                    .as_ref()
+                    .is_some_and(|b| b.bucket == o.audit_bucket)
+                || self
+                    .debug
+                    .as_ref()
+                    .is_some_and(|d| d.bucket.as_ref() == Some(&o.audit_bucket))
+                || self.scripts.bucket == o.audit_bucket
+            {
+                return Err("operations.audit_bucket must be separate from scripts, data, batch, debug and flow logs".into());
+            }
+            for (name, q) in &o.queues {
+                if name.is_empty()
+                    || q.dlq_url.is_empty()
+                    || q.destination_url.is_empty()
+                    || q.dlq_url == q.destination_url
+                {
+                    return Err(
+                        "operations queues need a name and distinct nonempty DLQ/destination URLs"
+                            .into(),
+                    );
+                }
+            }
+        }
         if let Some(f) = &self.flow_logs {
             if f.bucket.is_empty() || !(f.prefix.is_empty() || f.prefix.ends_with('/')) {
                 return Err(
@@ -735,6 +780,9 @@ impl GlobalConfig {
         }
         if let Some(db) = &self.db {
             engine = engine.with_db(Arc::new(crate::DynamoBackend::from_env(&db.table).await));
+        }
+        if let Some(o) = &self.operations {
+            engine = engine.with_operations(o.clone());
         }
         if let Some(q) = &self.queue {
             engine = engine.with_queue(Arc::new(crate::SqsBackend::from_env(&q.url).await));

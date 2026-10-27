@@ -9,6 +9,8 @@ pub mod failure;
 pub mod flow_log;
 pub mod ingress;
 mod modules;
+pub mod operations;
+pub mod pause;
 mod placement;
 pub mod remote;
 mod s3_data;

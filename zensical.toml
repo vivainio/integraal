@@ -54,6 +54,7 @@ nav = [
   { "Operations" = [
     { "Deployment" = "deployment.md" },
     { "Observability" = "observability.md" },
+    { "Operator API" = "ops.md" },
     { "Local development" = "local-development.md" },
     { "Testing Luau scripts" = "testing.md" },
   ] },

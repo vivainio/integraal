@@ -24,6 +24,7 @@ declares:
 | --- | --- | --- |
 | `ig` | global | core capabilities in the [Native API](native-api.md) with exact signatures |
 | `PatternsV1`, `require` | type, global | `require("@native/patterns@1")` returns the typed pattern API |
+| `OpsV1`, `QueuePauseState` | types | `require("ops")` / `require("@native/ops@1")` operator commands |
 | `Context` | type | `tenant`, `script`, `trigger`, `runtime` – the first handler argument |
 | `Decimal`, `D` | type, global | exact base-10 numbers from [mlua-decimal](https://github.com/vivainio/mlua-decimal): `D"12.50"`; bind one to `ig.sql` as a parameter (stored as text) |
 | `ByteStream` | type | what `ig.store.<name>.open` and streaming HTTP return |

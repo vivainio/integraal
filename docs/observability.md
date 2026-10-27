@@ -251,6 +251,13 @@ Directory captures are deleted after `retention_hours` (default 48) by an hourly
 bucket captures with a lifecycle rule on `<prefix><tenant>/captures/`. The Lambda can use
 `debug.bucket` only (it needs `s3:PutObject`); a `debug.dir` refuses to start there.
 
+## Dead-letter inspection and replay
+
+The [operator Luau API](ops.md) provides `ops.flow.inspect`, `ops.dlq.inspect` and `ops.dlq.replay`
+from directly invoked operator scripts. Replay preserves message bodies and trace attributes,
+shows original failures when retained flow logs are available, and saves an S3 audit before
+sending and deleting. See that chapter for configuration and at-least-once recovery semantics.
+
 ## Metrics
 
 | Metric | Labels |

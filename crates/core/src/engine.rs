@@ -217,6 +217,7 @@ pub struct Engine {
     flow_logs: Option<crate::flow_log::FlowLogSink>,
     tasks: Option<Arc<crate::tasks::TaskLog>>,
     debug_sink: Option<crate::debug::DebugSink>,
+    pub(crate) operations: Option<crate::operations::OperationsConfig>,
     /// Invocations in flight in this process, by span id; see `Engine::running`.
     running: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
 }
@@ -272,8 +273,14 @@ impl Engine {
             flow_logs: None,
             tasks: None,
             debug_sink: None,
+            operations: None,
             running: Arc::default(),
         }
+    }
+
+    pub fn with_operations(mut self, config: crate::operations::OperationsConfig) -> Self {
+        self.operations = Some(config);
+        self
     }
 
     /// Overrides the operator ceiling (default: `Limits::ceiling()`).
@@ -701,6 +708,19 @@ impl Engine {
             modules: Some(crate::modules::ModuleHost {
                 loader: self.loader.clone(),
                 handle: tokio::runtime::Handle::current(),
+                ops: self
+                    .operations
+                    .as_ref()
+                    .filter(|ops| {
+                        inv.trigger == Trigger::Invoke && ops.operator_tenant == inv.tenant
+                    })
+                    .map(|config| {
+                        crate::operations::OpsHost::new(
+                            self.clone(),
+                            config.clone(),
+                            limits.timeout,
+                        )
+                    }),
                 debug,
             }),
         };
@@ -5157,5 +5177,74 @@ return { on_queue = function(ctx, ev)
             e.invoke(inv(Trigger::Invoke, json!(null))).await,
             Err(Error::Wrappers(_))
         ));
+    }
+    #[tokio::test]
+    async fn ops_requires_operator_direct_invocation_and_controls_durable_queue_admission() {
+        let script = r#"--!runtime 1
+            local ops = require("ops")
+            assert(ops == require("@native/ops@1"))
+            assert(not pcall(function() ops.version = 2 end))
+            return { handle = function(ctx, event)
+                ops.fleet.pause("deploy")
+                ops.tenant.pause("other", "tenant update")
+                local state = ops.fleet.resume("fleet ready")
+                assert(not state.fleet and state.tenants[1] == "other")
+                assert(ops.fleet.status().revision == 3)
+                return ops.tenant.resume("other", "tenant ready")
+            end }
+        "#;
+        let items = Arc::new(MemItems::default());
+        let ops = crate::operations::OperationsConfig {
+            operator_tenant: "acme".into(),
+            queues: Default::default(),
+            audit_bucket: "ops-audit".into(),
+            audit_prefix: "audit/".into(),
+        };
+        let e = engine_cfg(script, Limits::default(), "{}").with_db(items.clone());
+        assert!(e
+            .invoke(inv(Trigger::Invoke, json!({})))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("ops requires"));
+        let e = e.with_operations(ops.clone());
+        for trigger in [Trigger::Queue, Trigger::Http] {
+            assert!(e
+                .invoke(inv(trigger, json!({})))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("ops requires"));
+        }
+        let out = e.invoke(inv(Trigger::Invoke, json!({}))).await.unwrap();
+        assert_eq!(out["revision"], 4);
+        assert_eq!(out["fleet"], false);
+        assert!(out["tenants"].as_array().unwrap().is_empty());
+        assert_eq!(
+            items.get("SYS#OPS", "queue-pause").unwrap().unwrap().ttl,
+            integraal_wrappers::NO_EXPIRY
+        );
+        assert!(!e.queue_pause_state().await.unwrap().tenant_paused("other"));
+        // Fleet resume never clears a tenant's independent pause, including across new engines.
+        crate::pause::change(items.as_ref(), Some("other"), true, "updating", "test-1").unwrap();
+        crate::pause::change(items.as_ref(), None, true, "fleet", "test-2").unwrap();
+        crate::pause::change(items.as_ref(), None, false, "done", "test-3").unwrap();
+        let state = e.queue_pause_state().await.unwrap();
+        assert!(state.tenant_paused("other"));
+        assert!(!state.tenant_paused("unrelated"));
+        assert!(
+            crate::pause::change(items.as_ref(), Some("../invalid"), true, "reason", "test-4")
+                .is_err()
+        );
+        assert!(crate::pause::change(items.as_ref(), None, true, " ", "test-5").is_err());
+        let mut other = ops;
+        other.operator_tenant = "different".into();
+        let e = e.with_operations(other);
+        assert!(e
+            .invoke(inv(Trigger::Invoke, json!({})))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("ops requires"));
     }
 }

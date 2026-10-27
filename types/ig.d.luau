@@ -381,5 +381,33 @@ declare extern type PatternsV1 with
     }
 end
 
+-- Operator-only module; requires a direct invocation of operations.operator_tenant.
+declare extern type QueuePauseState with
+    fleet: boolean
+    tenants: { string }
+    revision: number
+    changed_at_ms: number
+    request_id: string
+    reason: string
+end
+
+declare extern type OpsV1 with
+    version: number
+    flow: { inspect: (tenant: string, trace_id: string) -> { invocations: { any }, state: any } }
+    dlq: {
+        inspect: (queue: string) -> { messages: { any }, sample_limit: number },
+        replay: (queue: string, message_id: string, reason: string) -> any,
+    }
+    tenant: {
+        pause: (tenant: string, reason: string) -> QueuePauseState,
+        resume: (tenant: string, reason: string) -> QueuePauseState,
+    }
+    fleet: {
+        pause: (reason: string) -> QueuePauseState,
+        resume: (reason: string) -> QueuePauseState,
+        status: () -> QueuePauseState,
+    }
+end
+
 -- Built-in imports are version-pinned; tenant/shared modules retain their own shapes.
-declare require: ((spec: "@native/patterns@1") -> PatternsV1) & ((spec: string) -> any)
+declare require: ((spec: "@native/patterns@1") -> PatternsV1) & ((spec: "ops" | "@native/ops@1") -> OpsV1) & ((spec: string) -> any)

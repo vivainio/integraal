@@ -542,82 +542,198 @@ fn status_for(e: &Error) -> StatusCode {
     }
 }
 
-/// Long-polls SQS. A message is deleted only once it is fully handled, so failures retry via
+/// Long-polls SQS with fleet/tenant admission control. A message is deleted only once fully handled, so failures retry via
 /// the visibility timeout and eventually land in the queue's DLQ. S3 notifications are split into
 /// one invocation per object; when only some fail, just those are sent back (see `s3_events`).
 async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events, spread: Spread) {
     let client = aws_sdk_sqs::Client::new(&aws_config::load_from_env().await);
-    loop {
-        let resp = client
-            .receive_message()
-            .queue_url(&queue_url)
-            .max_number_of_messages(10)
-            .message_system_attribute_names(MessageSystemAttributeName::ApproximateReceiveCount)
-            .message_attribute_names("traceparent")
-            .message_attribute_names("tracestate")
-            .wait_time_seconds(10)
-            .send()
-            .await;
-        let messages = match resp {
-            Ok(r) => r.messages.unwrap_or_default(),
-            Err(e) => {
-                tracing::error!(error = %e, "sqs receive failed");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+    let (control_tx, mut control) = tokio::sync::watch::channel(None);
+    let watcher_engine = engine.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            let state = match watcher_engine.queue_pause_state().await {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    tracing::error!(%error, "pause control unavailable; queue admission stopped");
+                    None // Fail closed until a successful consistent read.
+                }
+            };
+            if control_tx.send(state).is_err() {
+                break;
             }
-        };
-        let mut tasks = Vec::new();
-        for msg in messages {
-            let (engine, client, queue_url, s3) = (
-                engine.clone(),
-                client.clone(),
-                queue_url.clone(),
-                s3.clone(),
-            );
-            let span = tracing::info_span!("sqs_message", otel.kind = "consumer");
-            let continues_trace = integraal_core::telemetry::adopt_parent(&span, |k| {
-                msg.message_attributes()?
-                    .get(k)?
-                    .string_value()
-                    .map(str::to_string)
-            });
-            tasks.push(tokio::spawn(
-                async move {
-                    let attempt = msg
-                        .attributes()
-                        .and_then(|a| a.get(&MessageSystemAttributeName::ApproximateReceiveCount))
-                        .and_then(|n| n.parse().ok())
-                        .unwrap_or(0);
-                    let acked = handle_message(
-                        &engine,
-                        &client,
-                        &queue_url,
-                        &s3,
-                        &spread,
-                        msg.body().unwrap_or_default(),
-                        attempt,
-                        continues_trace,
-                    )
-                    .await;
-                    integraal_core::telemetry::sqs_message(if acked { "acked" } else { "retry" });
-                    if acked {
-                        if let Some(handle) = msg.receipt_handle() {
-                            let _ = client
-                                .delete_message()
-                                .queue_url(&queue_url)
-                                .receipt_handle(handle)
-                                .send()
-                                .await;
-                        }
+        }
+    });
+    let mut receive_task = None;
+    let mut receive_slots = 0;
+    let mut active = tokio::task::JoinSet::new();
+    let mut held: Vec<aws_sdk_sqs::types::Message> = Vec::new();
+    let mut maintenance = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        let snapshot = control.borrow_and_update().clone();
+        // Resumed receipts take priority over new receives, avoiding starvation under steady load.
+        let mut remaining = Vec::new();
+        for message in held.drain(..) {
+            if active.len() + receive_slots < 10
+                && !queue_message_paused(message.body().unwrap_or_default(), &s3, snapshot.as_ref())
+            {
+                spawn_queue_message(
+                    &mut active,
+                    &engine,
+                    &client,
+                    &queue_url,
+                    &s3,
+                    spread,
+                    message,
+                );
+            } else {
+                remaining.push(message);
+            }
+        }
+        held = remaining;
+        let can_receive =
+            snapshot.as_ref().is_some_and(|s| !s.fleet) && active.len() < 10 && held.len() < 100;
+        if receive_task.is_none() && can_receive {
+            receive_slots = (10 - active.len()).min(100 - held.len()).max(1);
+            let request = client
+                .receive_message()
+                .queue_url(&queue_url)
+                .max_number_of_messages(receive_slots as i32)
+                .message_system_attribute_names(MessageSystemAttributeName::ApproximateReceiveCount)
+                .message_attribute_names("traceparent")
+                .message_attribute_names("tracestate")
+                .wait_time_seconds(10);
+            receive_task = Some(tokio::spawn(async move { request.send().await }));
+        }
+        tokio::select! {
+            _ = control.changed() => {},
+            _ = active.join_next(), if !active.is_empty() => {},
+            _ = maintenance.tick() => {
+                // Renew held receipts without receiving them again or spending SQS retry attempts.
+                for batch in held.chunks(10) {
+                    let entries: Vec<_> = batch.iter().enumerate().filter_map(|(i, m)| {
+                        m.receipt_handle().map(|receipt| aws_sdk_sqs::types::ChangeMessageVisibilityBatchRequestEntry::builder()
+                            .id(i.to_string()).receipt_handle(receipt).visibility_timeout(300).build().unwrap())
+                    }).collect();
+                    match client.change_message_visibility_batch().queue_url(&queue_url).set_entries(Some(entries)).send().await {
+                        Ok(response) if response.failed().is_empty() => {},
+                        Ok(response) => tracing::error!(failed = ?response.failed(), "paused receipt renewal partially failed"),
+                        Err(error) => tracing::error!(%error, "paused receipt renewal failed"),
                     }
                 }
-                .instrument(span),
-            ));
-        }
-        for t in tasks {
-            let _ = t.await;
+            },
+            response = async { receive_task.as_mut().unwrap().await }, if receive_task.is_some() => {
+                receive_task = None;
+                receive_slots = 0;
+                match response {
+                    Ok(Ok(response)) => {
+                        let snapshot = control.borrow().clone();
+                        for message in response.messages.unwrap_or_default() {
+                            if queue_message_paused(message.body().unwrap_or_default(), &s3, snapshot.as_ref()) {
+                                if let Some(receipt) = message.receipt_handle() {
+                                    if let Err(error) = client.change_message_visibility().queue_url(&queue_url)
+                                        .receipt_handle(receipt).visibility_timeout(300).send().await {
+                                        tracing::error!(%error, "initial paused receipt lease failed");
+                                    }
+                                }
+                                held.push(message);
+                            } else {
+                                spawn_queue_message(&mut active, &engine, &client, &queue_url, &s3, spread, message);
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "sqs receive failed");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    Err(error) => tracing::error!(%error, "sqs receive task failed"),
+                }
+            },
         }
     }
+}
+
+fn queue_message_paused(
+    body: &str,
+    s3: &S3Events,
+    state: Option<&integraal_core::pause::State>,
+) -> bool {
+    let Some(state) = state else {
+        return true;
+    };
+    if state.fleet {
+        return true;
+    }
+    match classify(body) {
+        Ok(Message::Envelope(inv)) => state.tenant_paused(&inv.tenant),
+        Ok(Message::S3 { records, .. }) => records.iter().any(|record| {
+            s3.invocation(record)
+                .ok()
+                .flatten()
+                .is_some_and(|inv| state.tenant_paused(&inv.tenant))
+        }),
+        _ => false,
+    }
+}
+
+fn spawn_queue_message(
+    tasks: &mut tokio::task::JoinSet<()>,
+    engine: &Engine,
+    client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+    s3: &S3Events,
+    spread: Spread,
+    msg: aws_sdk_sqs::types::Message,
+) {
+    let (engine, client, queue_url, s3) = (
+        engine.clone(),
+        client.clone(),
+        queue_url.to_string(),
+        s3.clone(),
+    );
+    let span = tracing::info_span!("sqs_message", otel.kind = "consumer");
+    let continues_trace = integraal_core::telemetry::adopt_parent(&span, |k| {
+        msg.message_attributes()?
+            .get(k)?
+            .string_value()
+            .map(str::to_string)
+    });
+    tasks.spawn(
+        async move {
+            let attempt = msg
+                .attributes()
+                .and_then(|a| a.get(&MessageSystemAttributeName::ApproximateReceiveCount))
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            let acked = handle_message(
+                &engine,
+                &client,
+                &queue_url,
+                &s3,
+                &spread,
+                msg.body().unwrap_or_default(),
+                attempt,
+                continues_trace,
+            )
+            .await;
+            integraal_core::telemetry::sqs_message(if acked { "acked" } else { "retry" });
+            if acked {
+                if let Some(receipt) = msg.receipt_handle() {
+                    if let Err(error) = client
+                        .delete_message()
+                        .queue_url(&queue_url)
+                        .receipt_handle(receipt)
+                        .send()
+                        .await
+                    {
+                        tracing::error!(%error, "sqs acknowledgement failed");
+                    }
+                }
+            }
+        }
+        .instrument(span),
+    );
 }
 
 /// Runs one queue message; returns whether it may be deleted.
@@ -710,5 +826,39 @@ async fn handle_message(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_control_tests {
+    use super::*;
+    #[test]
+    fn pauses_gate_whole_messages_without_blocking_unrelated_tenants() {
+        let s3 = S3Events::new([("In".into(), "input".into(), "tenants/".into())]);
+        let mut state = integraal_core::pause::State::default();
+        state.tenants.insert("acme".into());
+        let envelope = |tenant| json!({"tenant":tenant,"event":{}}).to_string();
+        assert!(queue_message_paused(&envelope("acme"), &s3, Some(&state)));
+        assert!(!queue_message_paused(&envelope("other"), &s3, Some(&state)));
+        assert!(
+            queue_message_paused(&envelope("other"), &s3, None),
+            "unavailable control fails closed"
+        );
+        let records = json!({"Records":[
+            {"eventName":"ObjectCreated:Put","s3":{"bucket":{"name":"input"},"object":{"key":"tenants/other/a","eTag":"a"}}},
+            {"eventName":"ObjectCreated:Put","s3":{"bucket":{"name":"input"},"object":{"key":"tenants/acme/b","eTag":"b"}}}
+        ]}).to_string();
+        assert!(
+            queue_message_paused(&records, &s3, Some(&state)),
+            "mixed S3 notifications wait intact"
+        );
+        state.fleet = true;
+        assert!(queue_message_paused(&envelope("other"), &s3, Some(&state)));
+        assert!(queue_message_paused("malformed", &s3, Some(&state)));
+        state.fleet = false;
+        assert!(
+            !queue_message_paused("malformed", &s3, Some(&state)),
+            "normal error handling still reaches DLQ"
+        );
     }
 }
