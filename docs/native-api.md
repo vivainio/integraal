@@ -2,6 +2,7 @@
 
 Core capabilities are exposed under `ig`; import opinionated coordination patterns with
 `local igp = require("@native/patterns@1")`. Type definitions: [`types/ig.d.luau`](types.md).
+Operator commands have a separate imported [Ops API](ops.md): `local ops = require("ops")`.
 Errors are raised as Lua errors; catch them with `pcall`.
 
 Each area has its own chapter covering the script API, the tenant config that governs it, and the
@@ -24,6 +25,7 @@ deployment settings behind it:
 | `ig.http` | [Outbound HTTP](http.md) |
 | `ig.xml`, `ig.zip`, `ig.gzip`, byte streams | [Streams and XML](streams-xml.md) |
 | `ig.sql` | [SQL scratch databases](sql.md) |
+| `ops.fleet`, `ops.tenant`, `ops.flow`, `ops.dlq` | [Operator API](ops.md) (operator direct invocations only) |
 | routing (`on_route`) | [Router](router.md) |
 
 Budgets and size caps for all of them are in [Limits](limits.md).
@@ -37,13 +39,17 @@ from script deployment versions and persisted data formats.
 
 `--!runtime 1` selects core version 1. Pattern versions are selected explicitly by the import,
 independently of the runtime directive. Version 1 is currently supported; missing or unsupported
-versions fail with an error. No unversioned or `latest` import is accepted:
+versions fail with an error. Pattern imports do not accept unversioned or `latest` imports:
 
 
 ```lua
 local igp = require("@native/patterns@1")
 assert(igp.version == 1)
 ```
+
+`ops.version` identifies the operator API, currently `1`. Use `require("@native/ops@1")` to pin
+it explicitly; `require("ops")` is its version 1 alias. Its deployment policy and capabilities are
+covered in the [Operator API chapter](ops.md).
 
 Core includes queue delivery, task reporting, NDJSON, and other I/O and data utilities.
 Patterns include [durable workflows](workflows.md), retries, claims, locks, callbacks, barriers, and batch jobs. They share the invocation's

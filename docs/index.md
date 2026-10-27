@@ -38,6 +38,7 @@ return { handle = handle }
 | choose Lambda, Fargate or an internal ALB | [Choosing entrypoints](choosing-entrypoints.md) |
 | write my first script | [Writing scripts](writing-scripts.md) |
 | look up a native function | [Native API](native-api.md) |
+| pause queue processing, inspect flows or replay failed work | [Operator API](ops.md) |
 | configure a tenant | [Tenant config](tenant-config.md) |
 | work with S3 data, DynamoDB, crypto, HTTP or routing | [Native API](native-api.md) chapters |
 | run it locally | [Local development](local-development.md) |

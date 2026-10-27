@@ -18,27 +18,57 @@ return { handle = function(ctx: Context, event: any)
 end }
 ```
 
+## Setup and direct invocation
+
 Enable the API in deployment config. All workers and the operator Lambda must use the same
 DynamoDB table. Only direct invocations of `operator_tenant` can import `ops`; HTTP, queue and
 other tenant invocations cannot. Keep this tenant's scripts operator-owned and restrict direct
 invocation of the operator Lambda with IAM. The runtime does not infer the caller's IAM identity.
 
 ```json
-"db": { "table": "integraal" },
-"operations": {
-  "operator_tenant": "operator",
-  "queues": {
-    "jobs": { "dlq_url": "https://sqs.us-east-1.amazonaws.com/123/jobs-dlq",
-              "destination_url": "https://sqs.us-east-1.amazonaws.com/123/jobs" }
-  },
-  "audit_bucket": "integraal-operator-audit",
-  "audit_prefix": "replays/"
+{
+  "scripts": { "bucket": "integraal-scripts" },
+  "db": { "table": "integraal" },
+  "operations": {
+    "operator_tenant": "operator",
+    "queues": {
+      "jobs": {
+        "dlq_url": "https://sqs.us-east-1.amazonaws.com/123/jobs-dlq",
+        "destination_url": "https://sqs.us-east-1.amazonaws.com/123/jobs"
+      }
+    },
+    "audit_bucket": "integraal-operator-audit",
+    "audit_prefix": "replays/"
+  }
 }
 ```
 
 The audit bucket must differ from scripts, data, batch, debug and flow logs. Queue aliases and
 queue destinations are deployment-owned. `queues` can be empty for pause-only deployments.
 The API has a 100-command limit per script invocation and shares its invocation deadline.
+
+Upload the script above as `operator/maintenance/v1.luau` in the configured script bucket (under
+`scripts.prefix`, if set), with `{}` at `operator/config.json`. Bundle the deployment config with
+the runtime Lambda, then invoke the operator script synchronously:
+
+```bash
+aws lambda invoke \
+  --function-name integraal-operator \
+  --invocation-type RequestResponse \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"tenant":"operator","script":"maintenance","version":"v1","event":{"action":"pause"}}' \
+  response.json
+cat response.json
+```
+
+Change the action to `resume` to clear the fleet pause, or `status` to read it. Normal runtime
+responses use `{"ok":true,"result":...}` or `{"ok":false,"error":...}`; check the response body,
+not only the Lambda invocation status. Keep replay scripts on synchronous invocation paths without
+automatic retries, because an interrupted replay can already have sent its message.
+
+The repository's `examples/operator.luau` provides a fuller command dispatcher for fleet and tenant
+pause/resume, flow inspection and DLQ operations. Its action names are `pause-fleet`, `resume-fleet`,
+`pause-tenant`, `resume-tenant`, `inspect-flow`, `inspect-dlq`, `replay-dlq`, and `status`.
 
 ## Fleet and tenant pause
 
@@ -82,6 +112,13 @@ participate in the pause protocol.
 
 ## Flow inspection and DLQ replay
 
+| Function | Result |
+| --- | --- |
+| `ops.flow.inspect(tenant, trace_id)` | Invocation summaries and pending flow state |
+| `ops.dlq.inspect(queue)` | Up to ten DLQ messages and available original failures |
+| `ops.dlq.replay(queue, message_id, reason)` | Replay audit record after send and deletion |
+
+
 ```lua
 local ops = require("ops")
 local flow = ops.flow.inspect("acme", "4bf92f3577b34da6a3ce929d0e0e4736")
@@ -106,6 +143,8 @@ member, handoff and version ids, plus `traceparent` and `tracestate`. Group ids 
 FIFO destinations get a fresh deduplication id. Replay does not bypass durable idempotency checks.
 Configure the original work queue as destination, or intake when placement should run again.
 
+### Replay audit and interrupted commands
+
 Each replay requires a nonempty reason. It saves separate S3 JSON objects at
 `<audit_prefix><command_request_id>/<phase>.json`, using conditional puts to prevent overwrite.
 Records contain source, destination, original body, available failure context and the new SQS id.
@@ -118,6 +157,8 @@ Delivery remains **at least once**. Crashes, lost responses and audit/delete fai
 uncertain outcome or both copies. Inspect the audit and destination before retrying an incomplete
 replay. Selected messages have a five-minute visibility lease. `completed` means SQS accepted send
 and delete, not that the destination script finished. Use flow inspection to follow resulting work.
+
+## Permissions
 
 Workers need DynamoDB get access to the control slot; operator scripts also need conditional put
 access. DLQ inspection needs `sqs:ReceiveMessage` and `sqs:ChangeMessageVisibility`; replay also needs
