@@ -8,8 +8,8 @@ dependencies = [
     "requests>=2.31",
     # Decodes what the server exports over OTLP/HTTP in the devtools suite.
     "opentelemetry-proto>=1.27",
-    # The AWS simulator; 0.10.1 is the first release with the `runtime` Lambda executor and unencoded "/" in S3 event keys.
-    "roto-aws>=0.10.1",
+    # The AWS simulator; 0.11.0 accepts MessageGroupId on standard queues; 0.10.1 added the `runtime` Lambda executor and unencoded "/" in S3 event keys.
+    "roto-aws>=0.11.0",
 ]
 
 [tool.pytest.ini_options]
