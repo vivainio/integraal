@@ -107,7 +107,9 @@ declare extern type BatchJob with
     -- Script that `igp.batch.route` picks when the partner's done.json arrives.
     continue_with: (BatchJob, script: string) -> ()
     id: (BatchJob) -> string
-    submit: (BatchJob) -> string
+    -- `deadline_s` fails the job with ok = false if no done.json exists that many seconds later
+    -- (needs ig.queue). The router must pass `batch.overdue` events to `igp.batch.route`.
+    submit: (BatchJob, opts: { deadline_s: number? }?) -> string
 end
 
 declare extern type BatchResult with
@@ -351,8 +353,9 @@ declare extern type PatternsV1 with
         new: (opts: { id: string? }?) -> BatchJob,
         -- nil when the job is not complete or was already cleaned up.
         hydrate: (event: { [string]: any }, opts: { allow_failure: boolean? }?) -> BatchResult?,
-        -- For a router: nil unless `event` is a done.json from the batch bucket.
-        route: (event: { [string]: any }) -> { job: string, script: string?, event: { [string]: any } }?,
+        -- For a router: nil unless `event` is a done.json from the batch bucket or a `batch.overdue` timer.
+        -- `settled` is set for the latter: the job is already failed or finished, run nothing.
+        route: (event: { [string]: any }) -> { job: string, script: string?, settled: boolean?, event: { [string]: any } }?,
     }
     barrier: {
         -- Registers members (at most 10 000); returns the id. Default sealed=true needs members.

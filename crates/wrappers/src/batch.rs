@@ -26,6 +26,7 @@ use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    timer,
     gzip::Capped,
     http_job::{self, Prepared},
     ndjson::Rows,
@@ -86,6 +87,8 @@ struct Ctx {
     deadline: Deadline,
     /// Present only where requests can outlive the invocation (the Fargate server).
     http: Option<http_job::Env>,
+    tenant: String,
+    queue: Option<Arc<dyn crate::QueueBackend>>,
 }
 
 impl Ctx {
@@ -109,6 +112,8 @@ pub fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<T
         max_stream: limits.max_stream_bytes,
         max_line: limits.max_object_bytes,
         deadline: limits.deadline.clone(),
+        tenant: host.tenant.clone(),
+        queue: host.queue.clone(),
         http: host.background_http.then(|| http_job::Env {
             tenant: host.tenant.clone(),
             policy: host.http.clone(),
@@ -212,6 +217,9 @@ fn put_done(scope: &StoreScope, id: &str, done: &Json) {
         tracing::error!(job = %id, error = %e, "could not write done.json for batch http job");
     }
 }
+
+/// `type` of the event a job's `deadline_s` timer sends.
+const OVERDUE_EVENT: &str = "batch.overdue";
 
 fn lost(reason: &str) -> Json {
     json!({"ok": false, "error": format!("http job lost: {reason}")})
@@ -535,7 +543,24 @@ impl UserData for Job {
         methods.add_method("id", |_, this, ()| Ok(this.id.clone()));
         // Writes the state, then the request: a partner that reacts at once never finds a
         // request whose state is missing.
-        methods.add_method("submit", |_, this, ()| {
+        methods.add_method("submit", |_, this, opts: Option<Table>| {
+            let deadline_s = opts
+                .map(|o| o.get::<Option<u64>>("deadline_s"))
+                .transpose()?
+                .flatten();
+            if let Some(d) = deadline_s {
+                if this.ctx.queue.is_none() || this.ctx.db.is_none() {
+                    return Err(err(
+                        "deadline_s needs native.queue (the tenant's config needs \"queue\": true and the deployment a queue)",
+                    ));
+                }
+                if d == 0 || d > timer::MAX_TIMER_AHEAD_SECS {
+                    return Err(err(format!(
+                        "deadline_s must be between 1 second and {} days",
+                        timer::MAX_TIMER_AHEAD_SECS / 86_400
+                    )));
+                }
+            }
             let mut d = this.draft.lock().unwrap();
             if d.submitted {
                 return Err(err("batch job was already submitted"));
@@ -595,6 +620,27 @@ impl UserData for Job {
                     .map_err(err)?;
             }
             d.submitted = true;
+            if let Some(secs) = deadline_s {
+                // Armed after the state is written, so an overdue event always finds the job.
+                let (db, _) = this.ctx.db.as_ref().zip(this.ctx.queue.as_ref()).expect("checked above");
+                this.ctx.op()?;
+                let secs_now = now / 1000;
+                let payload = timer::Payload {
+                    script: None,
+                    version: None,
+                    event: json!({ "type": OVERDUE_EVENT, "job": this.id }),
+                    trace: Some(crate::trace::inject_current()),
+                };
+                timer::register(
+                    db.raw().as_ref(),
+                    &this.ctx.tenant,
+                    &format!("batch.{}", this.id),
+                    secs_now + secs,
+                    &payload,
+                    secs_now,
+                )
+                .map_err(err)?;
+            }
             if let Some(db) = &this.ctx.db {
                 db.index_trace("batch", &this.id, &crate::trace::inject_current(), crate::trace_index::default_ttl(now / 1000));
             }
@@ -768,6 +814,9 @@ fn event_job(event: &Table) -> mlua::Result<Option<String>> {
 /// `script` is the continuation saved with the job, and is nil when the job's state is gone
 /// (a duplicate delivery after cleanup), so the router decides what happens then.
 fn route(lua: &Lua, ctx: &Ctx, event: &Table) -> mlua::Result<Value> {
+    if event.get::<Option<String>>("type")?.as_deref() == Some(OVERDUE_EVENT) {
+        return route_overdue(lua, ctx, event);
+    }
     if event.get::<Option<String>>("key")?.is_none() {
         return Ok(Value::Nil);
     }
@@ -786,6 +835,38 @@ fn route(lua: &Lua, ctx: &Ctx, event: &Table) -> mlua::Result<Value> {
     routed.set("job", id.as_str())?;
     routed.set("script", env.and_then(|e| e.script))?;
     routed.set("event", ev)?;
+    Ok(Value::Table(routed))
+}
+
+/// A job's `deadline_s` timer fired. If the job has no `done.json` yet it is failed by writing one,
+/// and the bucket notification for that object continues the job like any other `done.json`, so
+/// nothing else runs here: the result has `settled = true` and the router should do nothing with
+/// it. A job that finished in time (or whose state is gone) is settled as well.
+fn route_overdue(lua: &Lua, ctx: &Ctx, event: &Table) -> mlua::Result<Value> {
+    let Some(id) = event_job(event)? else {
+        return Ok(Value::Nil);
+    };
+    let scope = ctx.scope()?;
+    let done_key = format!("{}done.json", job_dir(&id));
+    ctx.op()?;
+    if scope.get(&state_key(&id)).map_err(err)?.is_some() {
+        ctx.op()?;
+        if scope.get(&done_key).map_err(err)?.is_none() {
+            // A request still running in this process loses its claim on done.json first, so its
+            // thread cannot overwrite the failure.
+            fail_inflight(|j| j == id);
+            ctx.op()?;
+            if scope.get(&done_key).map_err(err)?.is_none() {
+                tracing::warn!(job = %id, "batch job passed its deadline without a result");
+                ctx.op()?;
+                put_done(&scope, &id, &json!({"ok": false, "error": "job overdue: no result by its deadline_s"}));
+            }
+        }
+    }
+    let routed = lua.create_table()?;
+    routed.set("job", id.as_str())?;
+    routed.set("settled", true)?;
+    routed.set("event", event.clone())?;
     Ok(Value::Table(routed))
 }
 
@@ -1209,5 +1290,58 @@ mod tests {
         // The job's own thread finds its entry gone and writes nothing over the failure.
         assert!(inflight().jobs.remove(&token).is_none());
         assert_eq!(fail_inflight(|id| id == "shutdown-test"), 0);
+    }
+
+    fn overdue_ctx(mem: Arc<Mem>) -> Ctx {
+        let limits = crate::HostLimits {
+            deadline: Deadline::new(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+            max_http_response_bytes: 0,
+            max_object_bytes: 0,
+            max_stream_bytes: 0,
+            max_sql_bytes: 0,
+            max_http_requests: 0,
+            max_data_ops: 1000,
+            max_http_timeout: std::time::Duration::ZERO,
+        };
+        Ctx {
+            batch: Some(StoreScope::new(mem, "t/")),
+            db: None,
+            budget: Arc::new(Budget::new(&limits)),
+            max_stream: 0,
+            max_line: 0,
+            deadline: limits.deadline.clone(),
+            http: None,
+            tenant: "t".into(),
+            queue: None,
+        }
+    }
+
+    #[test]
+    fn an_overdue_job_without_a_result_is_failed_once_and_one_with_a_result_is_left_alone() {
+        let mem = Arc::new(Mem::default());
+        let ctx = overdue_ctx(mem.clone());
+        let lua = Lua::new();
+        let ev = |job: &str| {
+            let t = lua.create_table().unwrap();
+            t.set("type", OVERDUE_EVENT).unwrap();
+            t.set("job", job).unwrap();
+            t
+        };
+        mem.put("t/state/a.json", b"{}".to_vec()).unwrap();
+        mem.put("t/state/b.json", b"{}".to_vec()).unwrap();
+        mem.put("t/jobs/b/done.json", br#"{"ok":true,"results":{}}"#.to_vec()).unwrap();
+
+        for job in ["a", "b", "gone"] {
+            let Value::Table(r) = route(&lua, &ctx, &ev(job)).unwrap() else {
+                panic!("overdue events are always routed");
+            };
+            assert!(r.get::<bool>("settled").unwrap());
+        }
+        let a: Json = serde_json::from_slice(&mem.get("t/jobs/a/done.json").unwrap().unwrap()).unwrap();
+        assert_eq!(a["ok"], false);
+        assert!(a["error"].as_str().unwrap().contains("overdue"));
+        let b: Json = serde_json::from_slice(&mem.get("t/jobs/b/done.json").unwrap().unwrap()).unwrap();
+        assert_eq!(b["ok"], true);
+        assert!(mem.get("t/jobs/gone/done.json").unwrap().is_none());
     }
 }

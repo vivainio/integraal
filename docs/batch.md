@@ -43,7 +43,7 @@ end
 | `input_rows(name, rows, opts?)` | attaches rows from an array or an iterator function, as NDJSON cut into parts of about 64 MiB. The row count is recorded |
 | `state(value)` | any JSON value kept for the continuation |
 | `continue_with(script)` | the script `igp.batch.route` picks for this job's `done.json` |
-| `submit()` | writes `state/<job>.json`, then `request.json`. A job needs at least one query and can be submitted once |
+| `submit(opts?)` | writes `state/<job>.json`, then `request.json`. A job needs at least one query and can be submitted once. `opts.deadline_s` fails the job if it has no result by then, see [Deadlines](#deadlines) |
 
 Input files are written when you attach them, but are inert until `request.json` exists, because
 that is the object the partner reacts to. The queries refer to inputs by name in their params; what
@@ -106,6 +106,27 @@ end
 
 `routed.event` is the original event plus `job`. `routed.script` is `nil` when the job's state is
 gone, which is a duplicate delivery after cleanup; send it to a script that does nothing.
+
+## Deadlines
+
+`job:submit({ deadline_s = 3600 })` sets a timer (see [Timers](schedules.md#timers)) that needs
+[`ig.queue`](queue.md). When it comes due and the job has no `done.json`, `igp.batch.route`
+writes one with `ok = false` and `error = "job overdue: ..."`. The bucket notification for that
+object then runs the continuation like any other `done.json`, so the continuation finds the failure
+with `hydrate(ev, { allow_failure = true })`, and is where a retry or an alert goes. This covers a
+partner that never answers and a `job:http` job lost to a crash.
+
+The timer arrives at the router as an event with `type = "batch.overdue"`. Pass it to `route` like a
+`done.json`; `routed.settled` is then `true` and nothing should run:
+
+```lua
+local routed = igp.batch.route(event)
+if routed and routed.settled then return "ignore" end
+```
+
+A job that finished in time is left alone. Its timer still fires and is settled the same way. A
+result that arrives in the instant between the check and the write can be overwritten, so keep the
+deadline well past the longest normal run.
 
 ## The continuation
 
@@ -198,8 +219,8 @@ end
   sandbox freezes when the invocation returns; there `job:http` raises an error. The request lives
   only in the process: if the task is stopped (SIGTERM on a deploy or scale-in), its running jobs are
   failed at once with `ok = false`; if it dies without warning (a crash, OOM), the job never gets a
-  `done.json`. No retry happens either way. Treat the same way as a partner that never answers
-  ([Not covered](#not-covered)), and keep the calls idempotent.
+  `done.json`. No retry happens either way. Submit with a `deadline_s` ([Deadlines](#deadlines)) so a
+  lost job is failed, and keep the calls idempotent.
 
 ## Tenant config and deployment
 
@@ -232,5 +253,4 @@ Each bucket call counts against `max_data_ops`; each part read is one. Streams o
 
 ## Not covered
 
-If the partner never writes `done.json`, nothing runs. Detect that with a periodic script that lists
-`jobs/` and compares the age of `request.json` against `done.json`.
+Without a `deadline_s`, a partner that never writes `done.json` leaves nothing running; set one.
