@@ -26,10 +26,10 @@ use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    timer,
     gzip::Capped,
     http_job::{self, Prepared},
     ndjson::Rows,
+    timer,
     xml::{ByteStream, Limited},
     Budget, Deadline, HostContext, StoreScope,
 };
@@ -859,7 +859,11 @@ fn route_overdue(lua: &Lua, ctx: &Ctx, event: &Table) -> mlua::Result<Value> {
             if scope.get(&done_key).map_err(err)?.is_none() {
                 tracing::warn!(job = %id, "batch job passed its deadline without a result");
                 ctx.op()?;
-                put_done(&scope, &id, &json!({"ok": false, "error": "job overdue: no result by its deadline_s"}));
+                put_done(
+                    &scope,
+                    &id,
+                    &json!({"ok": false, "error": "job overdue: no result by its deadline_s"}),
+                );
             }
         }
     }
@@ -1329,7 +1333,11 @@ mod tests {
         };
         mem.put("t/state/a.json", b"{}".to_vec()).unwrap();
         mem.put("t/state/b.json", b"{}".to_vec()).unwrap();
-        mem.put("t/jobs/b/done.json", br#"{"ok":true,"results":{}}"#.to_vec()).unwrap();
+        mem.put(
+            "t/jobs/b/done.json",
+            br#"{"ok":true,"results":{}}"#.to_vec(),
+        )
+        .unwrap();
 
         for job in ["a", "b", "gone"] {
             let Value::Table(r) = route(&lua, &ctx, &ev(job)).unwrap() else {
@@ -1337,10 +1345,12 @@ mod tests {
             };
             assert!(r.get::<bool>("settled").unwrap());
         }
-        let a: Json = serde_json::from_slice(&mem.get("t/jobs/a/done.json").unwrap().unwrap()).unwrap();
+        let a: Json =
+            serde_json::from_slice(&mem.get("t/jobs/a/done.json").unwrap().unwrap()).unwrap();
         assert_eq!(a["ok"], false);
         assert!(a["error"].as_str().unwrap().contains("overdue"));
-        let b: Json = serde_json::from_slice(&mem.get("t/jobs/b/done.json").unwrap().unwrap()).unwrap();
+        let b: Json =
+            serde_json::from_slice(&mem.get("t/jobs/b/done.json").unwrap().unwrap()).unwrap();
         assert_eq!(b["ok"], true);
         assert!(mem.get("t/jobs/gone/done.json").unwrap().is_none());
     }
