@@ -713,8 +713,10 @@ fn spawn_queue_message(
                 &s3,
                 &spread,
                 msg.body().unwrap_or_default(),
-                attempt,
-                continues_trace,
+                Delivery {
+                    attempt,
+                    continues_trace,
+                },
             )
             .await;
             integraal_core::telemetry::sqs_message(if acked { "acked" } else { "retry" });
@@ -736,6 +738,13 @@ fn spawn_queue_message(
     );
 }
 
+/// How a queue message reached us: its delivery count and whether it carries a trace to continue.
+#[derive(Clone, Copy)]
+struct Delivery {
+    attempt: u32,
+    continues_trace: bool,
+}
+
 /// Runs one queue message; returns whether it may be deleted.
 async fn handle_message(
     engine: &Engine,
@@ -744,9 +753,12 @@ async fn handle_message(
     s3: &S3Events,
     spread: &Spread,
     body: &str,
-    attempt: u32,
-    continues_trace: bool,
+    delivery: Delivery,
 ) -> bool {
+    let Delivery {
+        attempt,
+        continues_trace,
+    } = delivery;
     match classify(body) {
         Err(e) => {
             tracing::error!(error = %e, "unparseable queue message");
