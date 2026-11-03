@@ -48,6 +48,9 @@ Tenants are granted access as for S3 (`{ "stores": { "PartnerSftp": ["read", "wr
 ## Behaviour
 - `get`, `open`, `put`, `create`, `delete` and `list` all work. `open` and `create` stream, so objects
   can exceed `max_object_mb`. A transfer that fails partway is an error, not a short object.
+- To copy an object between stores (say SFTP to S3) without `max_object_mb` applying, stream it:
+  `ig.store.PartnerSftp.open(key):pipe(out)` into a sink from `create`, then `out:close()`. See
+  [Reading bytes and copying](streams-xml.md#reading-bytes-and-copying).
 - Uploads go to a temporary name and are renamed on `close`; an aborted or failed script leaves nothing
   behind (a rename needs the server to allow `RNFR`/`RNTO` or `rename`).
 - Missing parent directories are created on upload.
