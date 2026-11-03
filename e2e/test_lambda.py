@@ -21,7 +21,7 @@ def test_sync_lambda_invoke(stack):
 
 def test_sync_lambda_invoke_reports_errors(stack):
     r = invoke(stack, {"tenant": "mega", "script": "nope", "event": {}})
-    assert r["ok"] is False and r["error"], r
+    assert r.get("ok") is False and r.get("error"), r
 
 
 def test_intake_forwards_messages_to_the_class_the_placement_script_picks(stack):
