@@ -30,6 +30,10 @@ upload size.
 Keys may not be empty, start with `/`, contain `.` or `..` segments, backslashes or control
 characters, or exceed 512 bytes. Calls count against `max_data_ops`.
 
+To copy between stores without `max_object_mb` applying, stream it:
+`ig.store.A.open(k):pipe(ig.store.B.create(k))` then `close` the sink (see
+[Streams](streams-xml.md#reading-bytes-and-copying)).
+
 ### Deleting after a queue handler
 
 `queue` handlers may return `delete = true` or `delete = { { store, key }, ... }` and the engine

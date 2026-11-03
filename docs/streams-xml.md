@@ -6,6 +6,32 @@ consumed by the first parser that takes it; `stream:close()` releases it early. 
 in chunks, so a multi-gigabyte object never sits in memory (limited by `max_stream_mb`, see
 [Limits](limits.md)).
 
+### Reading bytes and copying
+
+| Method | Result |
+| --- | --- |
+| `stream:chunks(size?)` | iterator of strings of `size` bytes (default 65536, at most 1048576; the last may be shorter) |
+| `stream:pipe(sink)` | copies everything into a [sink](stores.md#streaming-uploads) natively and returns the byte count |
+
+Both consume the stream, like a parser, and both count against `max_stream_mb` and the invocation
+deadline, so neither is limited by `max_object_mb`. `pipe` aborts the sink if the copy fails, so no
+partial object appears; you still call `sink:close()` on success.
+
+```lua
+-- copy an SFTP object into S3 without holding it in memory
+local src = ig.store.PartnerSftp.open("export.csv")
+local out = ig.store.Out.create("export.csv")
+src:pipe(out)
+out:close()
+
+-- or look at the data on the way through
+local out2 = ig.store.Out.create("copy.bin")
+for block in ig.store.PartnerSftp.open("export.csv"):chunks() do
+  out2:write(block)
+end
+out2:close()
+```
+
 Read XML by streaming: use `ig.xml.extract` for records and `ig.xml.events` when you need
 full control. `ig.xml.parse` (a DOM) exists but should be avoided.
 

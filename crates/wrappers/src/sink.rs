@@ -56,7 +56,7 @@ impl Sink {
         Ok(st.written)
     }
 
-    fn abort(&self) {
+    pub(crate) fn abort(&self) {
         if let Some(w) = self.0.lock().unwrap().w.take() {
             w.abort();
         }

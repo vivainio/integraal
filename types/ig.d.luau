@@ -4,6 +4,11 @@
 
 declare extern type ByteStream with
     function close(self): ()
+    -- Iterator over the bytes in blocks of `size` (default 65536, at most 1048576); consumes the stream.
+    function chunks(self, size: number?): () -> string?
+    -- Copies the whole stream into `sink` and returns the byte count; aborts the sink on failure.
+    -- The caller still closes the sink.
+    function pipe(self, sink: Sink): number
 end
 
 -- First argument of every handler.
