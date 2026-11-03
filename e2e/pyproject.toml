@@ -4,6 +4,8 @@ version = "0.0.0"
 requires-python = ">=3.11"
 dependencies = [
     "pytest>=8",
+    # Readable failures: compare a whole payload against a pattern, e.g. IsPartialDict(ok=False, error=IsStr()).
+    "dirty-equals>=0.9",
     "boto3>=1.34",
     "requests>=2.31",
     # Decodes what the server exports over OTLP/HTTP in the devtools suite.

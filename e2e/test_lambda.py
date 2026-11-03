@@ -4,24 +4,27 @@ import json
 import uuid
 
 import requests
+from dirty_equals import IsPartialDict, IsStr
 
 from conftest import eventually
 
 
 def invoke(stack, payload, function="integraal"):
     r = stack.lam.invoke(FunctionName=function, Payload=json.dumps(payload))
-    return json.loads(r["Payload"].read())
+    body = json.loads(r["Payload"].read())
+    # A crashed or timed-out function answers with Lambda's own error shape, not integraal's.
+    assert "errorMessage" not in body, f"the function itself failed: {body}"
+    return body
 
 
 def test_sync_lambda_invoke(stack):
     r = invoke(stack, {"tenant": "mega", "script": "hello", "event": {"x": 1}})
-    assert r["ok"] is True, r
-    assert r["result"] == {"trigger": "invoke", "event": {"x": 1}}
+    assert r == IsPartialDict(ok=True, result={"trigger": "invoke", "event": {"x": 1}})
 
 
 def test_sync_lambda_invoke_reports_errors(stack):
     r = invoke(stack, {"tenant": "mega", "script": "nope", "event": {}})
-    assert r.get("ok") is False and r.get("error"), r
+    assert r == IsPartialDict(ok=False, error=IsStr(min_length=1))
 
 
 def test_intake_forwards_messages_to_the_class_the_placement_script_picks(stack):
