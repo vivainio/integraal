@@ -55,6 +55,11 @@ Tenants are granted access as for S3 (`{ "stores": { "PartnerSftp": ["read", "wr
   [Reading bytes and copying](streams-xml.md#reading-bytes-and-copying).
 - Uploads go to a temporary name and are renamed on `close`; an aborted or failed script leaves nothing
   behind (a rename needs the server to allow `RNFR`/`RNTO` or `rename`).
+- A stream that moves no data for `timeout_s` is cut off. For an upload that includes a script holding a
+  `create` sink open without writing, and a `pipe` whose source has gone quiet. The next `write` or the
+  `close` then raises an error naming the key and `curl`'s reason, the partial temporary file is removed
+  (best effort), and nothing appears under the real key. Keep a sink open only while data is flowing,
+  or raise `timeout_s` for stores whose sources are slow.
 - Missing parent directories are created on upload.
 - `list` walks directories (at most 8 deep) and needs the server to return Unix-style `ls -l` listings.
 - `presign_get`, `presign_put` and event notifications are not available.

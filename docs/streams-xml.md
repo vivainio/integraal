@@ -17,6 +17,9 @@ Both consume the stream, like a parser, and both count against `max_stream_mb` a
 deadline, so neither is limited by `max_object_mb`. `pipe` aborts the sink if the copy fails, so no
 partial object appears; you still call `sink:close()` on success.
 
+Streams from remote stores ([SFTP and FTP](remote.md#behaviour)) are also cut off when no data moves for
+that store's `timeout_s`, so a slow source can stall a copy even when the totals are within limits.
+
 ```lua
 -- copy an SFTP object into S3 without holding it in memory
 local src = ig.store.PartnerSftp.open("export.csv")
