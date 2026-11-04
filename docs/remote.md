@@ -35,13 +35,15 @@ In the [global config](deployment.md#configuration), a store of `"type": "ftp"` 
 | `password_env` | both | name of the environment variable holding the password (never the password itself). For SFTP give this or `key_file` |
 | `key_file` | `sftp` | private key file |
 | `host_key_sha256` | `sftp` (required) | the server's host key as base64 SHA-256, as `curl --hostpubsha256` takes it. There is no option to skip the check |
-| `tls` | `ftp` | `none` (default), `explicit` (`AUTH TLS`, refused if the server will not) or `implicit` (`ftps://`) |
-| `timeout_s` | both | longest one operation may take; default 60 |
-| `curl` | both | the `curl` binary; default `curl` from `PATH` |
+| `tls` | `ftp` | `none` (default), `explicit` (`AUTH TLS`, refused if the server will not) or `implicit` (`ftps://`). **`none` sends the password and the data in clear text**; use `explicit` or `implicit` unless the server offers nothing else |
+| `timeout_s` | both | default 60. For `get`, `put`, `list` and `delete` it is the longest the call may take. For `open` and `create` it is the longest the stream may go without moving data (`curl --speed-time`), so a large copy that keeps flowing is not cut off at `timeout_s`; the invocation deadline and `max_stream_mb` still apply |
+| `curl` | both | the `curl` binary; default `curl` from `PATH`. Set an absolute path in production: this binary receives the credentials, so it should not be found through a `PATH` you do not control |
 | `prefix`, `max_read_mb`, `max_write_mb` | both | as for every [store](stores.md#deployment) |
 
-Credentials are passed to `curl` through a private temporary file that is removed when it exits, so they
-never appear in the process list.
+Credentials are passed to `curl` through a private temporary file (mode `0600`, in the system temp
+directory) that is removed when it exits, so they never appear in the process list. If the process is
+killed before it can clean up, the file is left behind; the next start removes any such file older
+than an hour. `curl` also runs with URL globbing off, so a key containing `[` or `{` is always a literal name.
 
 Tenants are granted access as for S3 (`{ "stores": { "PartnerSftp": ["read", "write"] } }`).
 

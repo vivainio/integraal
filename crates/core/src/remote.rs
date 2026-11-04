@@ -94,6 +94,20 @@ impl RemoteConfig {
     }
 }
 
+/// How long one `curl` may run. Whole objects and listings are cut off after `timeout`; a stream
+/// is only cut off when it stalls for that long, so a large transfer that keeps moving is not
+/// killed halfway.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Transfer {
+    Bounded,
+    Stream,
+}
+
+/// Credential files older than this are leftovers of a killed process and are removed at startup.
+/// `curl` reads its config when it starts, so removing a file that is still in use is harmless.
+const STALE_CONFIG_AGE: Duration = Duration::from_secs(3600);
+const CONFIG_PREFIX: &str = "integraal-curl-";
+
 #[derive(Clone)]
 pub struct CurlBackend {
     cfg: RemoteConfig,
@@ -101,6 +115,7 @@ pub struct CurlBackend {
 
 impl CurlBackend {
     pub fn new(cfg: RemoteConfig) -> Self {
+        sweep_stale_configs(&std::env::temp_dir(), STALE_CONFIG_AGE);
         Self { cfg }
     }
 
@@ -178,8 +193,14 @@ impl CurlBackend {
     }
 
     /// Writes the private config for one process and returns it with the other arguments.
-    fn command(&self, url: &str, extra: &[String]) -> Result<(Command, ConfigFile), String> {
-        let mut lines = vec![format!("url = {}", cfg_quote(url))];
+    fn command(
+        &self,
+        url: &str,
+        extra: &[String],
+        mode: Transfer,
+    ) -> Result<(Command, ConfigFile), String> {
+        // `globoff`: the url is already percent-encoded, but never let curl expand `[]` or `{}`.
+        let mut lines = vec![format!("url = {}", cfg_quote(url)), "globoff".to_string()];
         if let Some(u) = &self.cfg.user {
             let cred = match &self.cfg.password {
                 Some(p) => format!("{u}:{p}"),
@@ -204,16 +225,36 @@ impl CurlBackend {
         cmd.args(["-sS", "--proto-redir", "=none", "--connect-timeout", "15"])
             .arg("--proto")
             .arg(format!("={}", self.cfg.protocol.scheme()))
-            .arg("--max-time")
-            .arg(self.cfg.timeout.as_secs().max(1).to_string())
+            .args(self.limit_args(mode))
             .arg("-K")
             .arg(file.path())
             .stderr(Stdio::piped());
         Ok((cmd, file))
     }
 
-    fn spawn(&self, url: &str, extra: &[String], stdin: bool) -> Result<Proc, String> {
-        let (mut cmd, file) = self.command(url, extra)?;
+    /// The time limit for one `curl`: a deadline for the whole run, or for a stream a limit on how
+    /// long it may go without moving data.
+    fn limit_args(&self, mode: Transfer) -> Vec<String> {
+        let secs = self.cfg.timeout.as_secs().max(1).to_string();
+        match mode {
+            Transfer::Bounded => vec!["--max-time".into(), secs],
+            Transfer::Stream => vec![
+                "--speed-limit".into(),
+                "1".into(),
+                "--speed-time".into(),
+                secs,
+            ],
+        }
+    }
+
+    fn spawn(
+        &self,
+        url: &str,
+        extra: &[String],
+        stdin: bool,
+        mode: Transfer,
+    ) -> Result<Proc, String> {
+        let (mut cmd, file) = self.command(url, extra, mode)?;
         cmd.stdout(Stdio::piped())
             .stdin(if stdin { Stdio::piped() } else { Stdio::null() });
         let child = cmd
@@ -226,7 +267,7 @@ impl CurlBackend {
     }
 
     fn list_dir(&self, key_dir: &str) -> Result<Vec<(String, bool)>, String> {
-        let mut p = self.spawn(&self.dir_url(key_dir), &[], false)?;
+        let mut p = self.spawn(&self.dir_url(key_dir), &[], false, Transfer::Bounded)?;
         let mut text = String::new();
         p.stdout()
             .read_to_string(&mut text)
@@ -267,7 +308,7 @@ impl CurlBackend {
 
 impl ObjectBackend for CurlBackend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let Some(mut r) = self.open(key)? else {
+        let Some(mut r) = self.open_as(key, Transfer::Bounded)? else {
             return Ok(None);
         };
         let mut body = Vec::new();
@@ -282,7 +323,7 @@ impl ObjectBackend for CurlBackend {
     }
 
     fn put(&self, key: &str, body: Vec<u8>) -> Result<(), String> {
-        let mut w = self.create(key)?;
+        let mut w = self.create_as(key, Transfer::Bounded)?;
         w.write(&body)?;
         w.commit()
     }
@@ -291,7 +332,7 @@ impl ObjectBackend for CurlBackend {
         // `curl` needs a transfer for `-Q` to run, so it lists the base directory and discards it.
         check_key(key)?;
         let quote = format!("quote = {}", cfg_quote(&self.delete_command(key)));
-        let mut p = self.spawn(&self.dir_url(""), &[quote], false)?;
+        let mut p = self.spawn(&self.dir_url(""), &[quote], false, Transfer::Bounded)?;
         let _ = std::io::copy(&mut p.stdout(), &mut std::io::sink());
         match p.finish() {
             Ok(()) => Ok(()),
@@ -301,7 +342,30 @@ impl ObjectBackend for CurlBackend {
     }
 
     fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String> {
-        let mut p = self.spawn(&self.url(key)?, &[], false)?;
+        self.open_as(key, Transfer::Stream)
+    }
+
+    fn create(&self, key: &str) -> Result<Box<dyn ObjectWriter>, String> {
+        self.create_as(key, Transfer::Stream)
+    }
+
+    fn list(&self, prefix: &str, limit: usize) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        // Start in the deepest directory the prefix names.
+        let start = prefix.rfind('/').map_or("", |i| &prefix[..=i]);
+        if !start.is_empty() {
+            check_key(start.trim_end_matches('/'))?;
+        }
+        self.walk(start, prefix, limit, 0, &mut out)?;
+        out.sort();
+        out.truncate(limit);
+        Ok(out)
+    }
+}
+
+impl CurlBackend {
+    fn open_as(&self, key: &str, mode: Transfer) -> Result<Option<Box<dyn Read + Send>>, String> {
+        let mut p = self.spawn(&self.url(key)?, &[], false, mode)?;
         // Read ahead: an empty first read is either an empty file or a failed transfer.
         let mut first = vec![0u8; 8192];
         let n = read_some(&mut p.stdout(), &mut first).map_err(|e| format!("{key}: {e}"))?;
@@ -321,7 +385,7 @@ impl ObjectBackend for CurlBackend {
         })))
     }
 
-    fn create(&self, key: &str) -> Result<Box<dyn ObjectWriter>, String> {
+    fn create_as(&self, key: &str, mode: Transfer) -> Result<Box<dyn ObjectWriter>, String> {
         check_key(key)?;
         let (dir, name) = key.rsplit_once('/').map_or(("", key), |(d, n)| (d, n));
         let tmp_name = format!("{name}{TMP_MARK}{}", unique());
@@ -337,7 +401,7 @@ impl ObjectBackend for CurlBackend {
         for q in self.rename_command(&tmp_key, key) {
             extra.push(format!("quote = {}", cfg_quote(&q)));
         }
-        let mut proc = self.spawn(&self.url(&tmp_key)?, &extra, true)?;
+        let mut proc = self.spawn(&self.url(&tmp_key)?, &extra, true, mode)?;
         let stdin = proc.child().stdin.take();
         Ok(Box::new(Upload {
             stdin,
@@ -347,19 +411,6 @@ impl ObjectBackend for CurlBackend {
             backend: self.clone(),
             committed: false,
         }))
-    }
-
-    fn list(&self, prefix: &str, limit: usize) -> Result<Vec<String>, String> {
-        let mut out = Vec::new();
-        // Start in the deepest directory the prefix names.
-        let start = prefix.rfind('/').map_or("", |i| &prefix[..=i]);
-        if !start.is_empty() {
-            check_key(start.trim_end_matches('/'))?;
-        }
-        self.walk(start, prefix, limit, 0, &mut out)?;
-        out.sort();
-        out.truncate(limit);
-        Ok(out)
     }
 }
 
@@ -515,7 +566,7 @@ struct ConfigFile(std::path::PathBuf);
 
 impl ConfigFile {
     fn create(contents: &str) -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("integraal-curl-{}", unique()));
+        let path = std::env::temp_dir().join(format!("{CONFIG_PREFIX}{}", unique()));
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -540,6 +591,28 @@ impl ConfigFile {
 impl Drop for ConfigFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Removes credential files a killed process left behind (a `SIGKILL` skips `ConfigFile::drop`).
+fn sweep_stale_configs(dir: &std::path::Path, older_than: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(CONFIG_PREFIX)
+            && entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > older_than);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -676,6 +749,70 @@ mod tests {
         for bad in ["", "out/", "/out", "/a/../b/", "/a/./b/", "/a\nb/"] {
             assert!(RemoteConfig::check_dir(bad).is_err(), "{bad:?}");
         }
+    }
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn whole_objects_have_a_deadline_but_streams_only_a_stall_limit() {
+        let b = backend(Protocol::Sftp, "/out/");
+        let (bounded, f1) = b.command("sftp://h/x", &[], Transfer::Bounded).unwrap();
+        let args = args_of(&bounded);
+        assert!(
+            args.windows(2).any(|w| w == ["--max-time", "30"]),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|a| a == "--speed-time"), "{args:?}");
+
+        let (stream, f2) = b.command("sftp://h/x", &[], Transfer::Stream).unwrap();
+        let args = args_of(&stream);
+        assert!(!args.iter().any(|a| a == "--max-time"), "{args:?}");
+        assert!(
+            args.windows(2).any(|w| w == ["--speed-time", "30"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--speed-limit", "1"]),
+            "{args:?}"
+        );
+        drop((f1, f2));
+    }
+
+    #[test]
+    fn the_config_turns_url_globbing_off() {
+        let b = backend(Protocol::Ftp, "/out/");
+        let (_, file) = b
+            .command("ftp://h/a%5B1%5D", &[], Transfer::Bounded)
+            .unwrap();
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.lines().any(|l| l == "globoff"), "{text}");
+    }
+
+    #[test]
+    fn stale_credential_files_are_swept_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("integraal-sweep-test-{}", unique()));
+        std::fs::create_dir(&dir).unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(2 * 3600);
+        let write = |name: &str, age: Option<std::time::SystemTime>| {
+            let f = std::fs::File::create(dir.join(name)).unwrap();
+            if let Some(t) = age {
+                f.set_modified(t).unwrap();
+            }
+        };
+        write("integraal-curl-old", Some(old));
+        write("integraal-curl-new", None);
+        write("unrelated-old", Some(old));
+
+        sweep_stale_configs(&dir, STALE_CONFIG_AGE);
+
+        assert!(!dir.join("integraal-curl-old").exists());
+        assert!(dir.join("integraal-curl-new").exists());
+        assert!(dir.join("unrelated-old").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

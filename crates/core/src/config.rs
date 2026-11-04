@@ -149,7 +149,7 @@ pub struct DirStore {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FtpTls {
-    /// Plain FTP.
+    /// Plain FTP: the login and the data cross the network in clear text.
     #[default]
     None,
     /// Plain connection, upgraded with `AUTH TLS`; refused if the server will not.
@@ -176,9 +176,10 @@ pub struct FtpStore {
     pub prefix: String,
     pub max_read_mb: Option<u64>,
     pub max_write_mb: Option<u64>,
-    /// Longest one operation may take; default 60.
+    /// Longest one get, put, list or delete may take; for streams, the longest they may stall.
+    /// Default 60.
     pub timeout_s: Option<u64>,
-    /// The `curl` binary; default `curl` from `PATH`.
+    /// The `curl` binary; default `curl` from `PATH`. Use an absolute path in production.
     pub curl: Option<String>,
 }
 
@@ -200,7 +201,9 @@ pub struct SftpStore {
     pub prefix: String,
     pub max_read_mb: Option<u64>,
     pub max_write_mb: Option<u64>,
+    /// As for FTP: a deadline for whole objects, a stall limit for streams. Default 60.
     pub timeout_s: Option<u64>,
+    /// The `curl` binary; default `curl` from `PATH`. Use an absolute path in production.
     pub curl: Option<String>,
 }
 

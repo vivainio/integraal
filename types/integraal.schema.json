@@ -579,7 +579,8 @@
             "explicit",
             "implicit"
           ],
-          "default": "none"
+          "default": "none",
+          "description": "none sends the login and the data in clear text. explicit and implicit encrypt them."
         },
         "prefix": {
           "$ref": "#/$defs/prefix"
@@ -593,12 +594,14 @@
         "timeout_s": {
           "type": "integer",
           "minimum": 1,
-          "default": 60
+          "default": 60,
+          "description": "Longest one get, put, list or delete may take. For open and create it is how long a stream may go without moving data, so a large transfer that keeps going is not cut off."
         },
         "curl": {
           "type": "string",
           "minLength": 1,
-          "default": "curl"
+          "default": "curl",
+          "description": "The curl binary. Use an absolute path in production: it receives the credentials."
         }
       }
     },
@@ -670,12 +673,14 @@
         "timeout_s": {
           "type": "integer",
           "minimum": 1,
-          "default": 60
+          "default": 60,
+          "description": "Longest one get, put, list or delete may take. For open and create it is how long a stream may go without moving data, so a large transfer that keeps going is not cut off."
         },
         "curl": {
           "type": "string",
           "minLength": 1,
-          "default": "curl"
+          "default": "curl",
+          "description": "The curl binary. Use an absolute path in production: it receives the credentials."
         }
       }
     }
