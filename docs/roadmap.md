@@ -7,8 +7,6 @@ API and recovery semantics designed before implementation.
 Routing, S3 notification handling ([Triggers](triggers.md#s3-notifications)) and result-driven
 deletes are implemented; the rest of the pipeline is not.
 
-- In-process chaining: a script returns `{ next = "...", event = ... }` and the engine continues
-  within one invocation, sharing the deadline and call budgets.
 - Design any remaining queue delivery controls as core primitives only where patterns need them.
   Explicit delayed retries are provided by the versioned `igp.retry` pattern, not return dispositions.
 - Idempotency keyed on `(key, etag, script)`; per-tenant event-rate and concurrency caps.
@@ -71,14 +69,17 @@ audit. Replay is at least once; see the documented send/delete failure windows.
 [Fleet and tenant pause](ops.md#fleet-and-tenant-pause) are implemented with a durable DynamoDB
 control slot, ten-second worker polling and bounded receipt holding for paused tenants. Remaining work:
 
-- Pin worker and continuation script versions across retries and multi-step flows. Handoffs can
-  already specify a version; barriers and other continuation APIs need consistent support.
+- Preserve exact code for mutable `latest` across retries and multi-step flows.
+  [Same-script continuations](queue.md#continuation-versions) now inherit immutable versions
+  automatically; callbacks, barriers, batch jobs, timers, retries and handoffs support explicit
+  destination versions. Ordinary queue redeliveries still follow the original envelope.
 - Surface flows approaching an explicit expiry, including legacy barrier state and callbacks,
   so recovery happens before the required state is lost.
 
 ## Engine
 - Cache compiled Luau bytecode per `(script hash, runtime)`.
-- Per-script limit overrides; per-tenant concurrency caps on Fargate.
+- Per-script limit overrides. [Runtime tenant concurrency caps](ops.md#tenant-concurrency-limits)
+  are implemented per Fargate worker through the shared ops control record.
 - Hard deadline for S3 operations in flight.
 - DNS-aware SSRF protection for `ig.http` (hostnames resolving to private addresses).
 

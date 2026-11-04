@@ -116,6 +116,7 @@ async fn handle(
     let message = json!({
         "tenant": tenant,
         "script": cb.script,
+        "version": cb.version,
         "event": {
             "method": method,
             "path": path,

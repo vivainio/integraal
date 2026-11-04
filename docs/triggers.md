@@ -40,6 +40,7 @@ curl -X POST http://host:8080/v1/acme/hello \
 
 The request body is the `event`; the response body is the script's return value. Health check:
 `GET /healthz`. `POST /v1/{tenant}` (no script) uses the [router](router.md).
+Tenant-authored [web apps](tenant-web.md) serve pages and HTTP routes at `/web/{tenant}`.
 
 | Status | Cause |
 | --- | --- |
@@ -101,4 +102,4 @@ entries; `delete` is ignored for other triggers; a failed delete fails the invoc
 | --- | --- | --- |
 | Best for | low or spiky volume, synchronous calls | steady load, queue consumers, warm caches |
 | Cache | per execution environment | per task |
-| Concurrency control | Lambda settings | your own (per-tenant caps are on the [roadmap](roadmap.md)) |
+| Concurrency control | Lambda settings | your own ([per-worker tenant caps](ops.md#tenant-concurrency-limits)) |

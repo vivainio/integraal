@@ -21,6 +21,17 @@ declare extern type Context with
     attempt: number
 end
 
+-- Requests and responses for tenant web apps at /web/{tenant}.
+declare extern type TenantWebRequest with
+    method: string
+    path: string
+    base_path: string
+    query: { [string]: string }
+    raw_query: string
+    headers: { [string]: string }
+    body: string
+end
+
 -- Fields are present depending on `type`:
 --   start: tag, attrs, depth   end: tag, depth   text/cdata/comment: text, depth
 declare extern type XmlEvent with
@@ -110,7 +121,7 @@ declare extern type BatchJob with
     -- Saved for the continuation; the partner never sees it.
     state: (BatchJob, value: any) -> ()
     -- Script that `igp.batch.route` picks when the partner's done.json arrives.
-    continue_with: (BatchJob, script: string) -> ()
+    continue_with: (BatchJob, script: string, version: string?) -> ()
     id: (BatchJob) -> string
     -- `deadline_s` fails the job with ok = false if no done.json exists that many seconds later
     -- (needs ig.queue). The router must pass `batch.overdue` events to `igp.batch.route`.
@@ -326,6 +337,7 @@ declare extern type WorkflowSequence with
     id: string
     key: (self: WorkflowSequence, name: string) -> string
     step: <T>(self: WorkflowSequence, name: string, run: () -> T) -> T
+    once: (self: WorkflowSequence, name: string, run: () -> ()) -> ()
     sleep: (self: WorkflowSequence, name: string, delay_s: number) -> ()
     wait: (self: WorkflowSequence, name: string) -> any
     yield: (self: WorkflowSequence, name: string) -> ()
@@ -352,7 +364,7 @@ declare extern type PatternsV1 with
         renew: (id: string, token: string, opts: { lease_s: number? }?) -> number?,
     }
     callback: {
-        create: (opts: { script: string?, state: any, ttl_s: number? }?) -> string,
+        create: (opts: { script: string?, version: string?, state: any, ttl_s: number? }?) -> string,
     }
     batch: {
         new: (opts: { id: string? }?) -> BatchJob,
@@ -360,12 +372,12 @@ declare extern type PatternsV1 with
         hydrate: (event: { [string]: any }, opts: { allow_failure: boolean? }?) -> BatchResult?,
         -- For a router: nil unless `event` is a done.json from the batch bucket or a `batch.overdue` timer.
         -- `settled` is set for the latter: the job is already failed or finished, run nothing.
-        route: (event: { [string]: any }) -> { job: string, script: string?, settled: boolean?, event: { [string]: any } }?,
+        route: (event: { [string]: any }) -> { job: string, script: string?, version: string?, settled: boolean?, event: { [string]: any } }?,
     }
     barrier: {
         -- Registers members (at most 10 000); returns the id. Default sealed=true needs members.
         -- sealed=false opens a growable list, with 0–99 initial members (members may be omitted).
-        create: (opts: { id: string?, members: { string }?, sealed: boolean?, continue_with: string?, state: any, deadline_s: number?, overdue_with: string? }) -> string,
+        create: (opts: { id: string?, members: { string }?, sealed: boolean?, continue_with: string?, version: string?, state: any, deadline_s: number?, overdue_with: string?, overdue_version: string? }) -> string,
         -- Open lists only: atomically adds 1–99 members, returning the count of new names.
         add: (id: string, members: { string }) -> number,
         -- Closes the list; true only if this call dispatched the continuation. Safe to repeat.
@@ -391,6 +403,7 @@ end
 
 -- Operator-only module; requires a direct invocation of operations.operator_tenant.
 declare extern type QueuePauseState with
+    max_concurrent: { [string]: number }
     fleet: boolean
     tenants: { string }
     revision: number
@@ -407,6 +420,8 @@ declare extern type OpsV1 with
         replay: (queue: string, message_id: string, reason: string) -> any,
     }
     tenant: {
+        status: (tenant: string) -> { tenant: string, paused: boolean, tenant_paused: boolean, fleet_paused: boolean, max_concurrent: number?, revision: number },
+        limit: (tenant: string, opts: { max_concurrent: number? }, reason: string) -> QueuePauseState,
         pause: (tenant: string, reason: string) -> QueuePauseState,
         resume: (tenant: string, reason: string) -> QueuePauseState,
     }

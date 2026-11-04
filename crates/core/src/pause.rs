@@ -1,5 +1,5 @@
 //! Shared queue-admission control. Scripts cannot address the system partition through ig.db.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, ensure, Result};
 use integraal_loader::ScriptKey;
@@ -13,6 +13,9 @@ const SK: &str = "queue-pause";
 pub struct State {
     pub fleet: bool,
     pub tenants: BTreeSet<String>,
+    /// Per-worker tenant concurrency overrides; absent means no tenant cap.
+    #[serde(default)]
+    pub max_concurrent: BTreeMap<String, u32>,
     pub revision: u64,
     pub changed_at_ms: u64,
     pub request_id: String,
@@ -40,20 +43,10 @@ pub(crate) fn change(
     reason: &str,
     request_id: &str,
 ) -> Result<State> {
-    ensure!(
-        !reason.trim().is_empty() && reason.len() <= 1024,
-        "pause/resume needs a reason of 1–1024 bytes"
-    );
     if let Some(tenant) = tenant {
         ScriptKey::config(tenant)?;
     }
-    for _ in 0..8 {
-        let current = backend.get(PK, SK).map_err(anyhow::Error::msg)?;
-        let mut state: State = current
-            .as_ref()
-            .map(|item| serde_json::from_str(&item.value))
-            .transpose()?
-            .unwrap_or_default();
+    update(backend, reason, request_id, |state| {
         if let Some(tenant) = tenant {
             if paused {
                 state.tenants.insert(tenant.into());
@@ -63,6 +56,48 @@ pub(crate) fn change(
         } else {
             state.fleet = paused;
         }
+    })
+}
+
+pub(crate) fn limit(
+    backend: &dyn ItemBackend,
+    tenant: &str,
+    max_concurrent: Option<u32>,
+    reason: &str,
+    request_id: &str,
+) -> Result<State> {
+    ScriptKey::config(tenant)?;
+    ensure!(
+        max_concurrent != Some(0),
+        "max_concurrent must be positive; use pause to stop a tenant"
+    );
+    update(backend, reason, request_id, |state| {
+        if let Some(limit) = max_concurrent {
+            state.max_concurrent.insert(tenant.into(), limit);
+        } else {
+            state.max_concurrent.remove(tenant);
+        }
+    })
+}
+
+fn update(
+    backend: &dyn ItemBackend,
+    reason: &str,
+    request_id: &str,
+    apply: impl Fn(&mut State),
+) -> Result<State> {
+    ensure!(
+        !reason.trim().is_empty() && reason.len() <= 1024,
+        "queue control needs a reason of 1–1024 bytes"
+    );
+    for _ in 0..8 {
+        let current = backend.get(PK, SK).map_err(anyhow::Error::msg)?;
+        let mut state: State = current
+            .as_ref()
+            .map(|item| serde_json::from_str(&item.value))
+            .transpose()?
+            .unwrap_or_default();
+        apply(&mut state);
         state.revision = state
             .revision
             .checked_add(1)
@@ -75,7 +110,7 @@ pub(crate) fn change(
         let value = serde_json::to_string(&state)?;
         ensure!(
             value.len() <= MAX_ITEM_BYTES - 1024,
-            "too many paused tenants in the fleet control slot"
+            "too many tenant settings in the fleet control slot"
         );
         let replacement = Item {
             sk: SK.into(),

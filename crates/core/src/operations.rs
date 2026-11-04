@@ -212,6 +212,14 @@ enum Request {
         paused: bool,
         reason: String,
     },
+    TenantLimit {
+        tenant: String,
+        max_concurrent: Option<u32>,
+        reason: String,
+    },
+    TenantStatus {
+        tenant: String,
+    },
     PauseStatus,
     FlowInspect {
         tenant: String,
@@ -287,6 +295,41 @@ async fn invoke(
             })
             .await?;
         }
+        Request::TenantLimit {
+            tenant,
+            max_concurrent,
+            reason,
+        } => {
+            let backend = engine
+                .item_backend()
+                .ok_or_else(|| anyhow!("queue control requires db"))?;
+            let (tenant, max_concurrent, reason, id) = (
+                tenant.clone(),
+                *max_concurrent,
+                reason.clone(),
+                request_id.to_string(),
+            );
+            return tokio::task::spawn_blocking(move || {
+                crate::pause::limit(backend.as_ref(), &tenant, max_concurrent, &reason, &id)
+                    .and_then(|state| serde_json::to_value(state).map_err(anyhow::Error::from))
+            })
+            .await?;
+        }
+        Request::TenantStatus { tenant } => {
+            integraal_loader::ScriptKey::config(tenant)?;
+            let state = engine.queue_pause_state().await?;
+            let mut result = serde_json::json!({
+                "tenant": tenant,
+                "paused": state.tenant_paused(tenant),
+                "tenant_paused": state.tenants.contains(tenant),
+                "fleet_paused": state.fleet,
+                "revision": state.revision,
+            });
+            if let Some(limit) = state.max_concurrent.get(tenant) {
+                result["max_concurrent"] = (*limit).into();
+            }
+            return Ok(result);
+        }
         Request::PauseStatus => {
             return serde_json::to_value(engine.queue_pause_state().await?)
                 .map_err(anyhow::Error::from)
@@ -321,7 +364,11 @@ async fn invoke(
             ensure!(!message_id.is_empty(), "message_id must not be empty");
             (queue, Some((message_id, reason)))
         }
-        Request::FlowInspect { .. } | Request::Pause { .. } | Request::PauseStatus => {
+        Request::FlowInspect { .. }
+        | Request::Pause { .. }
+        | Request::TenantStatus { .. }
+        | Request::TenantLimit { .. }
+        | Request::PauseStatus => {
             unreachable!()
         }
     };
@@ -652,6 +699,45 @@ pub(crate) fn api(lua: &mlua::Lua, host: OpsHost) -> mlua::Result<mlua::Table> {
             })?,
         )?;
     }
+    let h = host.clone();
+    tenant.set(
+        "limit",
+        lua.create_function(
+            move |lua, (tenant, opts, reason): (String, mlua::Table, String)| {
+                for field in opts.clone().pairs::<String, mlua::Value>() {
+                    let (field, _) = field?;
+                    if field != "max_concurrent" {
+                        return Err(mlua::Error::runtime("unknown tenant limit option"));
+                    }
+                }
+                h.call(
+                    lua,
+                    Request::TenantLimit {
+                        tenant,
+                        max_concurrent: {
+                            let limit = opts.get::<Option<f64>>("max_concurrent")?;
+                            if limit.is_some_and(|n| {
+                                !n.is_finite() || n.fract() != 0.0 || n < 1.0 || n > u32::MAX as f64
+                            }) {
+                                return Err(mlua::Error::runtime(
+                                    "max_concurrent must be a positive integer",
+                                ));
+                            }
+                            limit.map(|n| n as u32)
+                        },
+                        reason,
+                    },
+                )
+            },
+        )?,
+    )?;
+    let h = host.clone();
+    tenant.set(
+        "status",
+        lua.create_function(move |lua, tenant: String| {
+            h.call(lua, Request::TenantStatus { tenant })
+        })?,
+    )?;
     tenant.set_readonly(true);
     ops.set("tenant", tenant)?;
     let fleet = lua.create_table()?;

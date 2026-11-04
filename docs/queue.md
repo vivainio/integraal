@@ -100,3 +100,20 @@ The deployment sends to its `queue.url` (the same queue the server polls, or whi
 receive tenant-created work; point it at the intake queue to have [worker classes](ingress.md)
 applied). The process needs `sqs:SendMessage` on it. A tenant that sets `"queue": true` on a
 deployment without `queue.url` fails with a config error.
+
+## Continuation versions
+
+When a version is omitted and the destination names the currently executing script, queue
+sends, handoffs, timers, retries, callbacks, barrier continuations and batch continuations
+inherit its immutable version automatically. This also applies to targets selected by a router.
+An explicit version overrides inheritance; explicit `latest` opts into mutable code.
+
+Different destination scripts and router-selected destinations do not inherit a version:
+version names belong to individual scripts. Pin those destinations explicitly. Invocations of
+`latest` remain mutable, including ordinary SQS redeliveries; this feature does not snapshot
+code, mutable library imports or configuration. Previously saved continuations keep their
+original routing behavior.
+
+Callbacks accept `version`; barriers accept `version` for `continue_with` and `overdue_version`
+for `overdue_with`. Batch jobs accept `job:continue_with(script, version?)`; return the complete
+`igp.batch.route(event)` decision from the router to preserve its saved version.

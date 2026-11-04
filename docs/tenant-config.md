@@ -36,6 +36,7 @@ Each section is documented in the chapter for the feature it configures.
 | `schedule` | [Schedules](schedules.md#which-tenants) |
 | `placement` | [Worker classes](ingress.md#tenant-config-placement) |
 | `stores` | [Stores](stores.md#grants) |
+| `web` | [Tenant web apps](tenant-web.md) |
 | `queue` | [Queue](queue.md#tenant-config-and-deployment) |
 | `batch` | [Batch jobs](batch.md#tenant-config-and-deployment) |
 | `flow_logs` | [Flow logs](observability.md#flow-logs) |

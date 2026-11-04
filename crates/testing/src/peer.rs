@@ -97,6 +97,7 @@ mod tests {
         let host = HostContext {
             tenant: "tenant".into(),
             script: Arc::new(Mutex::new("test".into())),
+            script_version: Default::default(),
             stores: Default::default(),
             batch: Some(scope.clone()),
             db: None,

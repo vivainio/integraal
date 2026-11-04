@@ -180,6 +180,7 @@ async fn run() -> Result<bool> {
     let host = HostContext {
         tenant: name,
         script: Arc::new(Mutex::new("test".into())),
+        script_version: Default::default(),
         stores,
         db,
         queue,

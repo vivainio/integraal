@@ -98,11 +98,15 @@ local igp = require("@native/patterns@1")
 local function on_route(_ctx, event)
   local routed = igp.batch.route(event)           -- nil unless this is a batch done.json
   if routed then
-    return routed.script and { script = routed.script, event = routed.event } or "batch-gone"
+    return routed.script and routed or "batch-gone"
   end
   return "default"
 end
 ```
+
+`routed.version` carries the saved continuation version; return the full routing decision to
+preserve it. `job:continue_with(script, version?)` accepts an explicit version, or automatically
+inherits the current pinned version when targeting the same script.
 
 `routed.event` is the original event plus `job`. `routed.script` is `nil` when the job's state is
 gone, which is a duplicate delivery after cleanup; send it to a script that does nothing.

@@ -95,6 +95,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
     let db = host.db.clone();
     let enabled = host.queue.is_some();
     let tenant = host.tenant.clone();
+    let target = crate::ContinuationTarget::new(host);
     api.set(
         "schedule",
         lua.create_function(move |lua, (id, message, opts): (String, Table, Table)| {
@@ -132,7 +133,12 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             };
             let payload = timer::Payload {
                 script: message.get("script")?,
-                version: message.get("version")?,
+                version: target
+                    .version(
+                        message.get::<Option<String>>("script")?.as_deref(),
+                        message.get("version")?,
+                    )
+                    .map_err(mlua::Error::runtime)?,
                 event: serde_json::json!({
                     "type": "retry", "id": id, "attempt": attempt + 1, "event": event,
                 }),

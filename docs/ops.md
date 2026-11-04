@@ -68,7 +68,7 @@ automatic retries, because an interrupted replay can already have sent its messa
 
 The repository's `examples/operator.luau` provides a fuller command dispatcher for fleet and tenant
 pause/resume, flow inspection and DLQ operations. Its action names are `pause-fleet`, `resume-fleet`,
-`pause-tenant`, `resume-tenant`, `inspect-flow`, `inspect-dlq`, `replay-dlq`, and `status`.
+`pause-tenant`, `resume-tenant`, `limit-tenant`, `tenant-status`, `inspect-flow`, `inspect-dlq`, `replay-dlq`, and `status`.
 
 ## Fleet and tenant pause
 
@@ -77,11 +77,15 @@ pause/resume, flow inspection and DLQ operations. Its action names are `pause-fl
 | `ops.fleet.pause(reason)` | Save a fleet-wide SQS admission pause; return control state |
 | `ops.fleet.resume(reason)` | Clear the fleet pause, preserving independent tenant pauses |
 | `ops.fleet.status()` | Read current desired control state consistently from DynamoDB |
+| `ops.tenant.status(tenant)` | Read this tenant's effective pause state and per-worker concurrency override |
 | `ops.tenant.pause(tenant, reason)` | Pause SQS processing for this tenant |
 | `ops.tenant.resume(tenant, reason)` | Clear this tenant's pause; a fleet pause still applies |
+| `ops.tenant.limit(tenant, { max_concurrent = n }, reason)` | Set a positive integer cap per Fargate worker |
+| `ops.tenant.limit(tenant, {}, reason)` | Clear this tenant's concurrency override |
 
 Reasons are required (1–1024 bytes). The state contains `fleet`, `tenants` (a list), `revision`,
-`changed_at_ms`, `request_id`, and the latest `reason`. It lives in one non-expiring DynamoDB slot:
+`max_concurrent` (a map of tenant ids to per-worker caps), `changed_at_ms`, `request_id`, and
+the latest `reason`. It lives in one non-expiring DynamoDB slot:
 partition key `SYS#OPS`, sort key `queue-pause`. Conditional updates prevent concurrent commands
 from losing each other's tenant changes. Tenant-scoped `ig.db` cannot address this partition.
 The slot keeps the latest control change, not an append-only history of pause commands.
@@ -109,6 +113,43 @@ This is for bounded maintenance windows. SQS retention still applies, visibility
 and increment receive counts. Messages remain in SQS, so crashes do not lose held work. Resume is
 explicit; control state has no automatic expiry. Workers without `operations` configured do not
 participate in the pause protocol.
+
+## Tenant concurrency limits
+
+```lua
+ops.tenant.limit("acme", { max_concurrent = 2 }, "partner under load")
+-- Later, remove the override:
+ops.tenant.limit("acme", {}, "partner recovered")
+```
+
+Read a tenant's settings directly:
+
+```lua
+local status = ops.tenant.status("acme")
+-- status.paused includes both fleet and tenant pauses.
+-- status.max_concurrent is nil when no override is set.
+```
+
+The result also contains `tenant`, `tenant_paused`, `fleet_paused`, and the control `revision`.
+It uses one consistent read of the shared record and reports desired settings, not live usage.
+
+Limits share the pause control record and its existing ten-second poll: one DynamoDB `GetItem`
+reads all settings, with no admission reads or shared concurrency leases. Each worker admits at
+most the configured number of this tenant's queue messages. With five workers and a cap of two,
+the tenant may have ten concurrent messages across the fleet. The worker's existing global cap
+of ten active messages still applies. No override means no additional tenant cap.
+
+Lowering a limit lets active work finish; waiting messages start once the local count is below
+the cap. Raising or clearing a limit releases waiting work. Pauses take precedence and
+pause/resume preserves concurrency settings. Zero is rejected; use tenant pause to stop work.
+Direct invokes, HTTP, and workers without `operations` remain outside this admission protocol.
+
+Throttled messages use the same bounded receipt holding and visibility renewal as paused ones.
+Mixed-tenant S3 messages reserve one local slot for each represented tenant and run their records
+sequentially; they wait intact if any tenant is paused or at capacity. This is conservative and
+can delay unrelated records. Shared-queue fairness and SQS retention limits described above still
+apply. Status reports desired settings, not live counters or worker acknowledgements. Existing
+control rows without `max_concurrent` are read as having no tenant caps.
 
 ## Flow inspection and DLQ replay
 
@@ -165,3 +206,6 @@ access. DLQ inspection needs `sqs:ReceiveMessage` and `sqs:ChangeMessageVisibili
 `sqs:DeleteMessage`, destination `sqs:SendMessage` and audit `s3:PutObject`. Original failure lookup
 needs flow-log read/list permissions and pending state uses the runtime's durable-state permissions.
 Paused receipt renewal requires `sqs:ChangeMessageVisibility` on the worker queue.
+
+For tenant-authored HTTP apps and a read-only data example behind an ALB, see
+[tenant web apps](tenant-web.md).

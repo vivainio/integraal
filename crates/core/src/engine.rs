@@ -129,6 +129,9 @@ pub struct TenantLimits {
 /// the operator's lever over what a tenant may touch. Absent file = no access.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct TenantConfig {
+    /// Optional tenant-authored web app, mounted at /web/{tenant}.
+    #[serde(default)]
+    pub web: Option<WebApp>,
     #[serde(default)]
     pub http: HttpPolicy,
     /// Arbitrary JSON available to scripts as `ig.config`; string values can
@@ -166,6 +169,14 @@ pub struct TenantConfig {
     /// `type = "schedule"`. The tenant must also be listed in `tenants.json`.
     #[serde(default)]
     pub schedule: Vec<crate::schedule::Every>,
+}
+
+/// Script serving a tenant's HTTP app. Request headers cannot override its version.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebApp {
+    pub script: String,
+    pub version: Option<String>,
 }
 
 /// The `placement` block of a tenant's `config.json`; see `docs/ingress.md`.
@@ -962,6 +973,7 @@ pub(crate) struct Vm {
     pub(crate) version: u32,
     deadline: Instant,
     script: ScriptName,
+    script_version: Arc<Mutex<Option<String>>>,
     stores: StoreScopes,
     batch: Option<StoreScope>,
     capture: CaptureSlot,
@@ -985,6 +997,7 @@ pub(crate) fn new_vm(
     lua.set_memory_limit(limits.memory_bytes)
         .map_err(internal)?;
     let script = Arc::new(Mutex::new(script.to_string()));
+    let script_version = Arc::new(Mutex::new(None));
     let vm_stores = svc.stores.clone();
     install(
         &lua,
@@ -992,6 +1005,7 @@ pub(crate) fn new_vm(
         &HostContext {
             tenant: tenant.to_string(),
             script: script.clone(),
+            script_version: script_version.clone(),
             stores: svc.stores.clone(),
             batch: svc.batch.clone(),
             db: svc.db.clone(),
@@ -1048,6 +1062,7 @@ pub(crate) fn new_vm(
         version,
         deadline: hard,
         script,
+        script_version,
         stores: vm_stores,
         batch: svc.batch.clone(),
         capture,
@@ -1117,6 +1132,7 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
 fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, Error> {
     let lua = &vm.lua;
     *vm.script.lock().unwrap() = call.script.clone();
+    *vm.script_version.lock().unwrap() = call.version.clone();
     if let Some(s) = &vm.summary {
         s.script(&call.script);
     }
@@ -1604,6 +1620,54 @@ pub(crate) mod tests {
             json!({"state":"complete","result":{"first":1,"second":2}})
         );
         assert_eq!(items.get("TEN#acme#first", "").unwrap().unwrap().value, "1");
+    }
+
+    #[tokio::test]
+    async fn sequence_once_persists_only_completion_and_retries_failures() {
+        let (e, items, _) = sequence_world(
+            r#"
+            return { workflow = function(seq)
+                seq:once("notify", function()
+                    ig.db.add("notifications")
+                    return function() end -- Non-JSON values are discarded.
+                end)
+                seq:once("retry", function()
+                    if ig.db.add("attempts") == 1 then error("try again") end
+                end)
+                return "done"
+            end }
+            "#,
+            true,
+        );
+        let start = json!({"type":"sequence.start","id":"once","input":null});
+        assert!(sequence_event(&e, start.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("try again"));
+        let pk = "TEN#acme#\u{1}sequence#once";
+        let saved = items.get(pk, "step/notify").unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved.value).unwrap(),
+            json!({"kind":"once"})
+        );
+        assert!(items.get(pk, "step/retry").unwrap().is_none());
+        assert_eq!(
+            sequence_event(&e, start).await.unwrap(),
+            json!({"state":"complete","result":"done"})
+        );
+        assert_eq!(
+            items
+                .get("TEN#acme#notifications", "")
+                .unwrap()
+                .unwrap()
+                .value,
+            "1"
+        );
+        assert_eq!(
+            items.get("TEN#acme#attempts", "").unwrap().unwrap().value,
+            "2"
+        );
     }
 
     #[tokio::test]
@@ -3341,6 +3405,105 @@ end }"#;
         assert!(integraal_wrappers::list_timers(&*capped_db, "acme", 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn continuations_inherit_the_routed_script_version() {
+        let store = Arc::new(MemoryStore::default());
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"queue":true,"batch":true,"router":"router"}"#,
+        );
+        store.put(
+            &ScriptKey::new("acme", "router", None).unwrap(),
+            r#"return {on_route=function() return {script="flow",version="v1"} end}"#,
+        );
+        store.put(
+            &ScriptKey::new("acme", "flow", None).unwrap(),
+            r#"return {handle=function() error("latest must not run") end}"#,
+        );
+        store.put(&ScriptKey::new("acme", "flow", Some("v1")).unwrap(), r#"
+            local p = require("@native/patterns@1")
+            return {
+                on_queue=function(_, ev)
+                    if ev.ack then p.barrier.ack("barrier", "a", {ok=true}) end
+                    return "pinned"
+                end,
+                on_invoke=function()
+                    ig.queue.send({script="flow",event={kind="send"}})
+                    ig.queue.send({script="other",event={}})
+                    ig.queue.send({script="flow",version="v2",event={}})
+                    ig.queue.handoff("handoff", {script="flow",event={kind="handoff"}})
+                    ig.timer.after("timer", 0, {script="flow",event={kind="timer"}})
+                    p.retry.schedule("retry", {script="flow",event={}}, {attempt=1,base_delay_s=1,jitter=false})
+                    p.barrier.create({id="barrier",members={"a"},continue_with="flow",deadline_s=0,overdue_with="flow"})
+                    local url = p.callback.create({script="flow"})
+                    local job = p.batch.new({id="job"})
+                    job:query("q", "query", {})
+                    job:continue_with("flow")
+                    job:submit()
+                    return url
+                end,
+            }
+        "#);
+        let items = Arc::new(MemItems::default());
+        let queue = Arc::new(MemQueue::default());
+        let objects = Arc::new(MemBackend::default());
+        let e = Engine::new(
+            Arc::new(CachedLoader::new(Shared(store), Duration::ZERO)),
+            Limits::default(),
+        )
+        .with_db(items.clone())
+        .with_queue(queue.clone())
+        .with_callback_base_url("https://hooks.example.com")
+        .with_batch_bucket(objects.clone(), "data/");
+        let url = e
+            .invoke(Invocation {
+                script: None,
+                ..inv(Trigger::Invoke, json!({}))
+            })
+            .await
+            .unwrap();
+        let token = url.as_str().unwrap().rsplit('/').next().unwrap();
+        let integraal_wrappers::Take::Found(taken) = DbScope::new(items.clone(), "acme")
+            .take_callback(token)
+            .unwrap()
+        else {
+            panic!("callback missing")
+        };
+        assert_eq!(taken.callback.version.as_deref(), Some("v1"));
+        let state: serde_json::Value =
+            serde_json::from_slice(&objects.get("data/acme/state/job.json").unwrap().unwrap())
+                .unwrap();
+        assert_eq!(state["version"], "v1");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        integraal_wrappers::sweep_outbox(&*items, &*queue, now, 100).unwrap();
+        integraal_wrappers::sweep_timers(&*items, &*queue, now + 60, 100).unwrap();
+        e.invoke(Invocation {
+            script: Some("flow".into()),
+            version: Some("v1".into()),
+            ..inv(Trigger::Queue, json!({"ack":true}))
+        })
+        .await
+        .unwrap();
+        let messages = std::mem::take(&mut *queue.0.lock().unwrap());
+        assert_eq!(messages.len(), 8);
+        assert!(messages
+            .iter()
+            .any(|(m, _)| m["script"] == "other" && m.get("version").is_none()));
+        assert!(messages.iter().any(|(m, _)| m["version"] == "v2"));
+        for (message, _) in messages
+            .into_iter()
+            .filter(|(m, _)| m["script"] == "flow" && m["version"] != "v2")
+        {
+            assert_eq!(message["version"], "v1");
+            let mut call: Invocation = serde_json::from_value(message).unwrap();
+            call.trigger = Trigger::Queue;
+            assert_eq!(e.invoke(call).await.unwrap(), json!("pinned"));
+        }
     }
 
     #[tokio::test]
@@ -5179,18 +5342,82 @@ return { on_queue = function(ctx, ev)
         ));
     }
     #[tokio::test]
+    async fn tenant_web_example_reads_only_its_tenant_data() {
+        let items = Arc::new(MemItems::default());
+        DbScope::new(items.clone(), "acme")
+            .put("orders", "a", json!({"total":7}).to_string())
+            .unwrap();
+        DbScope::new(items.clone(), "other")
+            .put("orders", "secret", json!({"secret":true}).to_string())
+            .unwrap();
+        let e = engine_cfg(
+            include_str!("../../../examples/acme/web/latest.luau"),
+            Limits::default(),
+            r#"{"web":{"script":"s"}}"#,
+        )
+        .with_db(items.clone());
+        let before = items.0.lock().unwrap().clone();
+        let reply = e
+            .invoke_web(
+                "acme",
+                json!({"method":"GET","path":"/records","query":{"pk":"orders"}}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply["status"], 200);
+        let body: serde_json::Value =
+            serde_json::from_str(reply["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body["tenant"], "acme");
+        assert_eq!(body["rows"], json!([{"sk":"a","value":{"total":7}}]));
+        let reply = e
+            .invoke_web(
+                "acme",
+                json!({"method":"POST","path":"/records","query":{"pk":"orders"}}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply["status"], 405);
+        assert_eq!(*items.0.lock().unwrap(), before);
+        assert!(e.invoke_web("other", json!({})).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn ops_requires_operator_direct_invocation_and_controls_durable_queue_admission() {
         let script = r#"--!runtime 1
             local ops = require("ops")
             assert(ops == require("@native/ops@1"))
             assert(not pcall(function() ops.version = 2 end))
             return { handle = function(ctx, event)
+                local initial = ops.tenant.status("other")
+                assert(initial.tenant == "other" and not initial.paused and initial.max_concurrent == nil)
+                assert(not pcall(ops.tenant.status, "../bad"))
                 ops.fleet.pause("deploy")
+                local fleet = ops.tenant.status("other")
+                assert(fleet.paused and fleet.fleet_paused and not fleet.tenant_paused)
                 ops.tenant.pause("other", "tenant update")
                 local state = ops.fleet.resume("fleet ready")
                 assert(not state.fleet and state.tenants[1] == "other")
                 assert(ops.fleet.status().revision == 3)
-                return ops.tenant.resume("other", "tenant ready")
+                ops.tenant.resume("other", "tenant ready")
+                local limited = ops.tenant.limit("other", {max_concurrent=2}, "partner slow")
+                assert(limited.max_concurrent.other == 2)
+                local status = ops.tenant.status("other")
+                assert(status.max_concurrent == 2 and not status.paused and status.revision == limited.revision)
+                assert(ops.tenant.status("unrelated").max_concurrent == nil)
+                ops.tenant.pause("other", "maintenance")
+                local paused = ops.tenant.status("other")
+                assert(paused.paused and paused.tenant_paused and not paused.fleet_paused and paused.max_concurrent == 2)
+                local resumed = ops.tenant.resume("other", "ready")
+                assert(resumed.max_concurrent.other == 2)
+                for _, value in {0, -1, 1.5} do
+                    assert(not pcall(ops.tenant.limit, "other", {max_concurrent=value}, "invalid"))
+                end
+                assert(not pcall(ops.tenant.limit, "other", {unknown=2}, "invalid"))
+                local cleared = ops.tenant.limit("other", {}, "clear override")
+                assert(ops.tenant.status("other").max_concurrent == nil)
+                return cleared
             end }
         "#;
         let items = Arc::new(MemItems::default());
@@ -5217,7 +5444,7 @@ return { on_queue = function(ctx, ev)
                 .contains("ops requires"));
         }
         let out = e.invoke(inv(Trigger::Invoke, json!({}))).await.unwrap();
-        assert_eq!(out["revision"], 4);
+        assert_eq!(out["revision"], 8);
         assert_eq!(out["fleet"], false);
         assert!(out["tenants"].as_array().unwrap().is_empty());
         assert_eq!(
@@ -5225,11 +5452,19 @@ return { on_queue = function(ctx, ev)
             integraal_wrappers::NO_EXPIRY
         );
         assert!(!e.queue_pause_state().await.unwrap().tenant_paused("other"));
+        assert!(e
+            .queue_pause_state()
+            .await
+            .unwrap()
+            .max_concurrent
+            .is_empty());
+        crate::pause::limit(items.as_ref(), "other", Some(2), "slow partner", "limit-1").unwrap();
         // Fleet resume never clears a tenant's independent pause, including across new engines.
         crate::pause::change(items.as_ref(), Some("other"), true, "updating", "test-1").unwrap();
         crate::pause::change(items.as_ref(), None, true, "fleet", "test-2").unwrap();
         crate::pause::change(items.as_ref(), None, false, "done", "test-3").unwrap();
         let state = e.queue_pause_state().await.unwrap();
+        assert_eq!(state.max_concurrent.get("other"), Some(&2));
         assert!(state.tenant_paused("other"));
         assert!(!state.tenant_paused("unrelated"));
         assert!(

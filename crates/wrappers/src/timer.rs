@@ -145,6 +145,7 @@ pub(crate) fn api(
         let db = host.db.clone();
         let enabled = host.queue.is_some();
         let tenant = host.tenant.clone();
+        let target = crate::ContinuationTarget::new(host);
         let budget = budget.clone();
         api.set(
             name,
@@ -173,7 +174,12 @@ pub(crate) fn api(
                 };
                 let payload = Payload {
                     script: message.get("script")?,
-                    version: message.get("version")?,
+                    version: target
+                        .version(
+                            message.get::<Option<String>>("script")?.as_deref(),
+                            message.get("version")?,
+                        )
+                        .map_err(mlua::Error::runtime)?,
                     event,
                     trace: Some(crate::trace::inject_current()),
                 };

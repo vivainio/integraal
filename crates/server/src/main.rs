@@ -12,9 +12,11 @@ use std::time::Duration;
 
 use aws_sdk_sqs::types::MessageSystemAttributeName;
 use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
-    routing::{get, post, put},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State},
+    http::{HeaderMap, Method, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{any, get, post, put},
     Json, Router,
 };
 use integraal_core::{
@@ -121,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .merge(web_routes())
         .route("/v1/{tenant}/{script}", post(http_invoke))
         .route("/v1/{tenant}", post(http_routed))
         .with_state(engine.clone());
@@ -458,6 +461,167 @@ async fn admin_rekey_all(State(s): State<AdminState>) -> AdminResult {
     .await
 }
 
+/// Tenant-authored HTTP apps are independent of the JSON invocation endpoints.
+fn web_routes() -> Router<Engine> {
+    Router::new()
+        .route("/web/{tenant}", any(web_root))
+        .route("/web/{tenant}/", any(web_root))
+        .route("/web/{tenant}/{*path}", any(web_path))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+}
+
+async fn web_root(
+    State(engine): State<Engine>,
+    Path(tenant): Path<String>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    Query(query): Query<std::collections::BTreeMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    run_web(
+        engine,
+        tenant,
+        "/".into(),
+        method,
+        uri.query(),
+        query,
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn web_path(
+    State(engine): State<Engine>,
+    Path((tenant, path)): Path<(String, String)>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    Query(query): Query<std::collections::BTreeMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    run_web(
+        engine,
+        tenant,
+        format!("/{path}"),
+        method,
+        uri.query(),
+        query,
+        headers,
+        body,
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebResponse {
+    #[serde(default = "web_ok")]
+    status: u16,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    body: String,
+}
+fn web_ok() -> u16 {
+    200
+}
+
+fn web_response(value: Value) -> Result<Response, String> {
+    let reply: WebResponse =
+        serde_json::from_value(value).map_err(|e| format!("invalid web response: {e}"))?;
+    if !(200..=599).contains(&reply.status) {
+        return Err("web status must be between 200 and 599".into());
+    }
+    if reply.body.len() > 1024 * 1024 {
+        return Err("web response body exceeds 1 MB".into());
+    }
+    let mut response = Response::new(Body::from(reply.body));
+    *response.status_mut() = StatusCode::from_u16(reply.status).map_err(|e| e.to_string())?;
+    let headers = response.headers_mut();
+    headers.insert("content-type", "text/plain; charset=utf-8".parse().unwrap());
+    headers.insert("cache-control", "no-store".parse().unwrap());
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    // Framing and hop-by-hop fields belong to the host HTTP server.
+    let connection_fields: Vec<String> = reply
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, value)| value.split(',').map(|v| v.trim().to_ascii_lowercase()))
+        .collect();
+    for (name, value) in reply.headers {
+        let name = axum::http::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| format!("invalid web header name: {e}"))?;
+        let value = axum::http::HeaderValue::from_str(&value)
+            .map_err(|e| format!("invalid web header value: {e}"))?;
+        if matches!(
+            name.as_str(),
+            "connection"
+                | "content-length"
+                | "transfer-encoding"
+                | "keep-alive"
+                | "te"
+                | "trailer"
+                | "upgrade"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+        ) || connection_fields.iter().any(|field| field == name.as_str())
+        {
+            continue;
+        }
+        headers.insert(name, value);
+    }
+    Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_web(
+    engine: Engine,
+    tenant: String,
+    path: String,
+    method: Method,
+    raw_query: Option<&str>,
+    query: std::collections::BTreeMap<String, String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let body = match std::str::from_utf8(&body) {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"web request body must be UTF-8"})),
+            )
+                .into_response()
+        }
+    };
+    let headers: std::collections::BTreeMap<_, _> = headers
+        .iter()
+        .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)))
+        .collect();
+    let event = json!({"method":method.as_str(), "path":path, "base_path":format!("/web/{tenant}"),
+        "query":query, "raw_query":raw_query.unwrap_or(""), "headers":headers, "body":body});
+    match engine.invoke_web(&tenant, event).await {
+        Ok(Some(value)) => match web_response(value) {
+            Ok(response) => response,
+            Err(error) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error":error})),
+            )
+                .into_response(),
+        },
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"tenant has no web app"})),
+        )
+            .into_response(),
+        Err(error) => {
+            (status_for(&error), Json(json!({"error":error.to_string()}))).into_response()
+        }
+    }
+}
+
 async fn http_invoke(
     state: State<Engine>,
     Path((tenant, script)): Path<(String, String)>,
@@ -568,6 +732,7 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events, spread: Spr
     let mut receive_task = None;
     let mut receive_slots = 0;
     let mut active = tokio::task::JoinSet::new();
+    let admission = Admission::default();
     let mut held: Vec<aws_sdk_sqs::types::Message> = Vec::new();
     let mut maintenance = tokio::time::interval(Duration::from_secs(10));
     loop {
@@ -575,9 +740,12 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events, spread: Spr
         // Resumed receipts take priority over new receives, avoiding starvation under steady load.
         let mut remaining = Vec::new();
         for message in held.drain(..) {
-            if active.len() + receive_slots < 10
-                && !queue_message_paused(message.body().unwrap_or_default(), &s3, snapshot.as_ref())
-            {
+            let permit = (active.len() + receive_slots < 10)
+                .then(|| {
+                    admission.acquire(message.body().unwrap_or_default(), &s3, snapshot.as_ref())
+                })
+                .flatten();
+            if let Some(permit) = permit {
                 spawn_queue_message(
                     &mut active,
                     &engine,
@@ -586,6 +754,7 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events, spread: Spr
                     &s3,
                     spread,
                     message,
+                    permit,
                 );
             } else {
                 remaining.push(message);
@@ -618,8 +787,8 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events, spread: Spr
                     }).collect();
                     match client.change_message_visibility_batch().queue_url(&queue_url).set_entries(Some(entries)).send().await {
                         Ok(response) if response.failed().is_empty() => {},
-                        Ok(response) => tracing::error!(failed = ?response.failed(), "paused receipt renewal partially failed"),
-                        Err(error) => tracing::error!(%error, "paused receipt renewal failed"),
+                        Ok(response) => tracing::error!(failed = ?response.failed(), "held receipt renewal partially failed"),
+                        Err(error) => tracing::error!(%error, "held receipt renewal failed"),
                     }
                 }
             },
@@ -630,16 +799,17 @@ async fn poll_queue(engine: Engine, queue_url: String, s3: S3Events, spread: Spr
                     Ok(Ok(response)) => {
                         let snapshot = control.borrow().clone();
                         for message in response.messages.unwrap_or_default() {
-                            if queue_message_paused(message.body().unwrap_or_default(), &s3, snapshot.as_ref()) {
+                            let permit = admission.acquire(message.body().unwrap_or_default(), &s3, snapshot.as_ref());
+                            if permit.is_none() {
                                 if let Some(receipt) = message.receipt_handle() {
                                     if let Err(error) = client.change_message_visibility().queue_url(&queue_url)
                                         .receipt_handle(receipt).visibility_timeout(300).send().await {
-                                        tracing::error!(%error, "initial paused receipt lease failed");
+                                        tracing::error!(%error, "initial held receipt lease failed");
                                     }
                                 }
                                 held.push(message);
                             } else {
-                                spawn_queue_message(&mut active, &engine, &client, &queue_url, &s3, spread, message);
+                                spawn_queue_message(&mut active, &engine, &client, &queue_url, &s3, spread, message, permit.unwrap());
                             }
                         }
                     }
@@ -677,6 +847,67 @@ fn queue_message_paused(
     }
 }
 
+/// Admission is local to this worker. Reserve every tenant in a mixed S3 message
+/// until the message finishes; its records are executed sequentially.
+#[derive(Default)]
+struct Admission(std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, u32>>>);
+
+struct AdmissionPermit {
+    counts: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, u32>>>,
+    tenants: std::collections::BTreeSet<String>,
+}
+
+impl Admission {
+    fn acquire(
+        &self,
+        body: &str,
+        s3: &S3Events,
+        state: Option<&integraal_core::pause::State>,
+    ) -> Option<AdmissionPermit> {
+        if queue_message_paused(body, s3, state) {
+            return None;
+        }
+        let state = state?;
+        let tenants: std::collections::BTreeSet<String> = match classify(body) {
+            Ok(Message::Envelope(inv)) => [inv.tenant].into_iter().collect(),
+            Ok(Message::S3 { records, .. }) => records
+                .iter()
+                .filter_map(|r| s3.invocation(r).ok().flatten().map(|i| i.tenant))
+                .collect(),
+            _ => Default::default(),
+        };
+        let mut counts = self.0.lock().unwrap();
+        if tenants.iter().any(|tenant| {
+            state
+                .max_concurrent
+                .get(tenant)
+                .is_some_and(|limit| counts.get(tenant).copied().unwrap_or(0) >= *limit)
+        }) {
+            return None;
+        }
+        for tenant in &tenants {
+            *counts.entry(tenant.clone()).or_default() += 1;
+        }
+        Some(AdmissionPermit {
+            counts: self.0.clone(),
+            tenants,
+        })
+    }
+}
+
+impl Drop for AdmissionPermit {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock().unwrap();
+        for tenant in &self.tenants {
+            let count = counts.get_mut(tenant).expect("reserved tenant slot");
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(tenant);
+            }
+        }
+    }
+}
+
 fn spawn_queue_message(
     tasks: &mut tokio::task::JoinSet<()>,
     engine: &Engine,
@@ -685,6 +916,7 @@ fn spawn_queue_message(
     s3: &S3Events,
     spread: Spread,
     msg: aws_sdk_sqs::types::Message,
+    permit: AdmissionPermit,
 ) {
     let (engine, client, queue_url, s3) = (
         engine.clone(),
@@ -701,6 +933,7 @@ fn spawn_queue_message(
     });
     tasks.spawn(
         async move {
+            let _permit = permit;
             let attempt = msg
                 .attributes()
                 .and_then(|a| a.get(&MessageSystemAttributeName::ApproximateReceiveCount))
@@ -845,6 +1078,61 @@ async fn handle_message(
 mod queue_control_tests {
     use super::*;
     #[test]
+    fn tenant_caps_are_local_dynamic_and_release_on_drop() {
+        let s3 = S3Events::new([]);
+        let admission = Admission::default();
+        let other_worker = Admission::default();
+        let mut state = integraal_core::pause::State::default();
+        let body = |tenant| json!({"tenant":tenant,"event":{}}).to_string();
+        // Count existing work even before an override is set.
+        let first = admission.acquire(&body("acme"), &s3, Some(&state)).unwrap();
+        state.max_concurrent.insert("acme".into(), 2);
+        let second = admission.acquire(&body("acme"), &s3, Some(&state)).unwrap();
+        assert!(admission
+            .acquire(&body("acme"), &s3, Some(&state))
+            .is_none());
+        assert!(admission
+            .acquire(&body("other"), &s3, Some(&state))
+            .is_some());
+        assert!(other_worker
+            .acquire(&body("acme"), &s3, Some(&state))
+            .is_some());
+        state.max_concurrent.insert("acme".into(), 1);
+        drop(first);
+        assert!(admission
+            .acquire(&body("acme"), &s3, Some(&state))
+            .is_none());
+        drop(second);
+        let third = admission.acquire(&body("acme"), &s3, Some(&state)).unwrap();
+        state.max_concurrent.remove("acme");
+        assert!(admission
+            .acquire(&body("acme"), &s3, Some(&state))
+            .is_some());
+        assert!(admission.acquire(&body("acme"), &s3, None).is_none());
+        drop(third);
+        assert!(admission.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mixed_s3_messages_reserve_each_tenant_once_and_do_not_partially_acquire() {
+        let s3 = S3Events::new([("In".into(), "input".into(), "tenants/".into())]);
+        let admission = Admission::default();
+        let mut state = integraal_core::pause::State::default();
+        state.max_concurrent.insert("acme".into(), 1);
+        let records = json!({"Records":[
+            {"eventName":"ObjectCreated:Put","s3":{"bucket":{"name":"input"},"object":{"key":"tenants/other/a","eTag":"a"}}},
+            {"eventName":"ObjectCreated:Put","s3":{"bucket":{"name":"input"},"object":{"key":"tenants/acme/b","eTag":"b"}}},
+            {"eventName":"ObjectCreated:Put","s3":{"bucket":{"name":"input"},"object":{"key":"tenants/acme/c","eTag":"c"}}}
+        ]}).to_string();
+        let first = admission.acquire(&records, &s3, Some(&state)).unwrap();
+        assert_eq!(admission.0.lock().unwrap().get("acme"), Some(&1));
+        assert!(admission.acquire(&records, &s3, Some(&state)).is_none());
+        assert_eq!(admission.0.lock().unwrap().get("other"), Some(&1));
+        drop(first);
+        assert!(admission.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn pauses_gate_whole_messages_without_blocking_unrelated_tenants() {
         let s3 = S3Events::new([("In".into(), "input".into(), "tenants/".into())]);
         let mut state = integraal_core::pause::State::default();
@@ -872,5 +1160,215 @@ mod queue_control_tests {
             !queue_message_paused("malformed", &s3, Some(&state)),
             "normal error handling still reaches DLQ"
         );
+    }
+}
+
+#[cfg(test)]
+mod web_http_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use integraal_loader::{CachedLoader, MemoryStore, ScriptKey};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn app(source: &str) -> Router {
+        let store = MemoryStore::default();
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"web":{"script":"site","version":"v1"}}"#,
+        );
+        store.put(&ScriptKey::new("acme", "site", Some("v1")).unwrap(), source);
+        store.put(
+            &ScriptKey::new("acme", "site", None).unwrap(),
+            "error('latest must not run')",
+        );
+        let engine = Engine::new(
+            Arc::new(CachedLoader::new(store, Duration::ZERO)),
+            Default::default(),
+        );
+        web_routes()
+            .route("/v1/{tenant}/{script}", post(http_invoke))
+            .with_state(engine)
+    }
+
+    #[tokio::test]
+    async fn tenant_web_apps_receive_http_and_control_the_response() {
+        let app = app(r#"return {on_http=function(ctx, req)
+            assert(ctx.tenant == "acme" and ctx.trigger == "http")
+            assert(req.method == "POST" and req.path == "/hello/world")
+            assert(req.base_path == "/web/acme" and req.query.name == "Jane Doe")
+            assert(req.raw_query == "name=Jane%20Doe" and req.headers["x-test"] == "value")
+            return {status=201, headers={["content-type"]="text/html", ["x-app"]="yes",
+                ["content-length"]="999", ["connection"]="x-private", ["x-private"]="remove"},
+                body="<h1>" .. req.body .. "</h1>"}
+        end}"#);
+        let reply = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/web/acme/hello/world?name=Jane%20Doe")
+                    .header("x-test", "value")
+                    .header("x-script-version", "latest")
+                    .body(Body::from("Hello"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::CREATED);
+        assert_eq!(reply.headers()["content-type"], "text/html");
+        assert_eq!(reply.headers()["x-app"], "yes");
+        assert_ne!(
+            reply
+                .headers()
+                .get("content-length")
+                .and_then(|h| h.to_str().ok()),
+            Some("999")
+        );
+        assert!(!reply.headers().contains_key("connection"));
+        assert!(!reply.headers().contains_key("x-private"));
+        assert_eq!(
+            to_bytes(reply.into_body(), 1024).await.unwrap(),
+            "<h1>Hello</h1>"
+        );
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/web/other")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn web_roots_methods_and_response_validation() {
+        let app = app(
+            r#"return {on_http=function(_, req) return {body=req.method .. " " .. req.path} end}"#,
+        );
+        for path in ["/web/acme", "/web/acme/"] {
+            let reply = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(reply.status(), StatusCode::OK);
+            assert_eq!(to_bytes(reply.into_body(), 1024).await.unwrap(), "GET /");
+        }
+        let reply = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/web/acme/item")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            to_bytes(reply.into_body(), 1024).await.unwrap(),
+            "DELETE /item"
+        );
+        let reply = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/web/acme")
+                    .body(Body::from(vec![0xff]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::BAD_REQUEST);
+        let reply = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/web/acme")
+                    .body(Body::from(vec![b'x'; 1024 * 1024 + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        for value in [
+            json!({"status":101}),
+            json!({"headers":{"x-bad":"bad\r\nvalue"}}),
+            json!({"body":42}),
+            json!({"body":"x".repeat(1024*1024+1)}),
+        ] {
+            assert!(web_response(value).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn json_invocations_keep_their_existing_contract() {
+        let app = app(
+            r#"return {on_http=function(_, event) return {status=201, body=event.message} end}"#,
+        );
+        let reply = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/acme/site")
+                    .header("x-script-version", "v1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"message":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(reply.into_body(), 1024).await.unwrap()).unwrap();
+        assert_eq!(body, json!({"status":201,"body":"hello"}));
+    }
+
+    #[tokio::test]
+    async fn read_only_example_serves_html_and_rejects_commands() {
+        let app = app(include_str!("../../../examples/acme/web/latest.luau"));
+        let reply = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/web/acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert!(reply.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        for method in ["POST", "PUT", "DELETE"] {
+            let reply = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/web/acme/records")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+        let reply = app
+            .oneshot(
+                Request::builder()
+                    .uri("/web/acme/records")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::BAD_REQUEST);
     }
 }

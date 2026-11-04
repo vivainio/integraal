@@ -291,6 +291,7 @@ impl DbScope {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Callback {
     pub script: Option<String>,
+    pub version: Option<String>,
     pub state: serde_json::Value,
     /// The trace of the invocation that created the callback; the work it triggers joins it.
     pub trace: crate::trace::TraceContext,
@@ -448,9 +449,25 @@ impl DbScope {
         state: serde_json::Value,
         ttl: Duration,
     ) -> Result<String, String> {
+        self.create_callback_versioned(script, None, state, ttl)
+    }
+
+    pub fn create_callback_versioned(
+        &self,
+        script: Option<String>,
+        version: Option<String>,
+        state: serde_json::Value,
+        ttl: Duration,
+    ) -> Result<String, String> {
+        if version
+            .as_ref()
+            .is_some_and(|v| !crate::queue::valid_name(v) || script.is_none())
+        {
+            return Err("a callback version needs a script and a valid version".into());
+        }
         let id = hex(&random::<16>()?);
         let value = serde_json::json!({
-            "script": script, "state": state, "trace": crate::trace::inject_current()
+            "script": script, "version": version, "state": state, "trace": crate::trace::inject_current()
         })
         .to_string();
         self.put_for(&callback_pk(&id), "", value, ttl)?;
@@ -480,6 +497,10 @@ impl DbScope {
         let script = v.get("script").and_then(|s| s.as_str()).map(str::to_string);
         let callback = Callback {
             script,
+            version: v
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             state: v.get("state").cloned().unwrap_or(serde_json::Value::Null),
             trace: v
                 .get("trace")

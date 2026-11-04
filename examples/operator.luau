@@ -12,6 +12,10 @@ local function handle(_ctx: Context, event: any): any
         return ops.tenant.pause(event.tenant, event.reason)
     elseif event.action == "resume-tenant" then
         return ops.tenant.resume(event.tenant, event.reason)
+    elseif event.action == "tenant-status" then
+        return ops.tenant.status(event.tenant)
+    elseif event.action == "limit-tenant" then
+        return ops.tenant.limit(event.tenant, { max_concurrent = event.max_concurrent }, event.reason)
     elseif event.action == "inspect-flow" then
         return ops.flow.inspect(event.tenant, event.trace_id)
     elseif event.action == "inspect-dlq" then

@@ -63,6 +63,7 @@ shared modules and saved step results for decisions that must remain stable acro
 | `seq.id` | The tenant-scoped workflow run id. |
 | `seq:key(name)` | Stable tenant/run/name-derived idempotency key for external effects. |
 | `seq:step(name, fn)` | Execute `fn()` once a result can be checkpointed; on replay return that saved JSON result without calling `fn`. One return value, including nil, is supported. |
+| `seq:once(name, fn)` | Run `fn()` and save only a completed marker. On replay skip the function. Return values are discarded. |
 | `seq:sleep(name, delay_s)` | Save an absolute due time, arrange a timer resume, and release the worker. Replay preserves the original due time. Maximum six days per sleep. |
 | `seq:wait(name)` | Release the worker until a named signal exists, then return its saved JSON value. A signal received before reaching the wait is retained. |
 | `seq:yield(name)` | Arrange a durable resume and release the worker once at this position. On replay continue past it. |
@@ -70,6 +71,19 @@ shared modules and saved step results for decisions that must remain stable acro
 Names must be stable, unique across all step kinds within the workflow, 1–200 bytes without
 control characters. Include an item id in loop step names, for example `"invoice/" .. invoice.id`.
 Steps cannot be nested. `seq:key` may be used inside a step.
+
+Use `once` for effects whose results are not needed later:
+
+```lua
+seq:once("notify", function()
+    send_notification(input.order_id, seq:key("notify"))
+end)
+```
+
+Like `step`, `once` requires effects to be safe to repeat if execution fails before the
+checkpoint is saved. It shares step naming, ownership, and automatic yield rules; its marker
+is still read during replay. It cannot contain other sequence steps or waits, and does not
+delete earlier checkpoints. Values needed after the block must come from input or saved steps.
 
 The runtime also yields before new steps after 25 journal writes in one invocation, or when less
 than one second remains after making progress. Replays page through saved step results. This
@@ -109,10 +123,9 @@ contains:
 2. `workflow`, which creates a barrier, dispatches item workers, waits, and gathers results.
 3. `on_queue`, which handles item work and signals the workflow on barrier completion.
 
-Deploy that file as both `v1.luau` and `latest.luau`: the existing barrier continuation names a
-script without a version, so its adapter runs at `latest`; `signal` then resumes the pinned
-workflow version. Keep the adapter compatible with in-flight workflows. No separate finalizer
-file is needed. Invoke its `on_invoke` with `{ "id": "demo/1", "items": ["a", "b", "c"] }`.
+Deploy that file as `v1.luau`. Same-script barrier continuations automatically inherit the
+workflow's pinned version, so the adapter and resumed workflow both run at `v1`. No separate
+finalizer file is needed. Invoke its `on_invoke` with `{ "id": "demo/1", "items": ["a", "b", "c"] }`.
 
 ## Recovery and limits
 

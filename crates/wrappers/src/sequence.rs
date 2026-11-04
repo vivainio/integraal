@@ -67,6 +67,7 @@ struct State {
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum Step {
     Result { value: Json },
+    Once,
     Sleep { due_s: u64, delay_s: u64 },
     Wait,
     Yield,
@@ -278,6 +279,28 @@ fn sequence(lua: &Lua, session: Arc<Mutex<Session>>) -> mlua::Result<Table> {
             .map_err(err)?])
                 .map_err(err)?;
             lua.to_value(&value)
+        })?,
+    )?;
+    let s = session.clone();
+    seq.set(
+        "once",
+        lua.create_function(move |_, (_self, id, f): (Table, String, Function)| {
+            {
+                let mut s = s.lock().unwrap();
+                match s.enter(&id).map_err(err)? {
+                    Some(Step::Once) => return Ok(()),
+                    Some(_) => return Err(err("sequence step kind changed")),
+                    None => {}
+                }
+                s.inside_step = true;
+            }
+            // Ignore return values: only successful completion is checkpointed.
+            let outcome = f.call::<()>(());
+            let mut s = s.lock().unwrap();
+            s.inside_step = false;
+            outcome?;
+            s.save(vec![row(&format!("step/{id}"), &Step::Once).map_err(err)?])
+                .map_err(err)
         })?,
     )?;
     let s = session.clone();

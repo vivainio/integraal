@@ -147,11 +147,49 @@ impl Budget {
 /// one VM runs a router and then its target.
 pub type ScriptName = std::sync::Arc<std::sync::Mutex<String>>;
 
+/// Execution target shared by wrappers so same-script continuations inherit a pinned version.
+#[derive(Clone)]
+pub(crate) struct ContinuationTarget {
+    script: ScriptName,
+    version: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+impl ContinuationTarget {
+    fn new(host: &HostContext) -> Self {
+        Self {
+            script: host.script.clone(),
+            version: host.script_version.clone(),
+        }
+    }
+    fn version(
+        &self,
+        script: Option<&str>,
+        explicit: Option<String>,
+    ) -> Result<Option<String>, String> {
+        if let Some(version) = explicit {
+            if !queue::valid_name(&version) || script.is_none() {
+                return Err("a continuation version needs a script and a valid version".into());
+            }
+            return Ok(Some(version));
+        }
+        if script == Some(self.script.lock().unwrap().as_str()) {
+            return Ok(self
+                .version
+                .lock()
+                .unwrap()
+                .clone()
+                .filter(|v| v != "latest"));
+        }
+        Ok(None)
+    }
+}
+
 /// Per-invocation data wrappers may use to scope native calls to the tenant.
 #[derive(Clone)]
 pub struct HostContext {
     pub tenant: String,
     pub script: ScriptName,
+    /// Current script version, updated together with the script when routing.
+    pub script_version: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Tenant-scoped object storage by store name, as granted by the tenant config; exposed as `ig.store.<name>`.
     pub stores: StoreScopes,
     /// The tenant's folder in the deployment's dedicated batch bucket; `igp.batch` errors when absent.

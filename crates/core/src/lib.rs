@@ -19,8 +19,9 @@ pub mod schedule;
 mod sqs_queue;
 pub mod tasks;
 pub mod telemetry;
+mod web;
 
-pub use engine::{Placement, TenantConfig, TenantLimits};
+pub use engine::{Placement, TenantConfig, TenantLimits, WebApp};
 pub use placement::{PlaceOptions, Placed};
 
 pub use config::{GlobalConfig, IngressConfig};

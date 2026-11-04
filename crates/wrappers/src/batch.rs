@@ -78,6 +78,7 @@ fn part_key_ok(k: &str) -> bool {
 }
 
 struct Ctx {
+    target: crate::ContinuationTarget,
     batch: Option<StoreScope>,
     /// For the trace index only; jobs work without it.
     db: Option<crate::DbScope>,
@@ -106,6 +107,7 @@ impl Ctx {
 pub fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     let limits = &host.limits;
     let ctx = Arc::new(Ctx {
+        target: crate::ContinuationTarget::new(host),
         batch: host.batch.clone(),
         db: host.db.clone(),
         budget,
@@ -184,6 +186,7 @@ struct Draft {
     queries: Vec<(String, String, Json)>,
     state: Json,
     script: Option<String>,
+    version: Option<String>,
     http: Vec<(String, Prepared)>,
     submitted: bool,
 }
@@ -529,17 +532,25 @@ impl UserData for Job {
             Ok(())
         });
         // Script that `igp.batch.route` picks when the partner's `done.json` arrives.
-        methods.add_method("continue_with", |_, this, script: String| {
-            if !token_ok(&script, 128) {
-                return Err(err(format!("invalid script name {script:?}")));
-            }
-            let mut d = this.draft.lock().unwrap();
-            if d.submitted {
-                return Err(err("batch job was already submitted"));
-            }
-            d.script = Some(script);
-            Ok(())
-        });
+        methods.add_method(
+            "continue_with",
+            |_, this, (script, version): (String, Option<String>)| {
+                if !token_ok(&script, 128) {
+                    return Err(err(format!("invalid script name {script:?}")));
+                }
+                let mut d = this.draft.lock().unwrap();
+                if d.submitted {
+                    return Err(err("batch job was already submitted"));
+                }
+                d.version = this
+                    .ctx
+                    .target
+                    .version(Some(&script), version)
+                    .map_err(err)?;
+                d.script = Some(script);
+                Ok(())
+            },
+        );
         methods.add_method("id", |_, this, ()| Ok(this.id.clone()));
         // Writes the state, then the request: a partner that reacts at once never finds a
         // request whose state is missing.
@@ -581,6 +592,7 @@ impl UserData for Job {
                 "v": FORMAT,
                 "job": this.id,
                 "continue": d.script,
+                "version": d.version,
                 "queries": d.queries.iter().map(|(n, _, _)| n.as_str())
                     .chain(d.http.iter().map(|(n, _)| n.as_str()))
                     .collect::<Vec<_>>(),
@@ -745,6 +757,7 @@ impl InputRows {
 
 struct Envelope {
     script: Option<String>,
+    version: Option<String>,
     queries: Vec<String>,
     /// Keys (relative to the job folder) of the input files the script attached. Absent in state
     /// written by older versions, whose inputs are then not cleaned up.
@@ -771,6 +784,7 @@ fn load_envelope(ctx: &Ctx, scope: &StoreScope, id: &str) -> mlua::Result<Option
     crate::trace::link_current_to(&trace);
     Ok(Some(Envelope {
         script: j.get("continue").and_then(Json::as_str).map(str::to_string),
+        version: j.get("version").and_then(Json::as_str).map(str::to_string),
         queries: j
             .get("queries")
             .and_then(Json::as_array)
@@ -833,7 +847,10 @@ fn route(lua: &Lua, ctx: &Ctx, event: &Table) -> mlua::Result<Value> {
     }
     ev.set("job", id.as_str())?;
     routed.set("job", id.as_str())?;
-    routed.set("script", env.and_then(|e| e.script))?;
+    if let Some(env) = env {
+        routed.set("script", env.script)?;
+        routed.set("version", env.version)?;
+    }
     routed.set("event", ev)?;
     Ok(Value::Table(routed))
 }

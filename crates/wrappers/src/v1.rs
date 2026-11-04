@@ -79,7 +79,7 @@ pub fn install(lua: &Lua, host: &HostContext) -> mlua::Result<()> {
     igp.set("retry", crate::retry::api(lua, host, budget.clone())?)?;
     igp.set("sequence", crate::sequence::api(lua, host, budget.clone())?)?;
     igp.set("claim", crate::claim::api(lua, host, budget.clone())?)?;
-    let queue = crate::queue::api(lua, &host.tenant, host.queue.clone(), budget.clone())?;
+    let queue = crate::queue::api(lua, host, host.queue.clone(), budget.clone())?;
     crate::outbox::install(lua, &queue, host, budget.clone())?;
     ig.set("queue", queue)?;
     ig.set("timer", crate::timer::api(lua, host, budget.clone())?)?;
@@ -381,6 +381,7 @@ fn callback_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Res
         host.callback_base_url.clone(),
         host.tenant.clone(),
     );
+    let target = crate::ContinuationTarget::new(host);
     cb.set(
         "create",
         lua.create_function(move |lua, opts: Option<Table>| {
@@ -406,6 +407,15 @@ fn callback_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Res
                     return Err(mlua::Error::runtime(format!("invalid script name {s:?}")));
                 }
             }
+            let version = target
+                .version(
+                    script.as_deref(),
+                    opts.as_ref()
+                        .map(|o| o.get("version"))
+                        .transpose()?
+                        .flatten(),
+                )
+                .map_err(mlua::Error::runtime)?;
             let state: serde_json::Value = if state.is_nil() {
                 serde_json::Value::Null
             } else {
@@ -414,7 +424,7 @@ fn callback_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Res
             let ttl =
                 std::time::Duration::from_secs(ttl_s.unwrap_or(crate::DB_TTL.as_secs()).max(1));
             let id = scope
-                .create_callback(script, state, ttl)
+                .create_callback_versioned(script, version, state, ttl)
                 .map_err(mlua::Error::runtime)?;
             Ok(format!("{}/cb/{tenant}/{id}", base.trim_end_matches('/')))
         })?,

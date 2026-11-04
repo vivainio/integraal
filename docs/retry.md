@@ -33,7 +33,8 @@ return { on_queue = on_queue }
 ```
 
 Use the destination's idempotency mechanism for effects that may be repeated. The example's
-`v1` must name a deployed script version; omit `version` to use the current script.
+`v1` must name a deployed script version; omit `version` when targeting the currently running script to inherit its pinned version.
+Other destinations default to `latest`; explicit `latest` also disables inheritance.
 
 ## API
 

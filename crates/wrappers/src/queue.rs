@@ -74,12 +74,13 @@ pub(crate) fn valid_name(s: &str) -> bool {
 
 pub(crate) fn api(
     lua: &Lua,
-    tenant: &str,
+    host: &crate::HostContext,
     backend: Option<Arc<dyn QueueBackend>>,
     budget: Arc<Budget>,
 ) -> mlua::Result<Table> {
     let queue = lua.create_table()?;
-    let tenant = tenant.to_string();
+    let tenant = host.tenant.clone();
+    let target = crate::ContinuationTarget::new(host);
     let sent = Arc::new(AtomicUsize::new(0));
     queue.set(
         "send",
@@ -109,7 +110,7 @@ pub(crate) fn api(
             let mut out = Vec::with_capacity(items.len());
             for m in &items {
                 let script = m.get::<Option<String>>("script")?;
-                let version = m.get::<Option<String>>("version")?;
+                let version = target.version(script.as_deref(), m.get("version")?).map_err(mlua::Error::runtime)?;
                 for (what, v) in [("script", &script), ("version", &version)] {
                     if let Some(v) = v {
                         if !valid_name(v) {

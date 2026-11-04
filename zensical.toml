@@ -55,6 +55,7 @@ nav = [
     { "Deployment" = "deployment.md" },
     { "Observability" = "observability.md" },
     { "Operator API" = "ops.md" },
+    { "Tenant web apps" = "tenant-web.md" },
     { "Local development" = "local-development.md" },
     { "Testing Luau scripts" = "testing.md" },
   ] },

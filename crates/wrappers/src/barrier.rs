@@ -80,6 +80,10 @@ struct Header {
     /// Script that gets the overdue event; without it the tenant's router picks one.
     #[serde(default)]
     overdue_with: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    overdue_version: Option<String>,
     state: Json,
     expires_s: u64,
     due_s: Option<u64>,
@@ -110,6 +114,8 @@ pub struct CreateSpec {
     pub sealed: bool,
     pub continue_with: Option<String>,
     pub overdue_with: Option<String>,
+    pub version: Option<String>,
+    pub overdue_version: Option<String>,
     pub state: Json,
     pub deadline_s: Option<u64>,
 }
@@ -169,9 +175,22 @@ impl Barriers {
             sealed,
             continue_with,
             overdue_with,
+            version,
+            overdue_version,
             state,
             deadline_s,
         } = spec;
+        for (script, version) in [
+            (&continue_with, &version),
+            (&overdue_with, &overdue_version),
+        ] {
+            if version
+                .as_ref()
+                .is_some_and(|v| !valid_name(v) || script.is_none())
+            {
+                return Err("a continuation version needs a script and a valid version".into());
+            }
+        }
         let pk = self.db.barrier_pk(&id)?;
         if (sealed && members.is_empty()) || members.len() > MAX_BARRIER_MEMBERS {
             return Err(format!(
@@ -235,6 +254,8 @@ impl Barriers {
             creation_members: (!sealed).then_some(initial),
             continue_with,
             overdue_with,
+            version,
+            overdue_version,
             state,
             expires_s: crate::NO_EXPIRY,
             due_s: deadline_s.map(|d| now + d),
@@ -280,7 +301,7 @@ impl Barriers {
         if let (Some(due), Some(_)) = (stored.due_s, &self.queue) {
             let payload = Payload {
                 script: stored.overdue_with.clone(),
-                version: None,
+                version: stored.overdue_version.clone(),
                 event: json!({ "type": "barrier.overdue", "barrier": id }),
                 trace: Some(stored.trace.clone()),
             };
@@ -559,6 +580,9 @@ impl Barriers {
         });
         if let Some(s) = &header.continue_with {
             envelope["script"] = s.clone().into();
+            if let Some(version) = &header.version {
+                envelope["version"] = version.clone().into();
+            }
         }
         self.budget.take_data()?;
         queue.send(&[OutMessage {
@@ -851,6 +875,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
         }
     };
 
+    let target = crate::ContinuationTarget::new(host);
     let mk = make.clone();
     barrier.set(
         "create",
@@ -878,6 +903,18 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
                 sealed: opts.get::<Option<bool>>("sealed")?.unwrap_or(true),
                 continue_with: opts.get::<Option<String>>("continue_with")?,
                 overdue_with: opts.get::<Option<String>>("overdue_with")?,
+                version: target
+                    .version(
+                        opts.get::<Option<String>>("continue_with")?.as_deref(),
+                        opts.get("version")?,
+                    )
+                    .map_err(err)?,
+                overdue_version: target
+                    .version(
+                        opts.get::<Option<String>>("overdue_with")?.as_deref(),
+                        opts.get("overdue_version")?,
+                    )
+                    .map_err(err)?,
                 state,
                 deadline_s: opts.get::<Option<u64>>("deadline_s")?,
             })
@@ -1205,6 +1242,8 @@ mod tests {
             sealed: true,
             continue_with: Some("finalize".into()),
             overdue_with: None,
+            version: None,
+            overdue_version: None,
             state: json!({ "batch": 7 }),
             deadline_s: None,
         }

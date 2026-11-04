@@ -112,5 +112,6 @@ run twice need their own idempotency (see the [roadmap](roadmap.md)).
 ## Not implemented
 
 - Re-placing a message up a class after it failed on out-of-memory or deadline errors.
-- Per-tenant fairness inside a class (see per-tenant concurrency caps on the [roadmap](roadmap.md)).
+- Strict per-tenant fairness inside a class. [Runtime concurrency caps](ops.md#tenant-concurrency-limits)
+  limit each tenant per Fargate worker; a shared backlog can still crowd out other tenants.
 - Placement for synchronous HTTP (`POST /v1/{tenant}/...`); route those with the load balancer.

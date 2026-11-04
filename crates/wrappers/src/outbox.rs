@@ -213,6 +213,7 @@ pub(crate) fn install(
     let db = host.db.clone();
     let enabled = host.queue.is_some();
     let tenant = host.tenant.clone();
+    let target = crate::ContinuationTarget::new(host);
     queue.set(
         "handoff",
         lua.create_function(move |lua, (id, message): (String, Table)| {
@@ -235,7 +236,12 @@ pub(crate) fn install(
             };
             let payload = Payload {
                 script: message.get("script")?,
-                version: message.get("version")?,
+                version: target
+                    .version(
+                        message.get::<Option<String>>("script")?.as_deref(),
+                        message.get("version")?,
+                    )
+                    .map_err(mlua::Error::runtime)?,
                 event,
                 trace: Some(crate::trace::inject_current()),
             };
