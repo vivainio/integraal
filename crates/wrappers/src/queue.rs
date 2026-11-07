@@ -141,6 +141,9 @@ pub(crate) fn api(
                 if let Some(v) = version {
                     envelope["version"] = v.into();
                 }
+                if let Some(caps) = target.capabilities(lua, Some(m))? {
+                    envelope["capabilities"] = serde_json::to_value(caps).map_err(mlua::Error::external)?;
+                }
                 let body = envelope.to_string();
                 if body.len() > MAX_MESSAGE_BYTES {
                     return Err(mlua::Error::runtime(format!(

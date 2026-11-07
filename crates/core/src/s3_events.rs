@@ -174,6 +174,7 @@ impl S3Events {
             return Ok(None);
         }
         Ok(Some(Invocation {
+            capabilities: None,
             tenant: tenant.to_string(),
             script: None,
             version: None,

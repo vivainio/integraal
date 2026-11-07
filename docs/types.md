@@ -25,6 +25,7 @@ declares:
 | `ig` | global | core capabilities in the [Native API](native-api.md) with exact signatures |
 | `PatternsV1`, `require` | type, global | `require("@native/patterns@1")` returns the typed pattern API |
 | `OpsV1`, `QueuePauseState` | types | `require("ops")` / `require("@native/ops@1")` operator commands |
+| `RouteDecision`, `RouteCapabilities`, `StoreCapabilities` | types | constructible route declarations and optional per-store guards; see [Router](router.md#optional-route-capabilities) |
 | `Context` | type | `tenant`, `script`, `trigger`, `runtime` – the first handler argument |
 | `Decimal`, `D` | type, global | exact base-10 numbers from [mlua-decimal](https://github.com/vivainio/mlua-decimal): `D"12.50"`; bind one to `ig.sql` as a parameter (stored as text) |
 | `ByteStream` | type | what `ig.store.<name>.open` and streaming HTTP return |
@@ -71,6 +72,6 @@ development and CI tool. Gate your upload pipeline on `dev/typecheck.sh` if you 
 
 ## Limitations
 
-- Definition files can only expose `declare extern type`, not plain aliases, so `Context` and
-  friends are opaque types: you can read their fields, but can't construct them in tests.
+- Host objects such as `Context` use opaque extern types: you can read their fields, but cannot
+  construct them in tests. Route declarations use exported structural aliases and can be constructed.
 - The shape returned from a handler is not constrained; anything JSON-serializable works.

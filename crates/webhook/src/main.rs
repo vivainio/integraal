@@ -117,6 +117,7 @@ async fn handle(
         "tenant": tenant,
         "script": cb.script,
         "version": cb.version,
+        "capabilities": cb.capabilities,
         "event": {
             "method": method,
             "path": path,

@@ -235,6 +235,7 @@ pub(crate) fn install(
                 v => lua.from_value(v)?,
             };
             let payload = Payload {
+                capabilities: target.capabilities(lua, Some(&message))?,
                 script: message.get("script")?,
                 version: target
                     .version(
@@ -280,6 +281,7 @@ mod tests {
     }
     fn payload(n: u32) -> Payload {
         Payload {
+            capabilities: None,
             script: Some("work".into()),
             version: Some("v1".into()),
             event: serde_json::json!({"n": n}),

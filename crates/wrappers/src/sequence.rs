@@ -53,6 +53,8 @@ fn name(s: &str) -> Result<(), String> {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct State {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<crate::Capabilities>,
     script: String,
     version: String,
     input: Json,
@@ -74,6 +76,7 @@ enum Step {
 }
 #[derive(Clone)]
 struct Env {
+    target: crate::ContinuationTarget,
     db: DbScope,
     tenant: String,
     budget: Arc<Budget>,
@@ -203,6 +206,7 @@ impl Session {
     }
     fn payload(&self) -> Payload {
         Payload {
+            capabilities: self.state.capabilities.clone(),
             script: Some(self.state.script.clone()),
             version: Some(self.state.version.clone()),
             event: json!({"type":"sequence.resume", "id":self.id}),
@@ -404,6 +408,7 @@ fn dispatch(
     let kind = event["type"].as_str().unwrap_or("");
     if kind == "sequence.start" {
         let state = State {
+            capabilities: crate::Capabilities::snapshot(&env.target.stores).map_err(err)?,
             script: script.clone(),
             version: version.clone(),
             input: event["input"].clone(),
@@ -432,6 +437,10 @@ fn dispatch(
             "sequence id already belongs to different script, version or input",
         ));
     }
+    if let Some(caps) = &state.capabilities {
+        caps.apply(&env.target.stores).map_err(err)?;
+    }
+    state.capabilities = crate::Capabilities::snapshot(&env.target.stores).map_err(err)?;
     if kind == "sequence.signal" {
         let signal = event["name"]
             .as_str()
@@ -507,6 +516,7 @@ fn dispatch(
 
 pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Result<Table> {
     let db = host.db.clone();
+    let target = crate::ContinuationTarget::new(host);
     let enabled = host.queue.is_some();
     let tenant = host.tenant.clone();
     let make = move || -> mlua::Result<Env> {
@@ -514,6 +524,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             return Err(err("sequence needs a tenant-enabled queue"));
         }
         Ok(Env {
+            target: target.clone(),
             db: db.clone().ok_or_else(|| err("sequence needs ig.db"))?,
             tenant: tenant.clone(),
             budget: budget.clone(),
@@ -538,10 +549,12 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
                 ));
             }
             let input: Json = lua.from_value(opts.get::<Value>("input")?)?;
+            let capabilities = env.target.capabilities(lua, Some(&opts))?;
             // Validate before recording a launch that could never be processed.
             row(
                 "",
                 &State {
+                    capabilities: capabilities.clone(),
                     script: script.clone(),
                     version: version.clone(),
                     input: input.clone(),
@@ -556,6 +569,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             env.send(
                 &format!("sequence/start/{}", hash(&[&id])),
                 Payload {
+                    capabilities,
                     script: Some(script),
                     version: Some(version),
                     event: json!({"type":"sequence.start", "id":id, "input":input}),
@@ -582,6 +596,10 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             env.send(
                 &format!("sequence/signal/{}", hash(&[&id, &signal])),
                 Payload {
+                    capabilities: match (state.capabilities, env.target.capabilities(lua, None)?) {
+                        (Some(a), Some(b)) => Some(a.intersect(&b)),
+                        (a, b) => a.or(b),
+                    },
                     script: Some(state.script),
                     version: Some(state.version),
                     event: json!({"type":"sequence.signal", "id":id, "name":signal, "value":value}),

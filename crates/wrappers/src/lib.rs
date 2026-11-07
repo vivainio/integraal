@@ -62,8 +62,8 @@ pub use queue::{
     MAX_SENT_PER_INVOCATION, SEND_CHUNK,
 };
 pub use store::{
-    Access, IoDir, IoLimits, IoObserver, ObjectBackend, ObjectWriter, PresignMethod, StoreScope,
-    StoreScopes, MAX_LIST_KEYS, MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
+    Access, Capabilities, IoDir, IoLimits, IoObserver, ObjectBackend, ObjectWriter, PresignMethod,
+    StoreCapabilities, StoreScope, StoreScopes, MAX_LIST_KEYS, MAX_OBJECT_BYTES, MAX_PRESIGN_TTL,
 };
 pub use summary::{Summary, MAX_DETAIL_BYTES};
 pub use throttle::{Slot, Throttle, ThrottleRule};
@@ -150,16 +150,41 @@ pub type ScriptName = std::sync::Arc<std::sync::Mutex<String>>;
 /// Execution target shared by wrappers so same-script continuations inherit a pinned version.
 #[derive(Clone)]
 pub(crate) struct ContinuationTarget {
+    stores: StoreScopes,
     script: ScriptName,
     version: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 impl ContinuationTarget {
     fn new(host: &HostContext) -> Self {
         Self {
+            stores: host.stores.clone(),
             script: host.script.clone(),
             version: host.script_version.clone(),
         }
     }
+    fn capabilities(
+        &self,
+        lua: &Lua,
+        opts: Option<&mlua::Table>,
+    ) -> mlua::Result<Option<Capabilities>> {
+        use mlua::LuaSerdeExt;
+        let inherited = Capabilities::snapshot(&self.stores).map_err(mlua::Error::runtime)?;
+        let requested = opts
+            .map(|o| o.get::<mlua::Value>("capabilities"))
+            .transpose()?;
+        let requested: Option<Capabilities> = match requested {
+            None | Some(mlua::Value::Nil) => None,
+            Some(v) => Some(lua.from_value(v)?),
+        };
+        if let Some(c) = &requested {
+            c.validate().map_err(mlua::Error::runtime)?;
+        }
+        Ok(match (inherited, requested) {
+            (Some(a), Some(b)) => Some(a.intersect(&b)),
+            (a, b) => a.or(b),
+        })
+    }
+
     fn version(
         &self,
         script: Option<&str>,

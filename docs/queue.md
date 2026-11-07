@@ -117,3 +117,6 @@ original routing behavior.
 Callbacks accept `version`; barriers accept `version` for `continue_with` and `overdue_version`
 for `overdue_with`. Batch jobs accept `job:continue_with(script, version?)`; return the complete
 `igp.batch.route(event)` decision from the router to preserve its saved version.
+
+Messages may include optional `capabilities` to drop store privileges further. Otherwise they inherit
+the current guard, including through durable handoffs. See [continuation capabilities](router.md#dropping-privileges-in-continuations).

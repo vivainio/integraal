@@ -84,6 +84,8 @@ struct Header {
     version: Option<String>,
     #[serde(default)]
     overdue_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<crate::Capabilities>,
     state: Json,
     expires_s: u64,
     due_s: Option<u64>,
@@ -116,6 +118,7 @@ pub struct CreateSpec {
     pub overdue_with: Option<String>,
     pub version: Option<String>,
     pub overdue_version: Option<String>,
+    pub capabilities: Option<crate::Capabilities>,
     pub state: Json,
     pub deadline_s: Option<u64>,
 }
@@ -177,9 +180,13 @@ impl Barriers {
             overdue_with,
             version,
             overdue_version,
+            capabilities,
             state,
             deadline_s,
         } = spec;
+        if let Some(caps) = &capabilities {
+            caps.validate()?;
+        }
         for (script, version) in [
             (&continue_with, &version),
             (&overdue_with, &overdue_version),
@@ -256,6 +263,7 @@ impl Barriers {
             overdue_with,
             version,
             overdue_version,
+            capabilities,
             state,
             expires_s: crate::NO_EXPIRY,
             due_s: deadline_s.map(|d| now + d),
@@ -300,6 +308,7 @@ impl Barriers {
         // Registered from the stored header, so a create that is repeated after a crash arms the same timer.
         if let (Some(due), Some(_)) = (stored.due_s, &self.queue) {
             let payload = Payload {
+                capabilities: stored.capabilities.clone(),
                 script: stored.overdue_with.clone(),
                 version: stored.overdue_version.clone(),
                 event: json!({ "type": "barrier.overdue", "barrier": id }),
@@ -583,6 +592,9 @@ impl Barriers {
             if let Some(version) = &header.version {
                 envelope["version"] = version.clone().into();
             }
+        }
+        if let Some(caps) = &header.capabilities {
+            envelope["capabilities"] = serde_json::to_value(caps).map_err(|e| e.to_string())?;
         }
         self.budget.take_data()?;
         queue.send(&[OutMessage {
@@ -898,6 +910,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
                 v => lua.from_value(v)?,
             };
             b.create(CreateSpec {
+                capabilities: target.capabilities(lua, Some(&opts))?,
                 id: id.clone(),
                 members,
                 sealed: opts.get::<Option<bool>>("sealed")?.unwrap_or(true),
@@ -1237,6 +1250,7 @@ mod tests {
 
     fn spec(id: &str, members: &[&str]) -> CreateSpec {
         CreateSpec {
+            capabilities: None,
             id: id.into(),
             members: members.iter().map(|m| m.to_string()).collect(),
             sealed: true,

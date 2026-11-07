@@ -3,7 +3,7 @@ use std::{
     io::Read,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, RwLock,
     },
 };
 
@@ -119,6 +119,197 @@ impl<'de> serde::Deserialize<'de> for Access {
     }
 }
 
+/// Optional route guard: exact keys and directory prefixes, per operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreCapabilities {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub read: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub read_prefixes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub write: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub write_prefixes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delete: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delete_prefixes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub upload: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub upload_prefixes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub download: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub download_prefixes: Vec<String>,
+}
+
+impl StoreCapabilities {
+    pub fn validate(&self) -> Result<(), String> {
+        for (keys, prefixes) in [
+            (&self.read, &self.read_prefixes),
+            (&self.write, &self.write_prefixes),
+            (&self.delete, &self.delete_prefixes),
+            (&self.upload, &self.upload_prefixes),
+            (&self.download, &self.download_prefixes),
+        ] {
+            for key in keys.iter().chain(prefixes) {
+                if key.len() > 512
+                    || key.starts_with('/')
+                    || key.chars().any(|c| c.is_control() || c == '\\')
+                    || key.split('/').any(|s| s == "." || s == "..")
+                {
+                    return Err(format!("invalid capability path {key:?}"));
+                }
+            }
+            if keys.iter().any(|k| k.is_empty())
+                || prefixes.iter().any(|p| !p.is_empty() && !p.ends_with('/'))
+            {
+                return Err(
+                    "capability keys must be nonempty; prefixes must be empty or end with /".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn intersect(&self, other: &Self) -> Self {
+        fn paths(
+            a: &[String],
+            ap: &[String],
+            b: &[String],
+            bp: &[String],
+        ) -> (Vec<String>, Vec<String>) {
+            let mut keys: Vec<String> = a
+                .iter()
+                .filter(|k| b.contains(k) || bp.iter().any(|p| k.starts_with(p)))
+                .cloned()
+                .collect();
+            keys.extend(
+                b.iter()
+                    .filter(|k| ap.iter().any(|p| k.starts_with(p)))
+                    .cloned(),
+            );
+            let mut prefixes = Vec::new();
+            for x in ap {
+                for y in bp {
+                    if x.starts_with(y) {
+                        prefixes.push(x.clone());
+                    } else if y.starts_with(x) {
+                        prefixes.push(y.clone());
+                    }
+                }
+            }
+            keys.sort();
+            keys.dedup();
+            prefixes.sort();
+            prefixes.dedup();
+            (keys, prefixes)
+        }
+        let mut out = Self::default();
+        (out.read, out.read_prefixes) = paths(
+            &self.read,
+            &self.read_prefixes,
+            &other.read,
+            &other.read_prefixes,
+        );
+        (out.write, out.write_prefixes) = paths(
+            &self.write,
+            &self.write_prefixes,
+            &other.write,
+            &other.write_prefixes,
+        );
+        (out.delete, out.delete_prefixes) = paths(
+            &self.delete,
+            &self.delete_prefixes,
+            &other.delete,
+            &other.delete_prefixes,
+        );
+        (out.upload, out.upload_prefixes) = paths(
+            &self.upload,
+            &self.upload_prefixes,
+            &other.upload,
+            &other.upload_prefixes,
+        );
+        (out.download, out.download_prefixes) = paths(
+            &self.download,
+            &self.download_prefixes,
+            &other.download,
+            &other.download_prefixes,
+        );
+        out
+    }
+
+    fn allows(&self, operation: &str, key: &str, listing: bool) -> bool {
+        let (keys, prefixes) = match operation {
+            "read" => (&self.read, &self.read_prefixes),
+            "write" => (&self.write, &self.write_prefixes),
+            "delete" => (&self.delete, &self.delete_prefixes),
+            "upload" => (&self.upload, &self.upload_prefixes),
+            "download" => (&self.download, &self.download_prefixes),
+            _ => return false,
+        };
+        (!listing && keys.iter().any(|k| k == key)) || prefixes.iter().any(|p| key.starts_with(p))
+    }
+}
+
+/// Serializable restrictions carried by continuations; absence means unrestricted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Capabilities {
+    pub stores: HashMap<String, StoreCapabilities>,
+}
+
+impl Capabilities {
+    pub fn validate(&self) -> Result<(), String> {
+        for caps in self.stores.values() {
+            caps.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn apply(&self, stores: &StoreScopes) -> Result<(), String> {
+        self.validate()?;
+        let mut root = stores
+            .capabilities
+            .write()
+            .map_err(|_| "capability lock poisoned")?;
+        let effective = match root.as_ref() {
+            Some(parent) => parent.intersect(self),
+            None => self.clone(),
+        };
+        for (name, scope) in stores {
+            scope.lock_capabilities(effective.stores.get(name).cloned().unwrap_or_default())?;
+        }
+        *root = Some(effective);
+        Ok(())
+    }
+
+    pub fn intersect(&self, other: &Self) -> Self {
+        Self {
+            stores: self
+                .stores
+                .iter()
+                .filter_map(|(name, caps)| {
+                    other
+                        .stores
+                        .get(name)
+                        .map(|c| (name.clone(), caps.intersect(c)))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn snapshot(stores: &StoreScopes) -> Result<Option<Self>, String> {
+        Ok(stores
+            .capabilities
+            .read()
+            .map_err(|_| "capability lock poisoned")?
+            .clone())
+    }
+}
+
 /// Byte limits on one store for a single invocation; `None` is unlimited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IoLimits {
@@ -218,7 +409,34 @@ impl ObjectWriter for MeteredWriter {
 }
 
 /// The stores one invocation may use, by name.
-pub type StoreScopes = HashMap<String, StoreScope>;
+#[derive(Clone, Default)]
+pub struct StoreScopes {
+    scopes: HashMap<String, StoreScope>,
+    capabilities: Arc<RwLock<Option<Capabilities>>>,
+}
+impl StoreScopes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+impl std::ops::Deref for StoreScopes {
+    type Target = HashMap<String, StoreScope>;
+    fn deref(&self) -> &Self::Target {
+        &self.scopes
+    }
+}
+impl std::ops::DerefMut for StoreScopes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.scopes
+    }
+}
+impl<'a> IntoIterator for &'a StoreScopes {
+    type Item = (&'a String, &'a StoreScope);
+    type IntoIter = std::collections::hash_map::Iter<'a, String, StoreScope>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.scopes.iter()
+    }
+}
 
 /// A backend confined to one key prefix (`<base>/<tenant>/`). Scripts only ever
 /// see keys relative to it and cannot name anything outside.
@@ -229,6 +447,7 @@ pub struct StoreScope {
     max_object_bytes: usize,
     access: Access,
     meter: Option<Arc<IoMeter>>,
+    route_caps: Arc<RwLock<Option<StoreCapabilities>>>,
 }
 
 impl StoreScope {
@@ -242,6 +461,7 @@ impl StoreScope {
             max_object_bytes: MAX_OBJECT_BYTES,
             access: Access::READ_WRITE,
             meter: None,
+            route_caps: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -270,6 +490,34 @@ impl StoreScope {
     pub fn with_access(mut self, access: Access) -> Self {
         self.access = access;
         self
+    }
+
+    /// Seals a route restriction for every clone, including installed native closures.
+    pub fn lock_capabilities(&self, caps: StoreCapabilities) -> Result<(), String> {
+        caps.validate()?;
+        let mut guard = self
+            .route_caps
+            .write()
+            .map_err(|_| "capability lock poisoned")?;
+        *guard = Some(match guard.as_ref() {
+            Some(parent) => parent.intersect(&caps),
+            None => caps,
+        });
+        Ok(())
+    }
+
+    fn check_route(&self, operation: &str, key: &str, listing: bool) -> Result<(), String> {
+        let guard = self
+            .route_caps
+            .read()
+            .map_err(|_| "capability lock poisoned")?;
+        if guard
+            .as_ref()
+            .is_some_and(|c| !c.allows(operation, key, listing))
+        {
+            return Err(format!("route capability denied {operation} for {key:?}"));
+        }
+        Ok(())
     }
 
     fn need_read(&self) -> Result<(), String> {
@@ -306,6 +554,7 @@ impl StoreScope {
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.check_route("read", key, false)?;
         self.need_read()?;
         if let Some(m) = &self.meter {
             m.check(IoDir::Read)?;
@@ -318,6 +567,7 @@ impl StoreScope {
     }
 
     pub fn put(&self, key: &str, body: Vec<u8>) -> Result<(), String> {
+        self.check_route("write", key, false)?;
         self.need_write()?;
         if body.len() > self.max_object_bytes {
             return Err(format!("object exceeds {} bytes", self.max_object_bytes));
@@ -331,6 +581,7 @@ impl StoreScope {
 
     /// Streaming upload; requires the `write` grant.
     pub fn create(&self, key: &str) -> Result<Box<dyn ObjectWriter>, String> {
+        self.check_route("write", key, false)?;
         self.need_write()?;
         if let Some(m) = &self.meter {
             m.check(IoDir::Write)?;
@@ -346,6 +597,7 @@ impl StoreScope {
     }
 
     pub fn open(&self, key: &str) -> Result<Option<Box<dyn Read + Send>>, String> {
+        self.check_route("read", key, false)?;
         self.need_read()?;
         if let Some(m) = &self.meter {
             m.check(IoDir::Read)?;
@@ -376,6 +628,14 @@ impl StoreScope {
             }
             _ => {}
         }
+        self.check_route(
+            match method {
+                PresignMethod::Get => "download",
+                PresignMethod::Put => "upload",
+            },
+            key,
+            false,
+        )?;
         let ttl = ttl
             .unwrap_or(std::time::Duration::from_secs(15 * 60))
             .clamp(std::time::Duration::from_secs(1), MAX_PRESIGN_TTL);
@@ -383,6 +643,7 @@ impl StoreScope {
     }
 
     pub fn delete(&self, key: &str) -> Result<(), String> {
+        self.check_route("delete", key, false)?;
         if !self.access.delete {
             return Err("deleting is not granted for this store".into());
         }
@@ -392,6 +653,7 @@ impl StoreScope {
     /// Lists keys under the relative `prefix` (may be empty), returned relative to the scope.
     pub fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
         self.need_read()?;
+        self.check_route("read", prefix, true)?;
         if prefix.starts_with('/') || prefix.split('/').any(|s| s == "..") {
             return Err(format!("invalid prefix {prefix:?}"));
         }
@@ -402,5 +664,87 @@ impl StoreScope {
             .into_iter()
             .filter_map(|k| k.strip_prefix(&self.prefix).map(str::to_string))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn exact_keys_prefix_boundaries_and_separate_actions() {
+        let caps = StoreCapabilities {
+            read: vec!["one".into()],
+            read_prefixes: vec!["orders/".into()],
+            upload: vec!["incoming/a".into()],
+            ..Default::default()
+        };
+        caps.validate().unwrap();
+        assert!(caps.allows("read", "one", false));
+        assert!(!caps.allows("read", "one", true));
+        assert!(caps.allows("read", "orders/a", false));
+        assert!(caps.allows("read", "orders/", true));
+        assert!(!caps.allows("read", "", true));
+        assert!(!caps.allows("read", "orders-other/a", false));
+        assert!(!caps.allows("write", "orders/a", false));
+        assert!(caps.allows("upload", "incoming/a", false));
+        assert!(!caps.allows("write", "incoming/a", false));
+        assert!(!caps.allows("download", "incoming/a", false));
+    }
+
+    #[test]
+    fn intersections_only_reduce_authority_and_keep_empty_guards() {
+        let a = StoreCapabilities {
+            read: vec!["one".into()],
+            read_prefixes: vec!["orders/".into()],
+            ..Default::default()
+        };
+        let b = StoreCapabilities {
+            read: vec!["orders/a".into(), "secret".into()],
+            read_prefixes: vec!["orders/2026/".into()],
+            write_prefixes: vec!["".into()],
+            ..Default::default()
+        };
+        let child = a.intersect(&b);
+        assert_eq!(child, b.intersect(&a));
+        assert!(child.allows("read", "orders/a", false));
+        assert!(child.allows("read", "orders/2026/a", false));
+        assert!(!child.allows("read", "orders/b", false));
+        assert!(!child.allows("read", "one", false));
+        assert!(!child.allows("read", "secret", false));
+        assert!(!child.allows("write", "orders/a", false));
+        let universal = StoreCapabilities {
+            read_prefixes: vec!["".into()],
+            ..Default::default()
+        };
+        assert_eq!(a.intersect(&universal), a);
+        let stores = StoreScopes::new();
+        assert_eq!(Capabilities::snapshot(&stores).unwrap(), None);
+        Capabilities::default().apply(&stores).unwrap();
+        assert_eq!(
+            Capabilities::snapshot(&stores).unwrap(),
+            Some(Capabilities::default())
+        );
+        // Even a scope collection with no stores remembers that privileges were dropped.
+        Capabilities {
+            stores: HashMap::from([("new".into(), universal)]),
+        }
+        .apply(&stores)
+        .unwrap();
+        assert_eq!(
+            Capabilities::snapshot(&stores).unwrap(),
+            Some(Capabilities::default())
+        );
+    }
+
+    #[test]
+    fn malformed_paths_fail_closed() {
+        for path in ["/root/", "../", "a/./", "a/../", "a\\b/", "a\n/", "orders"] {
+            let caps = StoreCapabilities {
+                read_prefixes: vec![path.into()],
+                ..Default::default()
+            };
+            assert!(caps.validate().is_err(), "{path:?}");
+        }
     }
 }

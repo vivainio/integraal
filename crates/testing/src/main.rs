@@ -129,7 +129,7 @@ async fn run() -> Result<bool> {
     let tenant: TenantConfig =
         serde_json::from_str(&std::fs::read_to_string(root.join("config.json"))?)?;
     let name = root.file_name().unwrap().to_string_lossy().to_string();
-    let mut stores = std::collections::HashMap::new();
+    let mut stores = integraal_wrappers::StoreScopes::new();
     for (key, access) in &tenant.stores {
         let store = config
             .stores

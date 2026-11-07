@@ -70,6 +70,8 @@ impl Trigger {
 /// (see `TenantConfig`). `trigger` is set by the entrypoint, not the sender.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<integraal_wrappers::Capabilities>,
     pub tenant: String,
     #[serde(default)]
     pub script: Option<String>,

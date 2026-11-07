@@ -132,6 +132,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
                 v => lua.from_value(v)?,
             };
             let payload = timer::Payload {
+                capabilities: target.capabilities(lua, Some(&message))?,
                 script: message.get("script")?,
                 version: target
                     .version(
@@ -173,6 +174,7 @@ mod tests {
     use crate::timer::tests::Mem;
     fn payload() -> timer::Payload {
         timer::Payload {
+            capabilities: None,
             script: Some("worker".into()),
             version: Some("v1".into()),
             event: serde_json::json!({"attempt":2}),

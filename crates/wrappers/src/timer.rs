@@ -37,6 +37,8 @@ const MAX_ID_LEN: usize = 300;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Payload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::Capabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -55,6 +57,9 @@ impl Payload {
         }
         if let Some(v) = &self.version {
             e["version"] = v.clone().into();
+        }
+        if let Some(caps) = &self.capabilities {
+            e["capabilities"] = serde_json::to_value(caps).expect("serializable capabilities");
         }
         e.to_string()
     }
@@ -173,6 +178,7 @@ pub(crate) fn api(
                     value => lua.from_value(value)?,
                 };
                 let payload = Payload {
+                    capabilities: target.capabilities(lua, Some(&message))?,
                     script: message.get("script")?,
                     version: target
                         .version(
@@ -441,6 +447,7 @@ pub(crate) mod tests {
 
     fn payload(event: Json) -> Payload {
         Payload {
+            capabilities: None,
             script: None,
             version: None,
             event,
@@ -467,6 +474,7 @@ pub(crate) mod tests {
     fn list_returns_one_tenants_pending_timers_in_due_order() {
         let db = Mem::default();
         let p = |n: &str| Payload {
+            capabilities: None,
             script: Some(n.into()),
             version: None,
             event: json!({}),
@@ -525,6 +533,7 @@ pub(crate) mod tests {
     fn script_and_version_ride_in_the_envelope() {
         let (mem, sent) = (Mem::default(), Sent::default());
         let p = Payload {
+            capabilities: None,
             script: Some("finalize".into()),
             version: Some("v2".into()),
             event: json!({ "type": "timer" }),
@@ -654,6 +663,7 @@ pub(crate) mod tests {
         assert!(register(&mem, "a", "", NOW, &p, NOW).is_err());
         assert!(register(&mem, "a", "bad\u{1}id", NOW, &p, NOW).is_err());
         let bad = Payload {
+            capabilities: None,
             script: Some("../x".into()),
             ..p
         };

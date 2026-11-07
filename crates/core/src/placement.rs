@@ -400,6 +400,7 @@ mod tests {
 
     fn inv(event: serde_json::Value) -> Invocation {
         Invocation {
+            capabilities: None,
             tenant: "acme".into(),
             script: None,
             version: None,

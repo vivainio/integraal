@@ -681,6 +681,9 @@ impl Engine {
             }
             stores.insert(name.clone(), scope);
         }
+        if let Some(caps) = &inv.capabilities {
+            caps.apply(&stores).map_err(Error::Script)?;
+        }
         let batch = if config.batch {
             let (backend, base) = self.batch.as_ref().ok_or_else(|| {
                 Error::Config("the batch bucket is not configured on this deployment".into())
@@ -1312,6 +1315,25 @@ fn run_routed(
     let decision = call_in_vm(&vm, router_src, &route_call)?;
 
     // The router returns a script name, or `{ script, version?, event? }` to also rewrite the event.
+    let capabilities = decision
+        .as_object()
+        .and_then(|o| o.get("capabilities"))
+        .map(|v| {
+            serde_json::from_value::<integraal_wrappers::Capabilities>(v.clone())
+                .map_err(|e| Error::Script(format!("invalid route capabilities: {e}")))
+        })
+        .transpose()?;
+    if let Some(caps) = capabilities {
+        for (name, cap) in &caps.stores {
+            if !vm.stores.contains_key(name) {
+                return Err(Error::Script(format!(
+                    "unknown route capability store {name:?}"
+                )));
+            }
+            cap.validate().map_err(Error::Script)?;
+        }
+        caps.apply(&vm.stores).map_err(Error::Script)?;
+    }
     let (script, version, event) = match decision {
         serde_json::Value::String(s) => (s, inv.version.clone(), inv.event.clone()),
         serde_json::Value::Object(mut o) => {
@@ -1404,6 +1426,7 @@ pub(crate) mod tests {
 
     fn inv(trigger: Trigger, event: serde_json::Value) -> Invocation {
         Invocation {
+            capabilities: None,
             tenant: "acme".into(),
             script: Some("s".into()),
             version: None,
@@ -1422,7 +1445,7 @@ pub(crate) mod tests {
             local p = require("@native/patterns@1")
             return { handle = function(_, ev)
                 if ev.signal then return p.sequence.signal(ev.id, ev.signal, ev.value) end
-                return p.sequence.start(ev.id, {script="flow", version=ev.version or "v1", input=ev.input})
+                return p.sequence.start(ev.id, {script="flow", version=ev.version or "v1", input=ev.input, capabilities=ev.capabilities})
             end }
         "#);
         store.put(
@@ -1491,6 +1514,42 @@ pub(crate) mod tests {
         let mut invocation: Invocation = serde_json::from_value(envelope).unwrap();
         invocation.trigger = Trigger::Queue;
         e.invoke(invocation).await
+    }
+
+    #[tokio::test]
+    async fn workflow_capabilities_survive_durable_signals() {
+        let (e, items, queue) = sequence_world(
+            r#"
+            return {workflow=function(seq)
+                seq:sleep("nap", 0)
+                seq:wait("go")
+                ig.queue.send({script="flow",event={}})
+                return true
+            end}
+        "#,
+            true,
+        );
+        sequence_api(&e, json!({"id":"caps","capabilities":{}}))
+            .await
+            .unwrap();
+        let starts = sequence_pending(&items, &queue);
+        assert_eq!(starts[0]["capabilities"], json!({"stores":{}}));
+        sequence_deliver(&e, starts[0].clone()).await.unwrap();
+        // Even an unrestricted signal sender must preserve the workflow's saved guard.
+        sequence_api(&e, json!({"id":"caps","signal":"go","value":true}))
+            .await
+            .unwrap();
+        let signals = sequence_pending(&items, &queue);
+        assert_eq!(signals[0]["capabilities"], json!({"stores":{}}));
+        sequence_deliver(&e, signals[0].clone()).await.unwrap();
+        let children = std::mem::take(&mut *queue.0.lock().unwrap());
+        assert_eq!(children[0].0["capabilities"], json!({"stores":{}}));
+        let saved = items
+            .get("TEN#acme#\u{1}sequence#caps", "")
+            .unwrap()
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_str(&saved.value).unwrap();
+        assert_eq!(state["capabilities"], json!({"stores":{}}));
     }
 
     #[tokio::test]
@@ -1684,7 +1743,14 @@ pub(crate) mod tests {
         );
         let start = json!({"type":"sequence.start","id":"sleep","input":null});
         assert_eq!(
-            sequence_event(&e, start.clone()).await.unwrap(),
+            e.invoke(Invocation {
+                capabilities: Some(integraal_wrappers::Capabilities::default()),
+                script: Some("flow".into()),
+                version: Some("v1".into()),
+                ..inv(Trigger::Queue, start.clone())
+            })
+            .await
+            .unwrap(),
             json!({"state":"suspended"})
         );
         let timers = items.query("SYS#timer", "", "", 100).unwrap();
@@ -1699,6 +1765,8 @@ pub(crate) mod tests {
         assert_eq!(repeated[0].ttl, timers[0].ttl);
         let original: serde_json::Value = serde_json::from_str(&timers[0].value).unwrap();
         let replayed: serde_json::Value = serde_json::from_str(&repeated[0].value).unwrap();
+        assert_eq!(original["capabilities"], json!({"stores":{}}));
+        assert_eq!(replayed["capabilities"], original["capabilities"]);
         assert_eq!(original["event"], replayed["event"]);
         tokio::time::sleep(Duration::from_millis(1100)).await;
         let now = std::time::SystemTime::now()
@@ -1715,6 +1783,7 @@ pub(crate) mod tests {
             .pop()
             .unwrap()
             .0;
+        assert_eq!(wake["capabilities"], json!({"stores":{}}));
         assert_eq!(
             sequence_deliver(&e, wake).await.unwrap(),
             json!({"state":"complete","result":"awake"})
@@ -2906,6 +2975,7 @@ pub(crate) mod tests {
             ("t4", 120, None),
         ] {
             let payload = integraal_wrappers::TimerPayload {
+                capabilities: None,
                 script: None,
                 version: None,
                 event: json!({}),
@@ -3043,6 +3113,7 @@ pub(crate) mod tests {
 
         // The minute tick sends due timers; nobody asked for minute ticks, so that is all it sends.
         let payload = integraal_wrappers::TimerPayload {
+            capabilities: None,
             script: None,
             version: None,
             event: json!({"type":"timer"}),
@@ -3416,7 +3487,7 @@ end }"#;
         );
         store.put(
             &ScriptKey::new("acme", "router", None).unwrap(),
-            r#"return {on_route=function() return {script="flow",version="v1"} end}"#,
+            r#"return {on_route=function() return {script="flow",version="v1",capabilities={}} end}"#,
         );
         store.put(
             &ScriptKey::new("acme", "flow", None).unwrap(),
@@ -3472,10 +3543,15 @@ end }"#;
             panic!("callback missing")
         };
         assert_eq!(taken.callback.version.as_deref(), Some("v1"));
+        assert_eq!(
+            taken.callback.capabilities,
+            Some(integraal_wrappers::Capabilities::default())
+        );
         let state: serde_json::Value =
             serde_json::from_slice(&objects.get("data/acme/state/job.json").unwrap().unwrap())
                 .unwrap();
         assert_eq!(state["version"], "v1");
+        assert_eq!(state["capabilities"], json!({"stores":{}}));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -3491,6 +3567,9 @@ end }"#;
         .unwrap();
         let messages = std::mem::take(&mut *queue.0.lock().unwrap());
         assert_eq!(messages.len(), 8);
+        for (message, _) in &messages {
+            assert_eq!(message["capabilities"], json!({"stores":{}}));
+        }
         assert!(messages
             .iter()
             .any(|(m, _)| m["script"] == "other" && m.get("version").is_none()));
@@ -4723,6 +4802,7 @@ return { handle = function()
 
     fn msg(event: serde_json::Value) -> Invocation {
         Invocation {
+            capabilities: None,
             tenant: "acme".into(),
             script: None,
             version: None,
@@ -4800,6 +4880,154 @@ return { handle = function()
         let e = routed(&store).with_store("Out", Arc::new(MemBackend::default()), "data/");
         // 3 allowed in total; the router used 2, so the target gets exactly 1
         assert_eq!(e.invoke(msg(json!({}))).await.unwrap(), json!(1));
+    }
+
+    #[tokio::test]
+    async fn continuations_inherit_and_only_narrow_capabilities() {
+        let scripts = Arc::new(MemoryStore::default());
+        scripts.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"router":"router","queue":true,"stores":{"Out":"readwrite"}}"#,
+        );
+        put(
+            &scripts,
+            "router",
+            r#"return {on_route=function(_, ev)
+            return {script=ev.target or "parent", capabilities={stores={Out={read_prefixes={"orders/"}}}}}
+        end}"#,
+        );
+        put(
+            &scripts,
+            "parent",
+            r#"return {on_queue=function()
+            ig.queue.send({script="child",event={},capabilities={stores={Out={read={"orders/a","secret"},write_prefixes={""}}}}})
+            return true
+        end}"#,
+        );
+        put(
+            &scripts,
+            "child",
+            r#"
+            local allowed = pcall(ig.store.Out.get, "orders/a")
+            local denied = pcall(ig.store.Out.get, "orders/b")
+            local secret = pcall(ig.store.Out.get, "secret")
+            return {on_queue=function()
+                ig.queue.send({event={target="grandchild"}})
+                return {allowed=allowed,denied=denied,secret=secret,write=pcall(ig.store.Out.put,"orders/a","bad")}
+            end}"#,
+        );
+        put(
+            &scripts,
+            "grandchild",
+            r#"return {on_queue=function()
+            return {allowed=pcall(ig.store.Out.get,"orders/a"),denied=pcall(ig.store.Out.get,"orders/b")}
+        end}"#,
+        );
+        let queue = Arc::new(MemQueue::default());
+        let engine = routed(&scripts).with_queue(queue.clone()).with_store(
+            "Out",
+            Arc::new(MemBackend::default()),
+            "data/",
+        );
+        engine.invoke(msg(json!({}))).await.unwrap();
+        let envelope = queue.0.lock().unwrap().remove(0).0;
+        assert_eq!(
+            envelope["capabilities"]["stores"]["Out"]["read"],
+            json!(["orders/a"])
+        );
+        let mut child: Invocation = serde_json::from_value(envelope).unwrap();
+        child.trigger = Trigger::Queue;
+        assert_eq!(
+            engine.invoke(child).await.unwrap(),
+            json!({"allowed":true,"denied":false,"secret":false,"write":false})
+        );
+        let mut grandchild: Invocation =
+            serde_json::from_value(queue.0.lock().unwrap().remove(0).0).unwrap();
+        grandchild.trigger = Trigger::Queue;
+        assert_eq!(
+            engine.invoke(grandchild).await.unwrap(),
+            json!({"allowed":true,"denied":false})
+        );
+    }
+
+    #[tokio::test]
+    async fn route_capabilities_drop_store_privileges() {
+        let store = Arc::new(MemoryStore::default());
+        put(
+            &store,
+            "router",
+            r#"return { on_route = function(_, ev)
+            return { script = "t", capabilities = { stores = {
+                Out = { read = { "allowed" }, write_prefixes = { "reports/" } }
+            } } }
+        end }"#,
+        );
+        put(
+            &store,
+            "t",
+            r#"return { on_queue = function()
+            local results = {}
+            results.allowed = pcall(ig.store.Out.get, "allowed")
+            results.other = pcall(ig.store.Out.get, "secret")
+            results.write = pcall(ig.store.Out.put, "reports/a", "ok")
+            results.outside = pcall(ig.store.Out.put, "other/a", "bad")
+            results.delete = pcall(ig.store.Out.delete, "allowed")
+            results.list = pcall(ig.store.Out.list, "")
+            results.open = pcall(ig.store.Out.open, "secret")
+            results.create = pcall(ig.store.Out.create, "other/a")
+            results.omitted = pcall(ig.store.Other.get, "allowed")
+            return results
+        end }"#,
+        );
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"router":"router","stores":{"Out":"readwrite","Other":"read"}}"#,
+        );
+        let e = routed(&store)
+            .with_store("Out", Arc::new(MemBackend::default()), "data/")
+            .with_store("Other", Arc::new(MemBackend::default()), "other/");
+        assert_eq!(
+            e.invoke(msg(json!({}))).await.unwrap(),
+            json!({
+                "allowed":true,"other":false,"write":true,"outside":false,
+                "delete":false,"list":false,"open":false,"create":false,"omitted":false
+            })
+        );
+        // Explicit empty guards deny everything; omission retains tenant grants.
+        put(
+            &store,
+            "probe",
+            r#"return {on_queue=function()
+            return pcall(ig.store.Out.get, "allowed")
+        end}"#,
+        );
+        put(
+            &store,
+            "router",
+            r#"return {on_route=function()
+            return {script="probe", capabilities={}}
+        end}"#,
+        );
+        assert_eq!(e.invoke(msg(json!({}))).await.unwrap(), json!(false));
+        put(
+            &store,
+            "router",
+            r#"return {on_route=function() return "probe" end}"#,
+        );
+        assert_eq!(e.invoke(msg(json!({}))).await.unwrap(), json!(true));
+        put(
+            &store,
+            "router",
+            r#"return { on_route = function()
+            return {script="t", capabilities={stores={Out={typo={"a"}}}}}
+        end }"#,
+        );
+        assert!(e
+            .invoke(msg(json!({})))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("invalid route capabilities"));
     }
 
     #[tokio::test]

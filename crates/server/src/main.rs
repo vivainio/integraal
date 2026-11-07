@@ -669,6 +669,7 @@ async fn run_http(
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         let inv = Invocation {
+            capabilities: None,
             tenant,
             script,
             version,

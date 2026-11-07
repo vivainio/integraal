@@ -151,3 +151,7 @@ finalizer file is needed. Invoke its `on_invoke` with `{ "id": "demo/1", "items"
   under that primitive's retention policy.
 - Sequence events reserve `type = "sequence.start"`, `"sequence.resume"`, and `"sequence.signal"`
   for queue dispatch. Handlers should use other event types for ordinary application events.
+
+Workflow starts inherit the caller's store capabilities and may narrow them with `capabilities`
+in the start options. The guard is persisted with workflow state and carried through subsequent
+resumes and signals. See [continuation capabilities](router.md#dropping-privileges-in-continuations).

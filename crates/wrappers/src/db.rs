@@ -290,6 +290,7 @@ impl DbScope {
 /// What a callback resolves to: the script to run and the state saved when it was created.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Callback {
+    pub capabilities: Option<crate::Capabilities>,
     pub script: Option<String>,
     pub version: Option<String>,
     pub state: serde_json::Value,
@@ -459,6 +460,20 @@ impl DbScope {
         state: serde_json::Value,
         ttl: Duration,
     ) -> Result<String, String> {
+        self.create_callback_guarded(script, version, state, ttl, None)
+    }
+
+    pub fn create_callback_guarded(
+        &self,
+        script: Option<String>,
+        version: Option<String>,
+        state: serde_json::Value,
+        ttl: Duration,
+        capabilities: Option<crate::Capabilities>,
+    ) -> Result<String, String> {
+        if let Some(caps) = &capabilities {
+            caps.validate()?;
+        }
         if version
             .as_ref()
             .is_some_and(|v| !crate::queue::valid_name(v) || script.is_none())
@@ -467,7 +482,7 @@ impl DbScope {
         }
         let id = hex(&random::<16>()?);
         let value = serde_json::json!({
-            "script": script, "version": version, "state": state, "trace": crate::trace::inject_current()
+            "script": script, "version": version, "capabilities": capabilities, "state": state, "trace": crate::trace::inject_current()
         })
         .to_string();
         self.put_for(&callback_pk(&id), "", value, ttl)?;
@@ -496,6 +511,14 @@ impl DbScope {
             serde_json::from_str(&item.value).map_err(|e| format!("corrupt callback: {e}"))?;
         let script = v.get("script").and_then(|s| s.as_str()).map(str::to_string);
         let callback = Callback {
+            capabilities: v
+                .get("capabilities")
+                .filter(|v| !v.is_null())
+                .map(|v| {
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| format!("corrupt callback capabilities: {e}"))
+                })
+                .transpose()?,
             script,
             version: v
                 .get("version")

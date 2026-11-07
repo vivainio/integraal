@@ -187,6 +187,7 @@ struct Draft {
     state: Json,
     script: Option<String>,
     version: Option<String>,
+    capabilities: Option<crate::Capabilities>,
     http: Vec<(String, Prepared)>,
     submitted: bool,
 }
@@ -534,7 +535,7 @@ impl UserData for Job {
         // Script that `igp.batch.route` picks when the partner's `done.json` arrives.
         methods.add_method(
             "continue_with",
-            |_, this, (script, version): (String, Option<String>)| {
+            |lua, this, (script, version, capabilities): (String, Option<String>, Option<mlua::Table>)| {
                 if !token_ok(&script, 128) {
                     return Err(err(format!("invalid script name {script:?}")));
                 }
@@ -547,6 +548,9 @@ impl UserData for Job {
                     .target
                     .version(Some(&script), version)
                     .map_err(err)?;
+                let opts = lua.create_table()?;
+                opts.set("capabilities", capabilities)?;
+                d.capabilities = this.ctx.target.capabilities(lua, Some(&opts))?;
                 d.script = Some(script);
                 Ok(())
             },
@@ -554,7 +558,7 @@ impl UserData for Job {
         methods.add_method("id", |_, this, ()| Ok(this.id.clone()));
         // Writes the state, then the request: a partner that reacts at once never finds a
         // request whose state is missing.
-        methods.add_method("submit", |_, this, opts: Option<Table>| {
+        methods.add_method("submit", |lua, this, opts: Option<Table>| {
             let deadline_s = opts
                 .map(|o| o.get::<Option<u64>>("deadline_s"))
                 .transpose()?
@@ -593,6 +597,10 @@ impl UserData for Job {
                 "job": this.id,
                 "continue": d.script,
                 "version": d.version,
+                "capabilities": match &d.capabilities {
+                    Some(c) => Some(c.clone()),
+                    None => this.ctx.target.capabilities(lua, None)?,
+                },
                 "queries": d.queries.iter().map(|(n, _, _)| n.as_str())
                     .chain(d.http.iter().map(|(n, _)| n.as_str()))
                     .collect::<Vec<_>>(),
@@ -638,6 +646,7 @@ impl UserData for Job {
                 this.ctx.op()?;
                 let secs_now = now / 1000;
                 let payload = timer::Payload {
+                    capabilities: this.ctx.target.capabilities(lua, None)?,
                     script: None,
                     version: None,
                     event: json!({ "type": OVERDUE_EVENT, "job": this.id }),
@@ -756,6 +765,7 @@ impl InputRows {
 }
 
 struct Envelope {
+    capabilities: Option<crate::Capabilities>,
     script: Option<String>,
     version: Option<String>,
     queries: Vec<String>,
@@ -783,6 +793,11 @@ fn load_envelope(ctx: &Ctx, scope: &StoreScope, id: &str) -> mlua::Result<Option
         .unwrap_or_default();
     crate::trace::link_current_to(&trace);
     Ok(Some(Envelope {
+        capabilities: j
+            .get("capabilities")
+            .filter(|v| !v.is_null())
+            .map(|v| serde_json::from_value(v.clone()).map_err(err))
+            .transpose()?,
         script: j.get("continue").and_then(Json::as_str).map(str::to_string),
         version: j.get("version").and_then(Json::as_str).map(str::to_string),
         queries: j
@@ -850,6 +865,9 @@ fn route(lua: &Lua, ctx: &Ctx, event: &Table) -> mlua::Result<Value> {
     if let Some(env) = env {
         routed.set("script", env.script)?;
         routed.set("version", env.version)?;
+        if let Some(caps) = env.capabilities {
+            routed.set("capabilities", lua.to_value(&caps)?)?;
+        }
     }
     routed.set("event", ev)?;
     Ok(Value::Table(routed))
@@ -1325,6 +1343,11 @@ mod tests {
             max_http_timeout: std::time::Duration::ZERO,
         };
         Ctx {
+            target: crate::ContinuationTarget {
+                stores: crate::StoreScopes::new(),
+                script: Arc::new(std::sync::Mutex::new("test".into())),
+                version: Arc::new(std::sync::Mutex::new(None)),
+            },
             batch: Some(StoreScope::new(mem, "t/")),
             db: None,
             budget: Arc::new(Budget::new(&limits)),

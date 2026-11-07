@@ -10,6 +10,7 @@ impl Engine {
             return Ok(None);
         };
         self.invoke(Invocation {
+            capabilities: None,
             tenant: tenant.into(),
             script: Some(app.script),
             version: app.version,

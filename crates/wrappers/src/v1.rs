@@ -424,7 +424,13 @@ fn callback_api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::Res
             let ttl =
                 std::time::Duration::from_secs(ttl_s.unwrap_or(crate::DB_TTL.as_secs()).max(1));
             let id = scope
-                .create_callback_versioned(script, version, state, ttl)
+                .create_callback_guarded(
+                    script,
+                    version,
+                    state,
+                    ttl,
+                    target.capabilities(lua, opts.as_ref())?,
+                )
                 .map_err(mlua::Error::runtime)?;
             Ok(format!("{}/cb/{tenant}/{id}", base.trim_end_matches('/')))
         })?,

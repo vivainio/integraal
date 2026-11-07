@@ -64,3 +64,85 @@ still go through the router to a handler that starts a workflow or signals a wai
   (`barrier.complete`, `barrier.overdue`) unless the barrier names a script. Match on `event.type`;
   see [event types](schedules.md#event-types).
 - A [batch job](batch.md#wiring-the-continuation)'s `done.json`, which the router hands to `igp.batch.route`.
+
+## Optional route capabilities
+
+A router can **drop privileges of the executing Luau sandbox** before handing control to
+its selected handler. This is a second guard against script mistakes: tenant grants remain
+the maximum authority, while the route restricts the operations and paths the handler can use.
+
+```lua
+local function on_route(ctx: Context, event: { key: string }): RouteDecision
+    return {
+        script = "parse-order",
+        capabilities = {
+            stores = {
+                In = { read = { event.key } },
+                Out = { write_prefixes = { "reports/" } },
+            },
+        },
+    }
+end
+return { on_route = on_route }
+```
+
+Omitting `capabilities` preserves existing behavior. When supplied, omitted stores and operations
+are denied; `capabilities = {}` denies all store access. The router itself runs with tenant grants;
+the runtime locks the restrictions before executing the target, and the handler cannot widen them.
+Capabilities never grant access that the tenant does not already have.
+
+Each store accepts exact-key lists `read`, `write`, `delete`, `upload`, `download` and corresponding
+`read_prefixes`, `write_prefixes`, `delete_prefixes`, `upload_prefixes`, `download_prefixes` lists.
+Keys and prefixes are relative to that tenant's root in that store. Prefixes must end with `/`;
+an empty prefix permits the entire store for that operation. There are no glob patterns.
+`read` covers `get` and `open`; listing requires a `read_prefixes` entry covering the requested
+listing prefix. A broad listing is rejected rather than exposing other keys. `write` covers
+`put` and `create`; `upload` and `download` separately guard presigned URLs. Streaming and
+helper operations using these stores are subject to the same guard.
+
+These restrictions cover the selected handler and modules it calls, including post-handler object
+deletion, and are inherited by continuations. Other APIs such as HTTP, database and coordination
+APIs are not restricted by this store capability declaration.
+
+The Luau definitions expose `RouteDecision`, `RouteCapabilities` and `StoreCapabilities` for
+strict checking of router declarations.
+
+## Dropping privileges in continuations
+
+Continuations inherit the current store capabilities automatically. Supply an optional
+`capabilities` declaration to restrict them further:
+
+```lua
+ig.queue.send({
+    script = "send-report",
+    event = { key = report_key },
+    capabilities = {
+        stores = { Out = { read = { report_key } } },
+    },
+})
+```
+
+The effective child permissions are the **intersection** of the parent's permissions and the
+new declaration. Omitting the declaration inherits the parent's guard; `{}` denies all store
+access. An unrestricted parent can establish the first guard. A child cannot restore privileges
+its parent dropped: a write-only parent cannot delegate read access to its child.
+
+Effective capabilities travel as `capabilities` in the SQS envelope, alongside `tenant`, `script`
+and `event`. The receiving runtime applies them **before loading the target script**, even when
+an explicit script bypasses the router. When a continuation does use the router, its route guard
+can narrow the inherited capabilities further. Tenant grants still bound every store operation.
+This is a guard against programming mistakes, not authentication of queue message producers.
+
+The same inheritance applies to `ig.queue.handoff`, `ig.timer.at` / `after`, `igp.retry.schedule`,
+`igp.callback.create`, `igp.barrier.create`, batch continuations and durable workflows. Their
+records save the effective capabilities and restore them when dispatching work. Old records and
+messages without capabilities retain their existing behavior.
+
+Queue, handoff, timer and retry message tables accept `capabilities`. Callback, barrier and
+`igp.sequence.start` option tables accept it too. A barrier uses the guard for both completion and
+overdue handlers. For batch jobs use `job:continue_with(script, version, capabilities)`; omit
+`version` with `nil` if needed. `igp.batch.route` restores saved capabilities in its route result.
+
+Workflows persist their guard with their state and carry it through sleeps, yields and signals.
+Signals intersect the sender's restrictions with the workflow's saved restrictions; later resumes
+retain any further reduction. Called modules run under the current sandbox guard.
