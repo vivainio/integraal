@@ -5,3 +5,6 @@ e2e/.venv/
 e2e/__pycache__/
 e2e/.pytest_cache/
 e2e/.bin/
+infra/reference/.venv/
+infra/reference/__pycache__/
+infra/reference/.pytest_cache/

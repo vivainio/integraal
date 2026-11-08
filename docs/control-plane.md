@@ -5,6 +5,8 @@ It uses the same flow inspection as `ops.flow.inspect` and does not run tenant s
 is independent of the queue workers, though it still depends on their shared flow-log and
 state storage.
 
+The [typed reference stack](../infra/reference/README.md) generates the committed CloudFormation template.
+
 The Lambda accepts API Gateway **HTTP API payload format 2.0** events. The accompanying
 [`template.yaml`](../crates/control-plane/template.yaml) configures a JWT authorizer and an
 access-token scope for both routes. The token issuer must provide nonempty `sub` and `tenant`
@@ -16,7 +18,7 @@ The function trusts the authorizer context in the event and does not validate th
 **Restrict direct `lambda:InvokeFunction` access to trusted administrators and the intended API
 Gateway integration.** Do not add a public function URL or another unauthenticated event source:
 a caller who can directly invoke the Lambda can forge claims. Restrict the execution role to the
-necessary deployment resources. The template accepts an existing role and does not grant other
+necessary deployment resources. The reference stack creates its own read-oriented role and does not grant other
 principals direct invoke access. Check identity policies and other resource policies as well.
 
 | Request | Response |
@@ -30,10 +32,10 @@ inspection also needs the durable-state backend. The role needs read access to t
 script/config, flow-log and state resources. Deployment, invocation, credentials, queue control,
 and fleet-wide operations are not implemented by this first API.
 
-Build for `aarch64-unknown-linux-gnu` (or adjust the template architecture), then package the
-`bootstrap` binary and deployment `integraal.json` at the zip root. Upload the zip to S3 and
-deploy the CloudFormation template with the zip bucket and key, execution role ARN, issuer, audience, and OAuth scope.
-Protect the role and configuration as operator-controlled resources. For example, once deployed:
+The reference stack injects the shared-resource configuration via `INTEGRAAL_CONTROL_CONFIG`.
+Outside that stack, omit this variable and bundle `integraal.json` with `bootstrap` as usual.
+See the [reference stack](../infra/reference/README.md) for build and deployment inputs.
+For example, once deployed:
 
 ```sh
 curl -H "Authorization: Bearer $ACCESS_TOKEN" \

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Integraal tenant-scoped control plane
+Description: Integraal reference hosting stack
 Parameters:
   JwtIssuer:
     Type: String
@@ -8,16 +8,304 @@ Parameters:
   AccessScope:
     Type: String
     Description: OAuth access-token scope required for control-plane routes
-  ExecutionRoleArn:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC with public subnets and an internet gateway
+  PublicSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets in the selected VPC
+  WorkerImage:
     Type: String
-    Description: Lambda execution role with access to configured flow logs and durable state
+    Description: Container image with /bin/sh and /usr/local/bin/integraal-server
+  WorkerCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 20
   CodeBucket:
     Type: String
     Description: S3 bucket containing the Lambda zip
   CodeKey:
     Type: String
-    Description: S3 key of the zip containing bootstrap and integraal.json
+    Description: S3 key of the zip containing the control-plane bootstrap
 Resources:
+  ScriptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+  FlowLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      SqsManagedSseEnabled: true
+      MessageRetentionPeriod: 1209600
+  WorkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      SqsManagedSseEnabled: true
+      VisibilityTimeout: 300
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 5
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkerResources
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource:
+                  - !GetAtt ScriptsBucket.Arn
+                  - !GetAtt DataBucket.Arn
+                  - !GetAtt FlowLogsBucket.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub ${ScriptsBucket.Arn}/*
+                  - !Sub ${DataBucket.Arn}/*
+                  - !Sub ${FlowLogsBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub ${DataBucket.Arn}/*
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${FlowLogsBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource: !GetAtt StateTable.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:SendMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt WorkQueue.Arn
+  ControlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReadTenantFlows
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource:
+                  - !GetAtt ScriptsBucket.Arn
+                  - !GetAtt DataBucket.Arn
+                  - !GetAtt FlowLogsBucket.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub ${ScriptsBucket.Arn}/*
+                  - !Sub ${DataBucket.Arn}/*
+                  - !Sub ${FlowLogsBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt StateTable.Arn
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  WorkerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+  WorkerCluster:
+    Type: AWS::ECS::Cluster
+  WorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Queue-only Integraal workers
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+  WorkerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt WorkerRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Ref WorkerImage
+          Essential: true
+          EntryPoint:
+            - /bin/sh
+            - -c
+          Command:
+            - printf "%s" "$INTEGRAAL_CONFIG" > /tmp/integraal.json && exec /usr/local/bin/integraal-server --config /tmp/integraal.json
+          Environment:
+            - Name: INTEGRAAL_CONFIG
+              Value: !Sub '{"scripts":{"bucket":"${ScriptsBucket}"},"stores":{"Data":{"type":"s3","bucket":"${DataBucket}","prefix":"tenants/"}},"flow_logs":{"bucket":"${FlowLogsBucket}"},"db":{"table":"${StateTable}"},"queue":{"url":"${WorkQueue}"}}'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+  WorkerService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref WorkerCluster
+      TaskDefinition: !Ref WorkerTask
+      LaunchType: FARGATE
+      DesiredCount: !Ref WorkerCount
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref WorkerSecurityGroup
+          Subnets: !Ref PublicSubnets
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SendTicks
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt WorkQueue.Arn
+  MinuteTick:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: rate(1 minute)
+      Target:
+        Arn: !GetAtt WorkQueue.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"type":"system.tick","every":"minute","at":"<aws.scheduler.scheduled-time>"}'
+  HourTick:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: rate(1 hour)
+      Target:
+        Arn: !GetAtt WorkQueue.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"type":"system.tick","every":"hour","at":"<aws.scheduler.scheduled-time>"}'
+  DayTick:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: rate(1 day)
+      Target:
+        Arn: !GetAtt WorkQueue.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"type":"system.tick","every":"day","at":"<aws.scheduler.scheduled-time>"}'
   ControlFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -26,10 +314,14 @@ Resources:
         S3Key: !Ref CodeKey
       Handler: bootstrap
       Runtime: provided.al2023
-      Architectures: [arm64]
-      Role: !Ref ExecutionRoleArn
+      Architectures:
+        - arm64
+      Role: !GetAtt ControlRole.Arn
       Timeout: 30
       MemorySize: 512
+      Environment:
+        Variables:
+          INTEGRAAL_CONTROL_CONFIG: !Sub '{"scripts":{"bucket":"${ScriptsBucket}"},"stores":{"Data":{"type":"s3","bucket":"${DataBucket}","prefix":"tenants/"}},"flow_logs":{"bucket":"${FlowLogsBucket}"},"db":{"table":"${StateTable}"},"queue":{"url":"${WorkQueue}"}}'
   ControlApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
@@ -42,7 +334,7 @@ Resources:
       AuthorizerType: JWT
       Name: tenant-jwt
       IdentitySource:
-        - '$request.header.Authorization'
+        - $request.header.Authorization
       JwtConfiguration:
         Issuer: !Ref JwtIssuer
         Audience:
@@ -58,25 +350,27 @@ Resources:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref ControlApi
-      RouteKey: 'GET /flows'
+      RouteKey: GET /flows
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
-      AuthorizationScopes: [!Ref AccessScope]
-      Target: !Sub 'integrations/${LambdaIntegration}'
+      AuthorizationScopes:
+        - !Ref AccessScope
+      Target: !Sub integrations/${LambdaIntegration}
   FlowRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref ControlApi
-      RouteKey: 'GET /flows/{trace}'
+      RouteKey: GET /flows/{trace}
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
-      AuthorizationScopes: [!Ref AccessScope]
-      Target: !Sub 'integrations/${LambdaIntegration}'
+      AuthorizationScopes:
+        - !Ref AccessScope
+      Target: !Sub integrations/${LambdaIntegration}
   DefaultStage:
     Type: AWS::ApiGatewayV2::Stage
     Properties:
       ApiId: !Ref ControlApi
-      StageName: '$default'
+      StageName: $default
       AutoDeploy: true
   GatewayInvokePermission:
     Type: AWS::Lambda::Permission
@@ -84,7 +378,19 @@ Resources:
       Action: lambda:InvokeFunction
       FunctionName: !Ref ControlFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ControlApi}/$default/GET/flows*'
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ControlApi}/$default/GET/flows*
 Outputs:
   ApiUrl:
-    Value: !Sub 'https://${ControlApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'
+    Value: !Sub https://${ControlApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  ScriptsBucket:
+    Value: !Ref ScriptsBucket
+  DataBucket:
+    Value: !Ref DataBucket
+  FlowLogsBucket:
+    Value: !Ref FlowLogsBucket
+  StateTable:
+    Value: !Ref StateTable
+  WorkQueueUrl:
+    Value: !Ref WorkQueue
+  WorkerCluster:
+    Value: !Ref WorkerCluster

@@ -78,7 +78,12 @@ async fn dispatch(engine: &Engine, event: &Value) -> Value {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let config = GlobalConfig::load().map_err(std::io::Error::other)?;
+    let config = match std::env::var("INTEGRAAL_CONTROL_CONFIG") {
+        Ok(json) => GlobalConfig::parse(&json),
+        Err(std::env::VarError::NotPresent) => GlobalConfig::load(),
+        Err(error) => return Err(error.into()),
+    }
+    .map_err(std::io::Error::other)?;
     let telemetry =
         integraal_core::telemetry::init("integraal-control-plane", config.log_filter())?;
     let engine = config.engine().await.map_err(std::io::Error::other)?;

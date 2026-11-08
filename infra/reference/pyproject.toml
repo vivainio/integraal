@@ -1,0 +1,12 @@
+[project]
+name = "integraal-reference-stack"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = ["cfn-typed", "cfn-typed-sumo"]
+
+[dependency-groups]
+dev = ["pytest", "ty"]
+
+[tool.uv.sources]
+cfn-typed = { git = "https://github.com/vivainio/cfn-typed.git", rev = "7974b0de0e16bbba4ecaeba9450f79d85d4d7cf9" }
+cfn-typed-sumo = { git = "https://github.com/vivainio/cfn-typed.git", rev = "7974b0de0e16bbba4ecaeba9450f79d85d4d7cf9", subdirectory = "packages/sumo" }
