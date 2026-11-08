@@ -1,0 +1,14 @@
+{
+  "router": "router",
+  "stores": {
+    "In": "read",
+    "Out": "readwrite"
+  },
+  "http": {
+    "allow": [
+      "https://api.example.com/v1/"
+    ]
+  },
+  "flow_logs": true,
+  "queue": true
+}

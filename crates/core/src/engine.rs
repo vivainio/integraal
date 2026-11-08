@@ -890,7 +890,7 @@ impl FlowSegment {
     /// Writes the segment, and for the first invocation of a flow the index entry. A failure is
     /// logged and nothing more: the flow log must never fail the invocation it describes.
     async fn write(
-        self,
+        mut self,
         sink: &crate::flow_log::FlowLogSink,
         log: FlowLog,
         span: &tracing::Span,
@@ -907,6 +907,11 @@ impl FlowSegment {
             return;
         }
         let (trace_id, span_id) = (sc.trace_id().to_string(), sc.span_id().to_string());
+        let routed = self.script == "<routed>";
+        if let Some((script, version)) = log.route_target() {
+            self.script = script;
+            self.version = version;
+        }
         if let Some(e) = &error {
             log.event("error", e);
         }
@@ -914,7 +919,7 @@ impl FlowSegment {
             "type": "header", "v": 1, "tenant": self.tenant, "trace_id": trace_id,
             "span_id": span_id, "script": self.script, "version": self.version,
             "trigger": self.trigger, "attempt": self.attempt, "start_ms": self.start_ms,
-            "continues_trace": self.continues_trace,
+            "continues_trace": self.continues_trace, "routed": routed,
         });
         let footer = serde_json::json!({
             "type": "end", "t": now_ms(), "outcome": outcome,
@@ -925,7 +930,7 @@ impl FlowSegment {
         let index = (!self.continues_trace).then(|| {
             let entry = serde_json::json!({
                 "trace_id": trace_id, "tenant": self.tenant, "script": self.script,
-                "trigger": self.trigger, "start_ms": self.start_ms,
+                "trigger": self.trigger, "start_ms": self.start_ms, "routed": routed,
             });
             (
                 sink.index_key(&self.tenant, self.start_ms, &trace_id),
@@ -1357,6 +1362,9 @@ fn run_routed(
     };
 
     let key = ScriptKey::new(&inv.tenant, &script, version.as_deref())?;
+    if let Some(log) = &vm.flow_log {
+        log.route(&route_call.script, &script, version.as_deref());
+    }
     let target = handle.block_on(loader.load(&key))?;
     let call = Call {
         version,
@@ -4811,6 +4819,48 @@ return { handle = function()
             attempt: 0,
             continues_trace: false,
         }
+    }
+
+    #[tokio::test]
+    async fn routed_flow_records_target_in_index_and_log() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt;
+        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer.tracer("test"))),
+        );
+        let store = Arc::new(MemoryStore::default());
+        put(
+            &store,
+            "router",
+            r#"return { on_route = function() return "target" end }"#,
+        );
+        put(
+            &store,
+            "target",
+            "return { handle = function() return true end }",
+        );
+        store.put(
+            &ScriptKey::config("acme").unwrap(),
+            r#"{"router":"router","flow_logs":true}"#,
+        );
+        let logs = Arc::new(MemBackend::default());
+        let e = routed(&store).with_flow_logs(logs, "logs/");
+        e.invoke(msg(json!({}))).await.unwrap();
+        let sink = e.flow_logs().unwrap().clone();
+        let day = crate::flow_log::utc_day(now_ms());
+        let entries = sink.list_day("acme", &day).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["script"], "target");
+        assert_eq!(entries[0]["routed"], true);
+        let lines = sink
+            .read_flow("acme", entries[0]["trace_id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(lines[0]["script"], "target");
+        let route = lines.iter().find(|line| line["type"] == "route").unwrap();
+        assert_eq!(route["router"], "router");
+        assert_eq!(route["script"], "target");
     }
 
     #[tokio::test]

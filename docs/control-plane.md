@@ -25,6 +25,7 @@ principals direct invoke access. Check identity policies and other resource poli
 | --- | --- |
 | `GET /flows?day=2026-11-08` | `{ "flows": [...] }`, flows started on the UTC day |
 | `GET /flows/{trace_id}` | invocation summaries and pending state, as in `ops.flow.inspect` |
+| `GET /flows/{trace_id}/logs` | `{ "lines": [...] }`, merged flow-log entries |
 
 Flow listing is bounded by the existing flow-log reader (up to 1,000 entries); it has no
 pagination. Flow logs must be enabled for the tenant and configured in `integraal.json`; flow

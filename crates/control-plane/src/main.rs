@@ -62,8 +62,23 @@ async fn dispatch(engine: &Engine, event: &Value) -> Value {
         };
     }
     if let Some(trace) = path.strip_prefix("/flows/") {
+        let (trace, logs) = match trace.strip_suffix("/logs") {
+            Some(trace) => (trace, true),
+            None => (trace, false),
+        };
         if trace.len() != 32 || !trace.bytes().all(|b| b.is_ascii_hexdigit()) {
             return response(400, json!({"error":"invalid trace id"}));
+        }
+        if logs {
+            let Some(sink) = engine.flow_logs().cloned() else {
+                return response(503, json!({"error":"flow logs not configured"}));
+            };
+            let (tenant, trace) = (tenant.to_owned(), trace.to_owned());
+            return match tokio::task::spawn_blocking(move || sink.read_flow(&tenant, &trace)).await
+            {
+                Ok(Ok(lines)) => response(200, json!({"lines": lines})),
+                _ => response(500, json!({"error":"could not read flow logs"})),
+            };
         }
         return match operations::inspect_flow(engine, tenant, trace).await {
             Ok(flow) => response(200, flow),

@@ -48,8 +48,12 @@ aws cloudformation deploy \
   --parameter-overrides \
     CodeBucket=ARTIFACT_BUCKET CodeKey=CONTROL_PLANE_ZIP_KEY \
     WorkerImage=WORKER_IMAGE_URI VpcId=VPC_ID PublicSubnets=SUBNET_ID_1,SUBNET_ID_2 \
-    JwtIssuer=ISSUER_URL JwtAudience=AUDIENCE AccessScope=ACCESS_TOKEN_SCOPE
+    JwtIssuer=ISSUER_URL JwtAudience=AUDIENCE AccessScope=ACCESS_TOKEN_SCOPE \
+    UiOrigin=https://YOUR_UI_ORIGIN
 ```
+
+The `UiOrigin` parameter configures CORS for the browser UI and defaults to
+`http://localhost:5173` for local l8l development. It must exactly match the UI origin.
 
 Use stack outputs for bucket names, the table and queue URL. Upload tenant scripts and configs
 to the scripts bucket, including `tenants.json` for scheduled tenant events. Enable `flow_logs`

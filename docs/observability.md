@@ -87,6 +87,16 @@ integraal-server flow show acme 4bf92f3577b34da6a3ce929d0e0e4736
 integraal-server flow list acme 2026-10-25
 ```
 
+Durable `seq:step` transitions are recorded as `workflow_step` entries with the step name and
+status (`started`, `completed`, `failed`, or `replayed`). Names are script-supplied and can include
+business identifiers; inputs and results are not recorded. These entries describe individual
+executions and replays; a started step without a completion is not necessarily still running.
+
+For routed invocations, new flow logs record a `route` entry with the router, selected script,
+and selected version (without the original or rewritten event). The flow index and segment header
+show the selected script and carry `routed: true`. If routing failed before a target was chosen,
+the script remains `<routed>`. Older flow records keep their original labels.
+
 ### Local query API
 
 With `"local_api": { "port": 9091 }` in `integraal.json` (needs `flow_logs`), the server also answers

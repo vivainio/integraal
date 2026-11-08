@@ -9,6 +9,7 @@ def build() -> cfn.Template:
         "AWSTemplateFormatVersion": "2010-09-09",
         "Description": "Integraal reference hosting stack",
         "Parameters": {
+            "UiOrigin": {"Type": "String", "Default": "http://localhost:5173", "Description": "Origin allowed to call the control API from a browser"},
             "JwtIssuer": {"Type": "String"},
             "JwtAudience": {"Type": "String"},
             "AccessScope": {"Type": "String", "Description": "OAuth access-token scope required for control-plane routes"},
@@ -27,7 +28,7 @@ def build() -> cfn.Template:
                 Role=cfn.get_att("ControlRole", "Arn"), Timeout=30, MemorySize=512,
                 Environment={"Variables": {"INTEGRAAL_CONTROL_CONFIG": runtime.config()}},
             ),
-            "ControlApi": api.api(Name="integraal-control-plane", ProtocolType="HTTP"),
+            "ControlApi": api.api(Name="integraal-control-plane", ProtocolType="HTTP", CorsConfiguration={"AllowOrigins": [cfn.ref("UiOrigin")], "AllowHeaders": ["authorization", "content-type"], "AllowMethods": ["GET", "OPTIONS"], "MaxAge": 300}),
             "JwtAuthorizer": api.authorizer(
                 ApiId=cfn.ref("ControlApi"), AuthorizerType="JWT", Name="tenant-jwt",
                 IdentitySource=["$request.header.Authorization"],
@@ -44,6 +45,11 @@ def build() -> cfn.Template:
             ),
             "FlowRoute": api.route(
                 ApiId=cfn.ref("ControlApi"), RouteKey="GET /flows/{trace}", AuthorizationType="JWT",
+                AuthorizerId=cfn.ref("JwtAuthorizer"), AuthorizationScopes=[cfn.ref("AccessScope")],
+                Target=cfn.sub("integrations/${LambdaIntegration}"),
+            ),
+            "FlowLogsRoute": api.route(
+                ApiId=cfn.ref("ControlApi"), RouteKey="GET /flows/{trace}/logs", AuthorizationType="JWT",
                 AuthorizerId=cfn.ref("JwtAuthorizer"), AuthorizationScopes=[cfn.ref("AccessScope")],
                 Target=cfn.sub("integrations/${LambdaIntegration}"),
             ),

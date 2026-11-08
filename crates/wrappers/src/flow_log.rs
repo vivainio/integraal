@@ -29,6 +29,7 @@ struct Buf {
     tail_bytes: usize,
     dropped: usize,
     failure: Option<Value>,
+    route_target: Option<(String, Option<String>)>,
 }
 
 /// A shared handle to the buffer of one invocation.
@@ -90,6 +91,24 @@ impl FlowLog {
     /// An event of the engine itself (a failure, a timeout).
     pub fn event(&self, level: &str, msg: &str) {
         self.push(json!({ "t": now_ms(), "type": "engine", "level": level, "msg": cut(msg) }));
+    }
+
+    /// Record the validated routing decision without storing the input or rewritten event.
+    pub fn route(&self, router: &str, script: &str, version: Option<&str>) {
+        self.0.lock().unwrap().route_target = Some((script.to_owned(), version.map(str::to_owned)));
+        self.push(json!({ "t": now_ms(), "type": "route", "router": router, "script": script, "version": version }));
+    }
+
+    /// The chosen target, even if the target cannot subsequently be loaded.
+    pub fn route_target(&self) -> Option<(String, Option<String>)> {
+        self.0.lock().unwrap().route_target.clone()
+    }
+
+    /// Record a workflow step transition without recording inputs or results.
+    pub fn workflow_step(&self, name: &str, status: &str) {
+        self.push(
+            json!({ "t": now_ms(), "type": "workflow_step", "name": name, "status": status }),
+        );
     }
 
     /// The structured failure of the invocation (kind, message, frames); it goes in the footer.

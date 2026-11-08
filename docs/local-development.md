@@ -20,6 +20,14 @@ curl -X POST localhost:8080/v1/acme/hello \
 
 Running it again increments `count`, which is stored in the `Out` store through `ig.store.Out`.
 
+## Flow history in l8l
+
+The local setup enables flow logging for `acme` and exposes read-only flow queries on
+`127.0.0.1:9091`. Start [l8l](../l8l/README.md) with `npm run dev` in its directory; its
+loopback-only development adapter connects to the local listener automatically. Invoke the
+launcher creates real flows, including intentional failures, routed flows and a durable order workflow; refresh l8l to inspect
+them. Run `dev/seed-flows.sh` again to add another set.
+
 ## Tests
 
 ```bash

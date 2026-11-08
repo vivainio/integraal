@@ -8,3 +8,5 @@ e2e/.bin/
 infra/reference/.venv/
 infra/reference/__pycache__/
 infra/reference/.pytest_cache/
+l8l/node_modules/
+l8l/dist/

@@ -80,6 +80,7 @@ struct Env {
     db: DbScope,
     tenant: String,
     budget: Arc<Budget>,
+    flow_log: Option<crate::FlowLog>,
 }
 impl Env {
     fn charge(&self, n: usize) -> Result<(), String> {
@@ -263,17 +264,33 @@ fn sequence(lua: &Lua, session: Arc<Mutex<Session>>) -> mlua::Result<Table> {
             {
                 let mut s = s.lock().unwrap();
                 match s.enter(&id).map_err(err)? {
-                    Some(Step::Result { value }) => return lua.to_value(&value),
+                    Some(Step::Result { value }) => {
+                        if let Some(log) = &s.env.flow_log {
+                            log.workflow_step(&id, "replayed");
+                        }
+                        return lua.to_value(&value);
+                    }
                     Some(_) => return Err(err("sequence step kind changed")),
                     None => {}
                 }
                 s.inside_step = true;
+                if let Some(log) = &s.env.flow_log {
+                    log.workflow_step(&id, "started");
+                }
             }
             // Do not hold the session mutex while running tenant code.
             let outcome = f.call::<Value>(());
             let mut s = s.lock().unwrap();
             s.inside_step = false;
-            let value: Json = lua.from_value(outcome?)?;
+            let value: Json = match outcome.and_then(|value| lua.from_value(value)) {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Some(log) = &s.env.flow_log {
+                        log.workflow_step(&id, "failed");
+                    }
+                    return Err(error);
+                }
+            };
             s.save(vec![row(
                 &format!("step/{id}"),
                 &Step::Result {
@@ -282,6 +299,9 @@ fn sequence(lua: &Lua, session: Arc<Mutex<Session>>) -> mlua::Result<Table> {
             )
             .map_err(err)?])
                 .map_err(err)?;
+            if let Some(log) = &s.env.flow_log {
+                log.workflow_step(&id, "completed");
+            }
             lua.to_value(&value)
         })?,
     )?;
@@ -519,6 +539,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
     let target = crate::ContinuationTarget::new(host);
     let enabled = host.queue.is_some();
     let tenant = host.tenant.clone();
+    let flow_log = host.flow_log.clone();
     let make = move || -> mlua::Result<Env> {
         if !enabled {
             return Err(err("sequence needs a tenant-enabled queue"));
@@ -528,6 +549,7 @@ pub(crate) fn api(lua: &Lua, host: &HostContext, budget: Arc<Budget>) -> mlua::R
             db: db.clone().ok_or_else(|| err("sequence needs ig.db"))?,
             tenant: tenant.clone(),
             budget: budget.clone(),
+            flow_log: flow_log.clone(),
         })
     };
     let api = lua.create_table()?;

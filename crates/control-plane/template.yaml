@@ -1,6 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Integraal reference hosting stack
 Parameters:
+  UiOrigin:
+    Type: String
+    Default: http://localhost:5173
+    Description: Origin allowed to call the control API from a browser
   JwtIssuer:
     Type: String
   JwtAudience:
@@ -327,6 +331,16 @@ Resources:
     Properties:
       Name: integraal-control-plane
       ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref UiOrigin
+        AllowHeaders:
+          - authorization
+          - content-type
+        AllowMethods:
+          - GET
+          - OPTIONS
+        MaxAge: 300
   JwtAuthorizer:
     Type: AWS::ApiGatewayV2::Authorizer
     Properties:
@@ -361,6 +375,16 @@ Resources:
     Properties:
       ApiId: !Ref ControlApi
       RouteKey: GET /flows/{trace}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - !Ref AccessScope
+      Target: !Sub integrations/${LambdaIntegration}
+  FlowLogsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ControlApi
+      RouteKey: GET /flows/{trace}/logs
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
       AuthorizationScopes:
