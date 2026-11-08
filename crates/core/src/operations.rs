@@ -337,21 +337,7 @@ async fn invoke(
         _ => {}
     }
     if let Request::FlowInspect { tenant, trace_id } = request {
-        let sink = engine
-            .flow_logs()
-            .cloned()
-            .ok_or_else(|| anyhow!("flow_logs not configured"))?;
-        let engine = engine.clone();
-        return tokio::task::spawn_blocking(move || {
-            let lines = sink
-                .read_flow(&tenant, &trace_id)
-                .map_err(anyhow::Error::msg)?;
-            let state = engine
-                .pending(&tenant, &trace_id)
-                .map_err(anyhow::Error::msg)?;
-            Ok(json!({"invocations": flow_log::summarize(&lines), "state": state}))
-        })
-        .await?;
+        return inspect_flow(engine, &tenant, &trace_id).await;
     }
     let (queue_name, replay) = match request {
         Request::DlqInspect { queue } => (queue, None),
@@ -431,6 +417,27 @@ async fn invoke(
         }
         Ok(json!({"messages": values, "sample_limit": 10}))
     }
+}
+
+/// Inspect a tenant flow using the same implementation as `ops.flow.inspect`.
+/// Callers are responsible for authorizing access to the tenant.
+pub async fn inspect_flow(engine: &Engine, tenant: &str, trace_id: &str) -> Result<Value> {
+    let sink = engine
+        .flow_logs()
+        .cloned()
+        .ok_or_else(|| anyhow!("flow_logs not configured"))?;
+    let engine = engine.clone();
+    let (tenant, trace_id) = (tenant.to_owned(), trace_id.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let lines = sink
+            .read_flow(&tenant, &trace_id)
+            .map_err(anyhow::Error::msg)?;
+        let state = engine
+            .pending(&tenant, &trace_id)
+            .map_err(anyhow::Error::msg)?;
+        Ok(json!({"invocations": flow_log::summarize(&lines), "state": state}))
+    })
+    .await?
 }
 
 #[cfg(test)]

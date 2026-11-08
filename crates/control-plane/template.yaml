@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Integraal tenant-scoped control plane
+Parameters:
+  JwtIssuer:
+    Type: String
+  JwtAudience:
+    Type: String
+  AccessScope:
+    Type: String
+    Description: OAuth access-token scope required for control-plane routes
+  ExecutionRoleArn:
+    Type: String
+    Description: Lambda execution role with access to configured flow logs and durable state
+  CodeBucket:
+    Type: String
+    Description: S3 bucket containing the Lambda zip
+  CodeKey:
+    Type: String
+    Description: S3 key of the zip containing bootstrap and integraal.json
+Resources:
+  ControlFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Handler: bootstrap
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      Role: !Ref ExecutionRoleArn
+      Timeout: 30
+      MemorySize: 512
+  ControlApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: integraal-control-plane
+      ProtocolType: HTTP
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref ControlApi
+      AuthorizerType: JWT
+      Name: tenant-jwt
+      IdentitySource:
+        - '$request.header.Authorization'
+      JwtConfiguration:
+        Issuer: !Ref JwtIssuer
+        Audience:
+          - !Ref JwtAudience
+  LambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ControlApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ControlFunction.Arn
+      PayloadFormatVersion: '2.0'
+  FlowsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ControlApi
+      RouteKey: 'GET /flows'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes: [!Ref AccessScope]
+      Target: !Sub 'integrations/${LambdaIntegration}'
+  FlowRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ControlApi
+      RouteKey: 'GET /flows/{trace}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes: [!Ref AccessScope]
+      Target: !Sub 'integrations/${LambdaIntegration}'
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ControlApi
+      StageName: '$default'
+      AutoDeploy: true
+  GatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ControlFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ControlApi}/$default/GET/flows*'
+Outputs:
+  ApiUrl:
+    Value: !Sub 'https://${ControlApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'

@@ -1,0 +1,16 @@
+[package]
+name = "integraal-control-plane"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+integraal-core.workspace = true
+integraal-loader.workspace = true
+lambda_runtime = "0.13"
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
