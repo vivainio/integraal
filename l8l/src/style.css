@@ -5,3 +5,40 @@
 .routed-label{display:inline-block;margin-left:5px;color:#a3afa4;font-size:9px}
 .workflow-steps{padding-top:16px}.workflow-step{display:flex;gap:10px;position:relative;min-height:42px}.workflow-step:not(:last-child):before{content:'';position:absolute;left:10px;top:20px;bottom:0;width:1px;background:#dfeae0}.workflow-node{position:relative;z-index:1;width:21px;height:21px;display:grid;place-items:center;flex-shrink:0;background:#f2f5f1;border:1px solid #dde7de;border-radius:50%;font-size:9px;color:#849788}.workflow-node.workflow-done{background:#e7f3e8;color:#5c9e70;border-color:#d9ebdc}.workflow-node.workflow-failed{background:#f8ece9;color:#bc7b6d;border-color:#f1dfda}.workflow-step strong,.workflow-step small{display:block}.workflow-step strong{font-size:11px;color:#526158;padding-top:1px}.workflow-step small{font-size:10px;color:#a2afa3;margin-top:4px;text-transform:capitalize}
 .queue-explanation{font-size:10px;color:#9ca99e;line-height:1.5;margin:10px 0}.queued-cards{display:grid;gap:6px}.queued-card{display:flex;align-items:center;gap:9px;border:1px solid #e8eee7;background:#fbfcfa;border-radius:6px;padding:9px}.queued-node{width:21px;height:21px;display:grid;place-items:center;flex-shrink:0;border-radius:50%;background:#edf2ec;color:#879888}.queued-node.workflow-done{background:#e7f3e8;color:#5c9e70}.queued-node.workflow-failed{background:#f8ece9;color:#bc7b6d}.queued-card strong,.queued-card small{display:block}.queued-card strong{font-size:11px;color:#526158}.queued-card small{font-size:10px;color:#a2afa3;margin-top:4px}
+
+/* Deep forest navigation, warm paper, and citrus accents. */
+:root{color:#213a30;background:#f2f4e9}body{background:#f2f4e9}
+.sidebar{background:#183c30;border-right-color:#244c3c;color:#e9f3e8}
+.brand-mark{background:#c4ed84;color:#173d2c}
+.brand small,.workspace small,.sidebar-footer small{color:#a6bfb0}
+.workspace-label,.nav-label{color:#92ae9e}.workspace-label span{color:#749987}
+.workspace-avatar{background:#365d48;color:#d5f1b3}.workspace-chev{color:#a6c6b0}
+.nav-link{color:#c2d3c6}.nav-link:hover{background:#285340;color:#f4faef}
+.nav-link.active{background:#d4f09e;color:#214a31}.nav-active-dot{background:#397a4d}
+.sidebar-card{background:#244b3b;border-color:#3a654e}.sidebar-card-icon{color:#c6ee91}
+.sidebar-card p{color:#b8d0bd}.sidebar-card p strong{color:#eff7e9}.sidebar-card>span:last-child{color:#a2bfaa}
+.sidebar-footer{border-top-color:#39604b}.sidebar-footer .icon-button{color:#b5d1bb}.sidebar-footer .connection-dot{background:#c3eb86}
+.topbar{background:#fdfef8;border-bottom-color:#dee7d7}.breadcrumb{color:#85998a}.breadcrumb strong{color:#345747}.top-status{color:#536f5e}
+.connect-button,.refresh-button{background:#f9fcf4;border-color:#cfddcb;color:#2f5c42}
+.connect-button:hover,.refresh-button:hover{background:#eaf5dc;border-color:#9dc693}
+main{background:radial-gradient(ellipse at 95% 0%,#e5f1d8 0%,transparent 34%)}
+.page-overline,.section-kicker{color:#668770}.tiny-spark,.footer-spark{color:#dd803e}
+.page-intro h1{color:#1d4b37}.page-intro h1 span{color:#dc8443}
+.page-intro p,.panel-heading p{color:#708477}.page-tag{color:#507d5c}.tag-dot{background:#dd914e}
+.flow-panel,.detail{border-color:#dce6d6;box-shadow:0 8px 25px rgba(36,75,50,.06)}
+.panel-heading{border-top:3px solid #a9d976}.detail-head{border-top:3px solid #e8a76e}
+.number-pill{background:#eaf5dc;color:#4b7c4f}.search-box,.date-control{border-color:#dbe6d9;background:#fcfefb}
+.search-box input::placeholder{color:#91a297}.list-caption{background:#f2f8e9;border-color:#e3ecdc;color:#708c70}
+th{color:#809a83;border-bottom-color:#eaf0e7}tbody tr:hover{background:#f5faef}tbody tr.selected{background:#eaf5db}
+tbody tr.selected td:first-child{box-shadow:inset 3px 0 #6aa65d}td{border-bottom-color:#edf2e9}
+.table-flow-icon,.flow-icon{background:#e7f3d9;color:#477e4c}.flow-name strong{color:#31553c}.flow-name code,.time-cell{color:#7e9683}
+.trigger{border-color:#dbe9d6;background:#f6faef;color:#5d7c5e}.trigger span{background:#8ebd72}
+.detail-count{background:#eaf5dc;color:#608b5d}.detail-title h3,.detail-section-heading h3{color:#2c5a3b}
+.info-block{background:#f5faef;border-color:#e4eedf}.trace-full{color:#64836b}.detail-rule{background:#e8efe5}
+.timeline-dot.success,.workflow-node.workflow-done,.queued-node.workflow-done{background:#dff1d1;color:#4f9558}
+.queued-card{border-color:#e2ebdd;background:#f8fcf4}.queued-card strong,.workflow-step strong{color:#3c6546}
+.queued-card small,.workflow-step small{color:#809687}
+.log-entries{border-color:#dfeadc}.log-entry{border-bottom-color:#e9f0e6}
+.log-entry pre{background:#f5faef;border-top-color:#e5ede1;color:#557260}
+.log-time{color:#83998a}.log-level{color:#438653}.log-warning{color:#b4663e}
+.app-footer{color:#92a294}.primary-button{background:#2b754c}.primary-button:hover{background:#205f3d}

@@ -55,6 +55,25 @@ function FlowDetail({ flow, inspection, loading, error, logs, logsLoading, logsE
   if (!flow) return <aside class="detail"><div class="detail-head"><div><span class="section-kicker">INSPECT</span><h2>Flow details</h2></div></div><div class="detail-empty"><span class="empty-icon"><Icon name="flow" size={23}/></span><h3>Select a flow</h3><p>Choose a flow from the list to see its invocations and pending state.</p></div></aside>
   const queuedInvocations = inspection?.invocations?.filter(inv => inv.trigger === 'queue') ?? []
   const stateEntries = Object.entries(inspection?.state ?? {}).filter(([key]) => key !== 'covers')
+  const scriptBySpan = new Map<string, string>()
+  for (const entry of logs) {
+    if (entry.type === 'header' && typeof entry.span_id === 'string') scriptBySpan.set(entry.span_id, scriptLabel(entry.script))
+  }
+  const describeLog = (entry: FlowLog) => {
+    const script = typeof entry.span_id === 'string' ? scriptBySpan.get(entry.span_id) : undefined
+    if (entry.type === 'header') return `Started ${scriptLabel(entry.script)}`
+    if (entry.type === 'end') {
+      const outcome = String(entry.outcome ?? 'unknown')
+      const result = outcome === 'ok' ? 'Completed' : outcome === 'script_error' ? 'Failed' : `Finished (${outcome})`
+      const duration = typeof entry.duration_ms === 'number' ? ` · ${entry.duration_ms} ms` : ''
+      return `${result} ${script ?? 'invocation'}${duration}`
+    }
+    if (entry.msg) return entry.msg
+    if (entry.type === 'route') return `${String(entry.router)} → ${entry.script}`
+    if (entry.type === 'workflow_step') return `${String(entry.name)} · ${String(entry.status)}`
+    if (entry.type === 'queue_dispatch') return `${Array.isArray(entry.targets) ? entry.targets.length : 0} queued message(s) sent`
+    return entry.type
+  }
   const workflowSteps = new Map<string, string>()
   for (const entry of logs) {
     if (entry.type !== 'workflow_step' || typeof entry.name !== 'string' || typeof entry.status !== 'string') continue
@@ -70,7 +89,7 @@ function FlowDetail({ flow, inspection, loading, error, logs, logsLoading, logsE
       {queuedInvocations.length > 0 && <><div class="detail-rule"/><div class="detail-section-heading"><div><span class="section-kicker">QUEUE</span><h3>Queued invocations</h3></div><span class="number-pill">{queuedInvocations.length}</span></div><p class="queue-explanation">Queue deliveries recorded in this flow. Individual parent links are not recorded.</p><div class="queued-cards">{queuedInvocations.map((inv, index) => <div class="queued-card" key={`${inv.span_id}-${index}`}><span class={`queued-node ${inv.outcome === 'ok' ? 'workflow-done' : inv.outcome ? 'workflow-failed' : ''}`}><Icon name={inv.outcome === 'ok' ? 'check' : inv.outcome ? 'close' : 'clock'} size={12}/></span><div><strong>{scriptLabel(inv.script)}</strong><small>{shortId(inv.span_id)} · {inv.outcome ?? 'No outcome'}</small></div></div>)}</div></>}
       {workflowSteps.size > 0 && <><div class="detail-rule"/><div class="detail-section-heading"><div><span class="section-kicker">WORKFLOW</span><h3>Step execution</h3></div><span class="number-pill">{workflowSteps.size}</span></div><div class="workflow-steps">{Array.from(workflowSteps, ([name, status], index) => <div class="workflow-step" key={name}><span class={`workflow-node ${status === 'completed' || status === 'replayed' ? 'workflow-done' : status === 'failed' ? 'workflow-failed' : ''}`}>{status === 'completed' || status === 'replayed' ? <Icon name="check" size={12}/> : status === 'failed' ? <Icon name="close" size={12}/> : index + 1}</span><div><strong>{name}</strong><small>{status === 'replayed' ? 'Previously completed' : status}</small></div></div>)}</div></>}
       <div class="detail-rule"/><div class="detail-section-heading"><div><span class="section-kicker">OBSERVABILITY</span><h3>Flow log</h3></div><span class="number-pill">{logs.length}</span></div>
-      {logsLoading ? <p class="muted-message">Loading log entries…</p> : logsError ? <p class="error-message" role="alert">{logsError}</p> : logs.length ? <div class="log-entries">{logs.map((entry, index) => <details class="log-entry" key={index}><summary><span class="log-time">{dateTime(entry.t ?? entry.start_ms)}</span><span class={`log-level ${entry.level === 'warn' || entry.level === 'error' ? 'log-warning' : ''}`}>{entry.level || entry.type}</span><span class="log-message">{entry.msg || (entry.type === 'header' ? `Started ${entry.script || 'invocation'}` : entry.type === 'end' ? `Finished: ${String(entry.outcome ?? 'unknown')}` : entry.type === 'route' ? `${String(entry.router)} → ${entry.script}` : entry.type === 'workflow_step' ? `${String(entry.name)} · ${String(entry.status)}` : entry.type === 'queue_dispatch' ? `${Array.isArray(entry.targets) ? entry.targets.length : 0} queued message(s) sent` : entry.type)}</span></summary><pre>{JSON.stringify(entry, null, 2)}</pre></details>)}</div> : <p class="muted-message">No log entries found.</p>}
+      {logsLoading ? <p class="muted-message">Loading log entries…</p> : logsError ? <p class="error-message" role="alert">{logsError}</p> : logs.length ? <div class="log-entries">{logs.map((entry, index) => <details class="log-entry" key={index}><summary><span class="log-time">{dateTime(entry.t ?? entry.start_ms)}</span><span class={`log-level ${entry.level === 'warn' || entry.level === 'error' ? 'log-warning' : ''}`}>{entry.level || entry.type}</span><span class="log-message">{describeLog(entry)}</span></summary><pre>{JSON.stringify(entry, null, 2)}</pre></details>)}</div> : <p class="muted-message">No log entries found.</p>}
       <div class="detail-rule"/><div class="detail-section-heading"><div><span class="section-kicker">DURABLE STATE</span><h3>Pending items</h3></div></div>
       {inspection ? <div class="pending-list">{stateEntries.length ? stateEntries.map(([key, value]) => <div class="pending-row" key={key}><span>{key}</span><strong>{Array.isArray(value) ? value.length : value == null ? '—' : typeof value === 'object' ? JSON.stringify(value) : String(value)}</strong></div>) : <p class="muted-message">No pending state available.</p>}</div> : <p class="muted-message">{loading ? 'Loading…' : 'Select a flow to inspect its state.'}</p>}
     </div></aside>
