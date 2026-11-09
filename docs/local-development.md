@@ -10,23 +10,25 @@ dev/local.sh                   # creates S3 buckets, uploads examples/, starts t
 ```
 
 `dev/local.sh` points the SDK at roto with `AWS_ENDPOINT_URL=http://localhost:5070` and uploads
-`examples/acme/hello/latest.luau` and `examples/acme/config.json`. Then:
+`examples/acme/hello/latest.luau` and the local tenant config from `dev/acme-local.json`.
+It creates seed flows at startup, including a `hello` run. Then:
 
 ```bash
 curl -X POST localhost:8080/v1/acme/hello \
   -H 'content-type: application/json' -d '{"x":1}'
-# {"count":1,"event":{"x":1},"trigger":"http"}
+# {"count":2,"event":{"x":1},"trigger":"http"}  # count varies with earlier runs
 ```
 
 Running it again increments `count`, which is stored in the `Out` store through `ig.store.Out`.
 
 ## Flow history in l8l
 
-The local setup enables flow logging for `acme` and exposes read-only flow queries on
-`127.0.0.1:9091`. Start [l8l](../l8l/README.md) with `npm run dev` in its directory; its
-loopback-only development adapter connects to the local listener automatically. Invoke the
-launcher creates real flows, including intentional failures, routed flows and a durable order workflow; refresh l8l to inspect
-them. Run `dev/seed-flows.sh` again to add another set.
+The local setup enables flow logging for `acme`, schedules a local minute tick for durable handoffs and timers, and exposes read-only flow queries on
+`127.0.0.1:9091`. Start [l8l](l8l.md) with `npm run dev` in its directory; its
+loopback-only development adapter connects to the local listener automatically. The launcher
+creates real flows, including intentional failures, routed flows, queued tasks and a durable
+order workflow; refresh l8l to inspect them. Run `dev/seed-flows.sh` again to add another set. The local FIFO queue is compatible
+with roto but does not support per-message delays; it is not a complete production queue setup.
 
 ## Tests
 

@@ -8,6 +8,10 @@ aws s3 cp dev/flow-scenarios.luau s3://scripts/acme/order-import/latest.luau >/d
 aws s3 cp dev/flow-scenarios.luau s3://scripts/acme/customer-sync/latest.luau >/dev/null
 aws s3 cp dev/order-pipeline.luau s3://scripts/acme/order-pipeline/v1.luau >/dev/null
 aws s3 cp dev/order-pipeline.luau s3://scripts/acme/order-pipeline/latest.luau >/dev/null
+aws s3 cp dev/batch-dispatch.luau s3://scripts/acme/batch-dispatch/latest.luau >/dev/null
+for worker in prepare-item reserve-item notify-item; do
+  aws s3 cp dev/batch-worker.luau "s3://scripts/acme/$worker/latest.luau" >/dev/null
+done
 aws s3 cp dev/flow-feed.xml s3://data-in/tenants/acme/incoming/feeds/catalog.xml >/dev/null
 
 run_flow() {
@@ -30,8 +34,9 @@ run_flow customer-sync '{"action":"missing-customer"}' error
 run_flow '' '{"key":"incoming/feeds/catalog.xml"}' ok
 run_flow '' '{"message":"routed greeting"}' ok
 workflow_id="local-order-$(date +%s)-$RANDOM"
+run_flow batch-dispatch "{\"batch_id\":\"$workflow_id\"}" ok
 run_flow order-pipeline "{\"id\":\"$workflow_id\"}" ok
 # A minute tick dispatches durable handoffs; the normal worker consumes the resulting message.
-aws sqs send-message --queue-url http://localhost:5070/123456789012/integraal-jobs.fifo --message-group-id local-tick \
+aws sqs send-message --queue-url http://localhost:5070/123456789012/integraal-jobs.fifo --message-group-id local-tick --message-deduplication-id "seed-$workflow_id" \
   --message-body '{"type":"system.tick","every":"minute","at":"local-seed"}' >/dev/null
-echo 'Created local flows, including two failures, two routed calls, and a durable order workflow.' 
+echo 'Created local flows, including two failures, two routed calls, queued tasks, and a durable order workflow.'

@@ -56,6 +56,7 @@ nav = [
     { "Observability" = "observability.md" },
     { "Operator API" = "ops.md" },
     { "Control-plane HTTP API" = "control-plane.md" },
+    { "l8l reference app" = "l8l.md" },
     { "Tenant web apps" = "tenant-web.md" },
     { "Local development" = "local-development.md" },
     { "Testing Luau scripts" = "testing.md" },

@@ -111,6 +111,11 @@ impl FlowLog {
         );
     }
 
+    /// Record successfully sent queue targets without including event bodies.
+    pub fn queue_dispatch(&self, targets: Vec<Value>) {
+        self.push(json!({ "t": now_ms(), "type": "queue_dispatch", "targets": targets }));
+    }
+
     /// The structured failure of the invocation (kind, message, frames); it goes in the footer.
     /// The first one recorded wins: later ones are consequences.
     pub fn failure(&self, failure: Value) {

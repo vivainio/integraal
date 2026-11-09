@@ -5,7 +5,9 @@ It uses the same flow inspection as `ops.flow.inspect` and does not run tenant s
 is independent of the queue workers, though it still depends on their shared flow-log and
 state storage.
 
-The [typed reference stack](../infra/reference/README.md) generates the committed CloudFormation template.
+The [l8l reference app](l8l.md) uses this API to browse flows and their logs.
+
+The [typed reference stack](https://github.com/vivainio/integraal/blob/main/infra/reference/README.md) generates the committed CloudFormation template.
 
 The Lambda accepts API Gateway **HTTP API payload format 2.0** events. The accompanying
 [`template.yaml`](../crates/control-plane/template.yaml) configures a JWT authorizer and an
@@ -35,7 +37,7 @@ and fleet-wide operations are not implemented by this first API.
 
 The reference stack injects the shared-resource configuration via `INTEGRAAL_CONTROL_CONFIG`.
 Outside that stack, omit this variable and bundle `integraal.json` with `bootstrap` as usual.
-See the [reference stack](../infra/reference/README.md) for build and deployment inputs.
+See the [reference stack](https://github.com/vivainio/integraal/blob/main/infra/reference/README.md) for build and deployment inputs.
 For example, once deployed:
 
 ```sh

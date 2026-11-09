@@ -32,7 +32,11 @@ echo "try: curl -XPOST localhost:8080/v1/acme/hello -d '{\"x\":1}' -H 'content-t
 # terminate the launcher rather than leaving a background server behind.
 cargo run -p integraal-server -- --config dev/local.json &
 server_pid=$!
-cleanup() { kill "$server_pid" 2>/dev/null || true; }
+tick_pid=
+cleanup() {
+  if [[ -n "$tick_pid" ]]; then kill "$tick_pid" 2>/dev/null || true; fi
+  kill "$server_pid" 2>/dev/null || true
+}
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -51,4 +55,15 @@ if ! curl -fsS --max-time 1 http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
   exit 1
 fi
 dev/seed-flows.sh
+# The seed sends an immediate tick; continue to sweep timers and durable handoffs each minute.
+(
+  while sleep 60; do
+    stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    aws sqs send-message --queue-url http://localhost:5070/123456789012/integraal-jobs.fifo \
+      --message-group-id local-tick --message-deduplication-id "minute-$stamp" \
+      --message-body "{\"type\":\"system.tick\",\"every\":\"minute\",\"at\":\"$stamp\"}" >/dev/null || \
+      echo 'Could not send the local scheduler tick.' >&2
+  done
+) &
+tick_pid=$!
 wait "$server_pid"

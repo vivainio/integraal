@@ -87,6 +87,11 @@ integraal-server flow show acme 4bf92f3577b34da6a3ce929d0e0e4736
 integraal-server flow list acme 2026-10-25
 ```
 
+`ig.queue.send` records a `queue_dispatch` entry after each successful batch, including target
+script, version and delay but no event bodies. Flow logs group queued invocations by trace; they
+do not currently record a direct parent invocation link. A partial send may leave earlier entries
+even if a later batch fails; a partially successful batch does not produce a dispatch entry.
+
 Durable `seq:step` transitions are recorded as `workflow_step` entries with the step name and
 status (`started`, `completed`, `failed`, or `replayed`). Names are script-supplied and can include
 business identifiers; inputs and results are not recorded. These entries describe individual

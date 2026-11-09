@@ -2352,6 +2352,39 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn flow_log_records_queue_targets_without_event_bodies() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt;
+        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer.tracer("test"))),
+        );
+        let logs = Arc::new(MemBackend::default());
+        let e = engine_cfg(
+            r#"return { handle = function() return ig.queue.send({script="worker", event={secret="private"}}) end }"#,
+            Limits::default(),
+            r#"{"queue":true,"flow_logs":true}"#,
+        )
+        .with_queue(Arc::new(MemQueue::default()))
+        .with_flow_logs(logs, "logs/");
+        e.invoke(inv(Trigger::Invoke, json!({}))).await.unwrap();
+        let sink = e.flow_logs().unwrap();
+        let entries = sink
+            .list_day("acme", &crate::flow_log::utc_day(now_ms()))
+            .unwrap();
+        let lines = sink
+            .read_flow("acme", entries[0]["trace_id"].as_str().unwrap())
+            .unwrap();
+        let dispatch = lines
+            .iter()
+            .find(|line| line["type"] == "queue_dispatch")
+            .unwrap();
+        assert_eq!(dispatch["targets"][0]["script"], "worker");
+        assert!(!dispatch.to_string().contains("private"));
+    }
+
+    #[tokio::test]
     async fn decimal_global_is_exact() {
         let e = engine(
             "return { handle = function() return tostring(D\"0.1\" + D\"0.2\") end }",

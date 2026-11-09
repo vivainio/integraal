@@ -81,6 +81,7 @@ pub(crate) fn api(
     let queue = lua.create_table()?;
     let tenant = host.tenant.clone();
     let target = crate::ContinuationTarget::new(host);
+    let flow_log = host.flow_log.clone();
     let sent = Arc::new(AtomicUsize::new(0));
     queue.set(
         "send",
@@ -161,6 +162,17 @@ pub(crate) fn api(
                 budget.take_data().map_err(mlua::Error::runtime)?;
                 backend.send(chunk).map_err(mlua::Error::runtime)?;
                 sent.fetch_add(chunk.len(), Ordering::Relaxed);
+                if let Some(log) = &flow_log {
+                    let targets = chunk.iter().filter_map(|message| {
+                        let envelope: serde_json::Value = serde_json::from_str(&message.body).ok()?;
+                        Some(serde_json::json!({
+                            "script": envelope.get("script"),
+                            "version": envelope.get("version"),
+                            "delay_s": message.delay_secs,
+                        }))
+                    }).collect();
+                    log.queue_dispatch(targets);
+                }
             }
             Ok(out.len())
         })?,
