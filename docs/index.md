@@ -4,6 +4,10 @@ integraal runs **tenant-specific [Luau](https://luau.org) scripts** on AWS Lambd
 Scripts are stored in S3, downloaded on demand, cached, and executed in a sandboxed VM that
 exposes a **versioned native API** (S3 data access, allowlisted HTTP, streaming XML, and more).
 
+![l8l showing flow history and the steps of a durable order workflow](assets/l8l-flow.png)
+
+*[l8l](l8l.md), the reference app for running scripts and inspecting flows.*
+
 ```lua
 --!strict
 --!runtime 1
