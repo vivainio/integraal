@@ -164,6 +164,10 @@
       "properties": {
         "port": {
           "$ref": "#/$defs/port"
+        },
+        "user_triggers": {
+          "type": "boolean",
+          "default": false
         }
       }
     },

@@ -13,7 +13,12 @@ use serde_json::{json, Value};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let cfg = GlobalConfig::load()?;
+    let cfg = match std::env::var("INTEGRAAL_RUNTIME_CONFIG") {
+        Ok(json) => GlobalConfig::parse(&json),
+        Err(std::env::VarError::NotPresent) => GlobalConfig::load(),
+        Err(error) => return Err(error.into()),
+    }
+    .map_err(std::io::Error::other)?;
     let telemetry = Arc::new(integraal_core::telemetry::init(
         "integraal-lambda",
         cfg.log_filter(),
@@ -46,6 +51,7 @@ async fn main() -> Result<(), Error> {
 enum Input {
     Tick(Tick),
     Invoke(Invocation),
+    Describe(Invocation),
 }
 
 fn input(payload: Value) -> Result<Input, Error> {
@@ -55,9 +61,23 @@ fn input(payload: Value) -> Result<Input, Error> {
             _ => unreachable!("system.tick is classified as a tick"),
         };
     }
+    let kind = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     let mut inv: Invocation = serde_json::from_value(payload)?;
-    inv.trigger = Trigger::Invoke;
-    Ok(Input::Invoke(inv))
+    match kind.as_str() {
+        "user.describe" => Ok(Input::Describe(inv)),
+        "user.run" => {
+            inv.trigger = Trigger::User;
+            Ok(Input::Invoke(inv))
+        }
+        _ => {
+            inv.trigger = Trigger::Invoke;
+            Ok(Input::Invoke(inv))
+        }
+    }
 }
 
 async fn dispatch(
@@ -71,6 +91,21 @@ async fn dispatch(
             // Return runtime errors so EventBridge can retry failed fan-out.
             let report = tokio::time::timeout(budget, engine.tick(&tick, spread)).await??;
             Ok(json!({ "ok": true, "result": { "sent": report.sent } }))
+        }
+        Input::Describe(inv) => {
+            let result = match inv.script.as_deref() {
+                Some(script) => tokio::time::timeout(
+                    budget,
+                    engine.describe_user_trigger(&inv.tenant, script, inv.version.as_deref()),
+                )
+                .await
+                .map_err(|_| std::io::Error::other("metadata timed out"))?,
+                None => Err(integraal_core::Error::Script("script is required".into())),
+            };
+            Ok(match result {
+                Ok(result) => json!({"ok":true,"result":result}),
+                Err(e) => json!({"ok":false,"error":e.to_string()}),
+            })
         }
         Input::Invoke(inv) => Ok(match engine.invoke_within(inv, Some(budget)).await {
             Ok(result) => json!({ "ok": true, "result": result }),
@@ -99,6 +134,29 @@ mod tests {
         ] {
             assert!(input(payload).is_err());
         }
+    }
+
+    #[test]
+    fn user_operations_are_explicit_and_direct_invokes_do_not_trust_trigger() {
+        let describe = input(json!({"type":"user.describe","tenant":"acme","script":"s"})).unwrap();
+        assert!(matches!(describe, Input::Describe(_)));
+        let run =
+            input(json!({"type":"user.run","tenant":"acme","script":"s","event":{}})).unwrap();
+        assert!(matches!(
+            run,
+            Input::Invoke(Invocation {
+                trigger: Trigger::User,
+                ..
+            })
+        ));
+        let normal = input(json!({"tenant":"acme","script":"s","trigger":"user"})).unwrap();
+        assert!(matches!(
+            normal,
+            Input::Invoke(Invocation {
+                trigger: Trigger::Invoke,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -31,7 +31,8 @@
     "bucket": "flow-logs"
   },
   "local_api": {
-    "port": 9091
+    "port": 9091,
+    "user_triggers": true
   },
   "queue": {
     "url": "http://localhost:5070/123456789012/integraal-jobs.fifo"

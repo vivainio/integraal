@@ -1,6 +1,7 @@
 //! Luau execution engine: loads a tenant script, sandboxes it, and dispatches
 //! an invocation to the handler matching the trigger.
 
+pub mod catalog;
 mod config;
 pub mod debug;
 mod dynamo_db;
@@ -19,6 +20,7 @@ pub mod schedule;
 mod sqs_queue;
 pub mod tasks;
 pub mod telemetry;
+pub mod user_trigger;
 mod web;
 
 pub use engine::{Placement, TenantConfig, TenantLimits, WebApp};
@@ -48,6 +50,8 @@ pub enum Trigger {
     Route,
     /// Internal: the tenant's placement script choosing a worker class (intake Lambda).
     Place,
+    /// An explicitly user-triggerable script.
+    User,
 }
 
 impl Trigger {
@@ -60,6 +64,7 @@ impl Trigger {
             Trigger::Queue => ["on_queue", "handle"],
             Trigger::Route => ["on_route", "route"],
             Trigger::Place => ["on_place", "place"],
+            Trigger::User => ["on_user_trigger", "on_user_trigger"],
         }
     }
 }

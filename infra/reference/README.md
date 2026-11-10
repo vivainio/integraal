@@ -16,7 +16,7 @@ Provide a container image containing `/bin/sh` and `integraal-server` at
 `/tmp/integraal.json` and starts the server. The control-plane zip contains its `bootstrap`.
 The stack supplies its non-secret config in `INTEGRAAL_CONTROL_CONFIG`; absent that variable,
 the Lambda still reads `integraal.json` as before. Do not put credentials in this config.
-The reference does not configure the credential vault, public webhooks, or the runtime Lambda.
+The stack also creates a separate runtime Lambda for user-trigger metadata and execution. It does not configure the credential vault or public webhooks.
 
 The source is [`stack.py`](stack.py) and [`runtime.py`](runtime.py), written with cfn-typed.
 Its committed output is [`crates/control-plane/template.yaml`](../../crates/control-plane/template.yaml),
@@ -38,7 +38,7 @@ uv run python -c 'import cfn_typed as cfn; from stack import build; print(cfn.to
 uv run pytest test_stack.py
 ```
 
-Build the worker image and the arm64 control-plane Lambda zip, upload them, then deploy using
+Build the worker image and separate arm64 control-plane and runtime Lambda zips, upload them, then deploy using
 your own values. The Lambda artifact bucket is separate from the buckets this stack creates.
 
 ```sh
@@ -46,9 +46,9 @@ aws cloudformation deploy \
   --template-file ../../crates/control-plane/template.yaml \
   --stack-name integraal-reference --capabilities CAPABILITY_IAM \
   --parameter-overrides \
-    CodeBucket=ARTIFACT_BUCKET CodeKey=CONTROL_PLANE_ZIP_KEY \
+    CodeBucket=ARTIFACT_BUCKET CodeKey=CONTROL_PLANE_ZIP_KEY RuntimeCodeKey=RUNTIME_ZIP_KEY \
     WorkerImage=WORKER_IMAGE_URI VpcId=VPC_ID PublicSubnets=SUBNET_ID_1,SUBNET_ID_2 \
-    JwtIssuer=ISSUER_URL JwtAudience=AUDIENCE AccessScope=ACCESS_TOKEN_SCOPE \
+    JwtIssuer=ISSUER_URL JwtAudience=AUDIENCE AccessScope=ACCESS_TOKEN_SCOPE TriggerScope=TRIGGER_SCOPE \
     UiOrigin=https://YOUR_UI_ORIGIN
 ```
 
@@ -60,7 +60,7 @@ to the scripts bucket, including `tenants.json` for scheduled tenant events. Ena
 and any required queue or store grants in each tenant config. See
 [deployment](../../docs/deployment.md) and [schedules](../../docs/schedules.md).
 
-The control-plane Lambda's role reads scripts, data, flow logs and state; the separate
+The control-plane Lambda's role reads scripts, data, flow logs and state and can invoke the runtime Lambda; the separate
 worker role can process queue messages and read and write the data and state stores. Restrict
 direct control-plane invocation to trusted administrators and the API Gateway integration,
 since the Lambda trusts API Gateway's JWT claims. See the

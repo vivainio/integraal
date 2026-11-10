@@ -22,7 +22,16 @@ fn tenant(event: &Value) -> Option<&str> {
     Some(tenant)
 }
 
-async fn dispatch(engine: &Engine, event: &Value) -> Value {
+#[derive(Clone)]
+struct AppState {
+    engine: Engine,
+    catalog: integraal_core::catalog::ScriptCatalog,
+    runtime: aws_sdk_lambda::Client,
+    runtime_function: Option<String>,
+}
+
+async fn dispatch(state: &AppState, event: &Value) -> Value {
+    let engine = &state.engine;
     let Some(tenant) = tenant(event) else {
         return response(401, json!({"error":"unauthorized"}));
     };
@@ -31,6 +40,78 @@ async fn dispatch(engine: &Engine, event: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("");
     let path = event.get("rawPath").and_then(Value::as_str).unwrap_or("");
+    if path == "/scripts" && method == "GET" {
+        return match state.catalog.list(tenant).await {
+            Ok(scripts) => response(200, json!({"scripts": scripts})),
+            Err(error) => {
+                tracing::error!(%error, "script listing failed");
+                response(500, json!({"error":"could not list scripts"}))
+            }
+        };
+    }
+    if let Some(script) = path
+        .strip_prefix("/scripts/")
+        .and_then(|p| p.strip_suffix("/trigger"))
+    {
+        if method != "GET" && method != "POST" {
+            return response(405, json!({"error":"method not allowed"}));
+        }
+        let version = event
+            .pointer("/queryStringParameters/version")
+            .and_then(Value::as_str);
+        if integraal_loader::ScriptKey::new(tenant, script, version).is_err() {
+            return response(400, json!({"error":"invalid script or version"}));
+        }
+        let Some(function) = &state.runtime_function else {
+            return response(503, json!({"error":"runtime function not configured"}));
+        };
+        let args = if method == "POST" {
+            if event
+                .get("isBase64Encoded")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return response(400, json!({"error":"invalid request body"}));
+            }
+            let body = event.get("body").and_then(Value::as_str).unwrap_or("");
+            if body.len() > 65536 {
+                return response(413, json!({"error":"request body too large"}));
+            }
+            match serde_json::from_str::<Value>(body) {
+                Ok(v) if v.is_object() => v,
+                _ => return response(400, json!({"error":"expected a JSON object"})),
+            }
+        } else {
+            json!({})
+        };
+        let payload = json!({"type": if method == "GET" { "user.describe" } else { "user.run" }, "tenant": tenant, "script": script, "version": version, "event": args});
+        let result = state
+            .runtime
+            .invoke()
+            .function_name(function)
+            .payload(aws_sdk_lambda::primitives::Blob::new(payload.to_string()))
+            .send()
+            .await;
+        return match result {
+            Ok(out) if out.function_error().is_none() => match out
+                .payload()
+                .and_then(|p| serde_json::from_slice::<Value>(p.as_ref()).ok())
+            {
+                Some(value) if value["ok"] == true => {
+                    response(200, json!({"result": value["result"]}))
+                }
+                Some(value) if value["ok"] == false => {
+                    response(422, json!({"error": value["error"]}))
+                }
+                _ => response(502, json!({"error":"invalid runtime response"})),
+            },
+            Ok(_) => response(502, json!({"error":"runtime invocation failed"})),
+            Err(error) => {
+                tracing::error!(%error, "runtime invocation failed");
+                response(502, json!({"error":"could not invoke runtime"}))
+            }
+        };
+    }
     if method != "GET" {
         return response(405, json!({"error":"method not allowed"}));
     }
@@ -102,11 +183,21 @@ async fn main() -> Result<(), Error> {
     let telemetry =
         integraal_core::telemetry::init("integraal-control-plane", config.log_filter())?;
     let engine = config.engine().await.map_err(std::io::Error::other)?;
+    let catalog = integraal_core::catalog::ScriptCatalog::from_config(&config).await;
+    let runtime = aws_sdk_lambda::Client::new(&aws_config::load_from_env().await);
+    let state = AppState {
+        engine,
+        catalog,
+        runtime,
+        runtime_function: std::env::var("INTEGRAAL_RUNTIME_FUNCTION")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    };
     lambda_runtime::run(service_fn(|event: LambdaEvent<Value>| {
-        let engine = engine.clone();
+        let state = state.clone();
         let telemetry = &telemetry;
         async move {
-            let result = dispatch(&engine, &event.payload).await;
+            let result = dispatch(&state, &event.payload).await;
             telemetry.flush();
             Ok::<_, Error>(result)
         }

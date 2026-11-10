@@ -1,7 +1,7 @@
 # Control-plane HTTP API
 
-`integraal-control-plane` is a separate Rust Lambda for tenant-scoped operational reads.
-It uses the same flow inspection as `ops.flow.inspect` and does not run tenant scripts. It
+`integraal-control-plane` is a separate Rust Lambda for tenant-scoped flow inspection and interactive script triggers.
+It uses the same flow inspection as `ops.flow.inspect` and delegates tenant script execution to a separate runtime Lambda. It
 is independent of the queue workers, though it still depends on their shared flow-log and
 state storage.
 
@@ -25,6 +25,9 @@ principals direct invoke access. Check identity policies and other resource poli
 
 | Request | Response |
 | --- | --- |
+| `GET /scripts` | `{ "scripts": [...] }`, tenant script directories |
+| `GET /scripts/{script}/trigger?version=v1` | `{ "result": {...} }`, user-trigger metadata |
+| `POST /scripts/{script}/trigger?version=v1` | `{ "result": ... }`, invoke with a JSON arguments object |
 | `GET /flows?day=2026-11-08` | `{ "flows": [...] }`, flows started on the UTC day |
 | `GET /flows/{trace_id}` | invocation summaries and pending state, as in `ops.flow.inspect` |
 | `GET /flows/{trace_id}/logs` | `{ "lines": [...] }`, merged flow-log entries |
@@ -32,11 +35,14 @@ principals direct invoke access. Check identity policies and other resource poli
 Flow listing is bounded by the existing flow-log reader (up to 1,000 entries); it has no
 pagination. Flow logs must be enabled for the tenant and configured in `integraal.json`; flow
 inspection also needs the durable-state backend. The role needs read access to the configured
-script/config, flow-log and state resources. Deployment, invocation, credentials, queue control,
-and fleet-wide operations are not implemented by this first API.
+script/config, flow-log and state resources. Deployment, credentials, queue control, and fleet-wide operations are not implemented by this API.
+See [User triggers](user-triggers.md) for the handler contract and execution permissions.
 
-The reference stack injects the shared-resource configuration via `INTEGRAAL_CONTROL_CONFIG`.
-Outside that stack, omit this variable and bundle `integraal.json` with `bootstrap` as usual.
+The control-plane Lambda uses `INTEGRAAL_RUNTIME_FUNCTION` for the runtime Lambda name or ARN;
+its IAM role needs `lambda:InvokeFunction` on that function. The reference stack configures this
+and injects shared-resource configuration via `INTEGRAAL_CONTROL_CONFIG`.
+Outside that stack, configure the runtime function explicitly. You can omit
+`INTEGRAAL_CONTROL_CONFIG` and bundle `integraal.json` with `bootstrap` as usual.
 See the [reference stack](https://github.com/vivainio/integraal/blob/main/infra/reference/README.md) for build and deployment inputs.
 For example, once deployed:
 

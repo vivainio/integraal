@@ -15,11 +15,25 @@ end
 declare extern type Context with
     tenant: string
     script: string
-    trigger: "invoke" | "http" | "queue" | "route"
+    trigger: "invoke" | "http" | "queue" | "route" | "user"
     runtime: number
     -- Delivery number of a queue message (1 = first); always 1 for other triggers.
     attempt: number
 end
+
+-- Declarative metadata for handlers exposed to an interactive user.
+export type UserTriggerArgument = {
+    name: string,
+    label: string,
+    type: "string" | "number" | "boolean",
+    required: boolean?,
+    default: (string | number | boolean)?,
+}
+export type UserTrigger = {
+    title: string,
+    description: string?,
+    arguments: { UserTriggerArgument },
+}
 
 -- Optional route guards. Exact keys and directory prefixes are tenant-relative per store.
 export type StoreCapabilities = {

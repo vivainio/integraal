@@ -264,6 +264,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-lambda"
+version = "1.154.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d345fd1e9ada7e66921d617e17c35246e883eb1d8a0e666438d9a925cf1f41"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.155.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1993,6 +2019,8 @@ dependencies = [
 name = "integraal-control-plane"
 version = "0.1.0"
 dependencies = [
+ "aws-config",
+ "aws-sdk-lambda",
  "integraal-core",
  "integraal-loader",
  "lambda_runtime",

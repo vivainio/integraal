@@ -8,6 +8,7 @@ aws s3 cp dev/flow-scenarios.luau s3://scripts/acme/order-import/latest.luau >/d
 aws s3 cp dev/flow-scenarios.luau s3://scripts/acme/customer-sync/latest.luau >/dev/null
 aws s3 cp dev/order-pipeline.luau s3://scripts/acme/order-pipeline/v1.luau >/dev/null
 aws s3 cp dev/order-pipeline.luau s3://scripts/acme/order-pipeline/latest.luau >/dev/null
+aws s3 cp dev/user-greeting.luau s3://scripts/acme/user-greeting/latest.luau >/dev/null
 aws s3 cp dev/batch-dispatch.luau s3://scripts/acme/batch-dispatch/latest.luau >/dev/null
 for worker in prepare-item reserve-item notify-item; do
   aws s3 cp dev/batch-worker.luau "s3://scripts/acme/$worker/latest.luau" >/dev/null

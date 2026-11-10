@@ -430,12 +430,15 @@ pub struct AdminConfig {
     pub token_env: String,
 }
 
-/// Read-only flow log queries on `127.0.0.1:<port>`; no token, because only processes on the same
-/// host can connect. Needs `flow_logs`.
+/// Loopback flow queries; user-trigger execution is separately opt-in. No token is used.
+/// Any process on the host can access enabled operations. Needs `flow_logs`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalApiConfig {
     pub port: u16,
+    /// Explicitly enable local script listing and user-trigger execution.
+    #[serde(default)]
+    pub user_triggers: bool,
 }
 
 /// Master keys are secrets, so the file only names the environment variables that hold them

@@ -547,6 +547,21 @@ impl Engine {
         self.db.as_ref().map(|(backend, _)| backend.clone())
     }
 
+    /// Read user-trigger metadata in a restricted VM without tenant native capabilities.
+    pub async fn describe_user_trigger(
+        &self,
+        tenant: &str,
+        script: &str,
+        version: Option<&str>,
+    ) -> Result<serde_json::Value, Error> {
+        let key = ScriptKey::new(tenant, script, version)?;
+        let source = self.loader.load(&key).await?.source.clone();
+        let meta = tokio::task::spawn_blocking(move || crate::user_trigger::describe(&source))
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))??;
+        serde_json::to_value(meta).map_err(|e| Error::Internal(e.to_string()))
+    }
+
     /// Like `invoke`, additionally capping the timeout (e.g. to the time a Lambda has left).
     pub async fn invoke_within(
         &self,
@@ -1138,6 +1153,11 @@ fn call_in_vm(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, E
 }
 
 fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Value, Error> {
+    // Reject non-opted-in scripts and malformed arguments before evaluating module code
+    // with the tenant's normal native capabilities. Use this exact loaded source version.
+    if call.trigger == Trigger::User {
+        crate::user_trigger::describe(source)?.arguments(call.event.clone())?;
+    }
     let lua = &vm.lua;
     *vm.script.lock().unwrap() = call.script.clone();
     *vm.script_version.lock().unwrap() = call.version.clone();
@@ -1191,7 +1211,21 @@ fn call_in_vm_inner(vm: &Vm, source: &str, call: &Call) -> Result<serde_json::Va
     ctx.set("runtime", vm.version).map_err(internal)?;
     ctx.set("attempt", call.attempt.max(1)).map_err(internal)?;
 
-    let event = lua.to_value(&call.event).map_err(internal)?;
+    let user_event;
+    let event_value = if call.trigger == Trigger::User {
+        let metadata: mlua::Value = module
+            .get("user_trigger")
+            .map_err(|e| Error::Script(e.to_string()))?;
+        let metadata = crate::user_trigger::Metadata::parse(
+            lua.from_value(metadata)
+                .map_err(|e| Error::Script(e.to_string()))?,
+        )?;
+        user_event = metadata.arguments(call.event.clone())?;
+        &user_event
+    } else {
+        &call.event
+    };
+    let event = lua.to_value(event_value).map_err(internal)?;
     // `xpcall` runs our handler at the point of the error, while the Luau stack still exists.
     let capture = vm.capture.clone();
     let on_err = lua
@@ -2259,6 +2293,51 @@ pub(crate) mod tests {
             e.invoke(inv(Trigger::Invoke, json!(null))).await.unwrap(),
             json!(5)
         );
+    }
+
+    #[tokio::test]
+    async fn user_trigger_validates_and_applies_defaults_before_calling_handler() {
+        let e = engine(
+            r#"--!runtime 1
+            return {
+                user_trigger = { title = "Greet", arguments = {
+                    { name = "name", label = "Name", type = "string", required = true },
+                    { name = "loud", label = "Loud", type = "boolean", default = false },
+                } },
+                on_user_trigger = function(ctx, args)
+                    return { trigger = ctx.trigger, name = args.name, loud = args.loud }
+                end,
+            }"#,
+            Limits::default(),
+        );
+        let metadata = e.describe_user_trigger("acme", "s", None).await.unwrap();
+        assert_eq!(metadata["title"], "Greet");
+        let result = e
+            .invoke(inv(Trigger::User, json!({"name":"Aino"})))
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"trigger":"user","name":"Aino","loud":false}));
+        assert!(e
+            .invoke(inv(Trigger::User, json!({"name": 42})))
+            .await
+            .is_err());
+        assert!(e
+            .invoke(inv(Trigger::User, json!({"name":"Aino", "extra": true})))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn user_trigger_rejects_non_opted_in_module_before_side_effects() {
+        let store = Arc::new(MemBackend::default());
+        let e = engine_cfg(
+            "ig.store.Out.put('unexpected', 'value'); return { handle = function() return true end }",
+            Limits::default(),
+            r#"{"stores":{"Out":"readwrite"}}"#,
+        )
+        .with_store("Out", store.clone(), "data/");
+        assert!(e.invoke(inv(Trigger::User, json!({}))).await.is_err());
+        assert!(store.0.lock().unwrap().is_empty());
     }
 
     /// A tenant with `flow_logs` gets one segment per invocation under its trace id, and the first

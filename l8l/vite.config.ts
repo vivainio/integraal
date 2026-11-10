@@ -7,6 +7,45 @@ function localIntegraal(): Plugin {
   return {
     name: 'local-integraal',
     configureServer(server) {
+      server.middlewares.use('/__local/scripts', async (req, res) => {
+        const reply = (status: number, body: unknown) => {
+          res.statusCode = status
+          res.setHeader('content-type', 'application/json')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify(body))
+        }
+        const origin = req.headers.origin
+        if (origin && origin !== `http://${req.headers.host}`) return reply(403, { error: 'Cross-origin requests are not allowed' })
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const list = url.pathname === '/' || url.pathname === ''
+        const match = /^\/([a-zA-Z0-9_.-]+)\/trigger$/.exec(url.pathname)
+        if ((!list && !match) || (list && req.method !== 'GET') || (!list && req.method !== 'GET' && req.method !== 'POST')) return reply(404, { error: 'Not found' })
+        const version = url.searchParams.get('version')
+        if (version && !/^[a-zA-Z0-9_.-]+$/.test(version)) return reply(400, { error: 'Invalid version' })
+        try {
+          let body: string | undefined
+          if (req.method === 'POST') {
+            if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) return reply(415, { error: 'Expected JSON' })
+            let size = 0
+            const chunks: Buffer[] = []
+            for await (const chunk of req) {
+              const bytes = Buffer.from(chunk); size += bytes.length
+              if (size > 65536) return reply(413, { error: 'Request body too large' })
+              chunks.push(bytes)
+            }
+            body = Buffer.concat(chunks).toString('utf8')
+          }
+          const target = list ? '/scripts/acme' : `/triggers/acme/${match![1]}${version ? `?version=${encodeURIComponent(version)}` : ''}`
+          const result = await fetch(`http://127.0.0.1:9091${target}`, {
+            method: req.method, headers: body === undefined ? undefined : { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(30_000),
+          })
+          const data = await result.json()
+          return reply(result.status, !result.ok || list || req.method === 'POST' ? data : { result: data })
+        } catch (error) {
+          console.error('Local Integraal trigger failed:', error)
+          return reply(502, { error: 'Cannot reach local Integraal.' })
+        }
+      })
       server.middlewares.use('/__local/flows', async (req, res) => {
         const reply = (status: number, body: unknown) => {
           res.statusCode = status

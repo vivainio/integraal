@@ -11,4 +11,14 @@ local function handle(_ctx: Context, event: { batch_id: string })
     ig.log("info", "dispatched " .. tostring(count) .. " queued tasks")
     return { queued = count }
 end
-return { handle = handle }
+return {
+    handle = handle,
+    on_user_trigger = handle,
+    user_trigger = {
+        title = "Dispatch a batch",
+        description = "Send three queued tasks and inspect their shared flow.",
+        arguments = {
+            { name = "batch_id", label = "Batch ID", type = "string", required = true },
+        },
+    },
+}

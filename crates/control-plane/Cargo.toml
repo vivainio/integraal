@@ -8,6 +8,8 @@ name = "bootstrap"
 path = "src/main.rs"
 
 [dependencies]
+aws-sdk-lambda = "1"
+aws-config.workspace = true
 integraal-core.workspace = true
 integraal-loader.workspace = true
 lambda_runtime = "0.13"

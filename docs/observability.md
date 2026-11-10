@@ -118,6 +118,11 @@ so only processes on the same host (or its container) can connect. From elsewher
 | `GET /debug/{tenant}/{trace}` | the [debug captures](#debug-captures) of the flow's watched invocations (needs `debug`) |
 | `GET /running` | the invocations in flight in this process (tenant, script, trigger, attempt, trace id, span id, `start_ms`, `running_ms`), longest-running first |
 
+The listener remains read-only by default. Setting `local_api.user_triggers` to `true` also
+exposes `GET /scripts/{tenant}` and `GET`/`POST /triggers/{tenant}/{script}` to any process on
+this host. The POST invokes tenant code. See
+[User triggers](user-triggers.md); keep this listener on a trusted host.
+
 Two limits to know when reading these:
 
 - `running` lists only this process's invocations. A flow log segment is written when an invocation

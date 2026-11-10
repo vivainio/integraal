@@ -9,6 +9,12 @@ Parameters:
     Type: String
   JwtAudience:
     Type: String
+  TriggerScope:
+    Type: String
+    Description: OAuth access-token scope required to run scripts
+  RuntimeCodeKey:
+    Type: String
+    Description: S3 key of the runtime Lambda zip
   AccessScope:
     Type: String
     Description: OAuth access-token scope required for control-plane routes
@@ -161,6 +167,59 @@ Resources:
                   - sqs:SendMessage
                   - sqs:GetQueueAttributes
                 Resource: !GetAtt WorkQueue.Arn
+  RuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RuntimeResources
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource:
+                  - !GetAtt ScriptsBucket.Arn
+                  - !GetAtt DataBucket.Arn
+                  - !GetAtt FlowLogsBucket.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub ${ScriptsBucket.Arn}/*
+                  - !Sub ${DataBucket.Arn}/*
+                  - !Sub ${FlowLogsBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub ${DataBucket.Arn}/*
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${FlowLogsBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource: !GetAtt StateTable.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:SendMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt WorkQueue.Arn
   ControlRole:
     Type: AWS::IAM::Role
     Properties:
@@ -195,6 +254,13 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:Query
                 Resource: !GetAtt StateTable.Arn
+        - PolicyName: InvokeRuntime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt RuntimeFunction.Arn
   TaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -310,6 +376,22 @@ Resources:
         Arn: !GetAtt WorkQueue.Arn
         RoleArn: !GetAtt SchedulerRole.Arn
         Input: '{"type":"system.tick","every":"day","at":"<aws.scheduler.scheduled-time>"}'
+  RuntimeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref RuntimeCodeKey
+      Handler: bootstrap
+      Runtime: provided.al2023
+      Architectures:
+        - arm64
+      Role: !GetAtt RuntimeRole.Arn
+      Timeout: 25
+      MemorySize: 512
+      Environment:
+        Variables:
+          INTEGRAAL_RUNTIME_CONFIG: !Sub '{"scripts":{"bucket":"${ScriptsBucket}"},"stores":{"Data":{"type":"s3","bucket":"${DataBucket}","prefix":"tenants/"}},"flow_logs":{"bucket":"${FlowLogsBucket}"},"db":{"table":"${StateTable}"},"queue":{"url":"${WorkQueue}"}}'
   ControlFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -326,6 +408,7 @@ Resources:
       Environment:
         Variables:
           INTEGRAAL_CONTROL_CONFIG: !Sub '{"scripts":{"bucket":"${ScriptsBucket}"},"stores":{"Data":{"type":"s3","bucket":"${DataBucket}","prefix":"tenants/"}},"flow_logs":{"bucket":"${FlowLogsBucket}"},"db":{"table":"${StateTable}"},"queue":{"url":"${WorkQueue}"}}'
+          INTEGRAAL_RUNTIME_FUNCTION: !GetAtt RuntimeFunction.Arn
   ControlApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
@@ -339,6 +422,7 @@ Resources:
           - content-type
         AllowMethods:
           - GET
+          - POST
           - OPTIONS
         MaxAge: 300
   JwtAuthorizer:
@@ -390,6 +474,50 @@ Resources:
       AuthorizationScopes:
         - !Ref AccessScope
       Target: !Sub integrations/${LambdaIntegration}
+  ScriptsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ControlApi
+      RouteKey: GET /scripts
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - !Ref AccessScope
+      Target: !Sub integrations/${LambdaIntegration}
+  TriggerMetadataRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ControlApi
+      RouteKey: GET /scripts/{script}/trigger
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - !Ref AccessScope
+      Target: !Sub integrations/${LambdaIntegration}
+  TriggerRunRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ControlApi
+      RouteKey: POST /scripts/{script}/trigger
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - !Ref TriggerScope
+      Target: !Sub integrations/${LambdaIntegration}
+  GatewayScriptReadPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ControlFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ControlApi}/$default/GET/scripts*
+  GatewayScriptRunPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ControlFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ControlApi}/$default/POST/scripts/*/trigger
   DefaultStage:
     Type: AWS::ApiGatewayV2::Stage
     Properties:

@@ -38,4 +38,15 @@ local function handle(_ctx: Context, event: { id: string })
     })
 end
 
-return { workflow = workflow, handle = handle }
+return {
+    workflow = workflow,
+    handle = handle,
+    on_user_trigger = handle,
+    user_trigger = {
+        title = "Run order workflow",
+        description = "Start the durable order workflow. Use a unique run ID for each new run.",
+        arguments = {
+            { name = "id", label = "Unique run ID", type = "string", required = true },
+        },
+    },
+}

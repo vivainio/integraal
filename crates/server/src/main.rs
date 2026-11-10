@@ -111,11 +111,15 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(l) = &cfg.local_api {
         let engine = engine.clone();
+        let catalog = integraal_core::catalog::ScriptCatalog::from_config(&cfg).await;
+        let user_triggers = l.user_triggers;
         // Loopback only: reaching the port at all is the access check.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", l.port)).await?;
         tracing::info!(port = %l.port, "local api listening");
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, local_router(engine)).await {
+            if let Err(e) =
+                axum::serve(listener, local_router(engine, catalog, user_triggers)).await
+            {
                 tracing::error!(error = %e, "local api stopped");
             }
         });
@@ -204,7 +208,11 @@ async fn debug_command(cfg: &GlobalConfig, args: &[String]) -> anyhow::Result<()
 /// - `GET /flows/{tenant}/{trace}/state`           what the flow is waiting on: timers, barriers, callbacks, batch jobs
 /// - `GET /debug/{tenant}/{trace}`                 captures of watched invocations (needs `debug`)
 /// - `GET /running`                                invocations in flight in this process
-fn local_router(engine: Engine) -> Router {
+fn local_router(
+    engine: Engine,
+    catalog: integraal_core::catalog::ScriptCatalog,
+    user_triggers: bool,
+) -> Router {
     let sink = engine
         .flow_logs()
         .expect("config validation requires flow_logs")
@@ -214,12 +222,81 @@ fn local_router(engine: Engine) -> Router {
         .route("/flows/{tenant}/{trace}", get(local_show))
         .route("/flows/{tenant}/{trace}/summary", get(local_summary))
         .with_state(sink);
-    Router::new()
+    let mut routes = Router::new()
         .route("/running", get(local_running))
         .route("/flows/{tenant}/{trace}/state", get(local_state))
-        .route("/debug/{tenant}/{trace}", get(local_debug))
-        .with_state(engine)
-        .merge(flows)
+        .route("/debug/{tenant}/{trace}", get(local_debug));
+    if user_triggers {
+        routes = routes.route(
+            "/triggers/{tenant}/{script}",
+            get(local_trigger_metadata).post(local_trigger_run),
+        );
+    }
+    let routes = routes.with_state(engine).merge(flows);
+    if user_triggers {
+        routes.merge(
+            Router::new()
+                .route("/scripts/{tenant}", get(local_scripts))
+                .with_state(catalog),
+        )
+    } else {
+        routes
+    }
+}
+
+async fn local_scripts(
+    State(catalog): State<integraal_core::catalog::ScriptCatalog>,
+    Path(tenant): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    match catalog.list(&tenant).await {
+        Ok(scripts) => (StatusCode::OK, Json(json!({"scripts": scripts}))),
+        Err(error) => (
+            status_for(&error),
+            Json(json!({"error": error.to_string()})),
+        ),
+    }
+}
+
+async fn local_trigger_metadata(
+    State(engine): State<Engine>,
+    Path((tenant, script)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<Value>) {
+    match engine
+        .describe_user_trigger(&tenant, &script, q.get("version").map(String::as_str))
+        .await
+    {
+        Ok(result) => (StatusCode::OK, Json(result)),
+        Err(error) => (
+            status_for(&error),
+            Json(json!({"error": error.to_string()})),
+        ),
+    }
+}
+
+async fn local_trigger_run(
+    State(engine): State<Engine>,
+    Path((tenant, script)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Json(event): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let inv = Invocation {
+        capabilities: None,
+        tenant,
+        script: Some(script),
+        version: q.get("version").cloned(),
+        trigger: Trigger::User,
+        event,
+        attempt: 0,
+        continues_trace: false,
+    };
+    match engine.invoke(inv).await {
+        Ok(result) => (StatusCode::OK, Json(json!({"result": result}))),
+        Err(error) => (
+            status_for(&error),
+            Json(json!({"error": error.to_string()})),
+        ),
+    }
 }
 
 async fn local_running(State(engine): State<Engine>) -> AdminResult {
